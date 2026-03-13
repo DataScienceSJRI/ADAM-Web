@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Debug/output CSVs
+backend/*_debug.csv
+backend/base_outputs/
+Menu_pref.csv
+
+# Misc
+.DS_Store
