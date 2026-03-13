@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+supabase==2.9.1
+websockets>=13.0,<16.0
+python-dotenv
+pandas
+numpy
+openpyxl
+pulp
+pydantic
