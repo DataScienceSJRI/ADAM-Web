@@ -147,6 +147,11 @@ export function MealPreferencesForm({
     );
   }, [rows, currentSubTab, search]);
 
+  const incompleteMealTimes = MEAL_TIMES.filter(
+    (mt) => selections.filter((s) => s.meal_time === mt).length < 3
+  );
+  const canProceed = incompleteMealTimes.length === 0;
+
   return (
     <Card>
       <CardHeader>
@@ -242,39 +247,31 @@ export function MealPreferencesForm({
           )}
         </div>
 
-        {(() => {
-          const incomplete = MEAL_TIMES.filter(
-            (mt) => selections.filter((s) => s.meal_time === mt).length < 3
-          );
-          const canProceed = incomplete.length === 0;
-          return (
-            <div className="space-y-2 pt-2">
-              {!canProceed && (
-                <div className="flex flex-wrap gap-1.5">
-                  {incomplete.map((mt) => {
-                    const count = selections.filter((s) => s.meal_time === mt).length;
-                    return (
-                      <span
-                        key={mt}
-                        className="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground"
-                      >
-                        {mt}: {count}/3
-                      </span>
-                    );
-                  })}
-                </div>
-              )}
-              <div className="flex justify-between items-center">
-                <Button variant="outline" onClick={onBack}>
-                  ← Back
-                </Button>
-                <Button onClick={onNext} disabled={!canProceed}>
-                  Next →
-                </Button>
-              </div>
+        <div className="space-y-2 pt-2">
+          {!canProceed && (
+            <div className="flex flex-wrap gap-1.5">
+              {incompleteMealTimes.map((mt) => {
+                const count = selections.filter((s) => s.meal_time === mt).length;
+                return (
+                  <span
+                    key={mt}
+                    className="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground"
+                  >
+                    {mt}: {count}/3
+                  </span>
+                );
+              })}
             </div>
-          );
-        })()}
+          )}
+          <div className="flex justify-between items-center">
+            <Button variant="outline" onClick={onBack}>
+              ← Back
+            </Button>
+            <Button onClick={onNext} disabled={!canProceed}>
+              Next →
+            </Button>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );
