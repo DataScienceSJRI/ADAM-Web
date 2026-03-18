@@ -166,7 +166,7 @@ export function BasicDetailsForm({
             step="0.1"
             value={form.Hba1c || ""}
             onChange={(e) => update("Hba1c", parseFloat(e.target.value) || 0)}
-            placeholder="e.g. 5.4"
+            placeholder="e.g. 5"
           />
         </div>
 

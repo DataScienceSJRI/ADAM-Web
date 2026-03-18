@@ -1,5 +1,4 @@
 import uuid
-import time
 import logging
 import pandas as pd
 from datetime import date, timedelta
@@ -45,9 +44,6 @@ def write_recommendations(
 
     today = date.today()
     rows = []
-    # base integer key for Pkey generation (milliseconds)
-    base_pkey = int(time.time() * 1000)
-
     for _, row in weekly_menu.iterrows():
         day_num = int(row.get("Day", 1))
         meal_date = (today + timedelta(days=day_num - 1)).isoformat()
@@ -77,7 +73,6 @@ def write_recommendations(
         portion_desc = str(desc_raw).strip() if desc_raw and str(desc_raw).strip().lower() not in ("nan", "none", "") else "serving"
 
         rows.append({
-            "Pkey": base_pkey + len(rows),
             "user_id": user_id,
             "plan_id": plan_id,
             "WeekNo": week_no,

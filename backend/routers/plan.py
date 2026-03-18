@@ -56,7 +56,7 @@ class ModelOptimiser(ADAMPersonalizationModel):
 
 
 @router.post("", response_model=GeneratePlanResponse)
-async def generate_plan(
+def generate_plan(
     body: GeneratePlanRequest = GeneratePlanRequest(),
     user_id: str = Depends(get_current_user),
 ):

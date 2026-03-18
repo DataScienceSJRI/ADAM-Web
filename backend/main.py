@@ -29,5 +29,11 @@ app.include_router(plan.router)
 
 @app.get("/health")
 def health():
-    logger.debug("Health check requested")
-    return {"status": "ok"}
+    from core.supabase import get_supabase
+    try:
+        get_supabase().table("Recipe").select("Recipe_Code").limit(1).execute()
+        db = "ok"
+    except Exception as exc:
+        logger.error("Health check: Supabase unreachable: %s", exc)
+        db = "unreachable"
+    return {"status": "ok" if db == "ok" else "degraded", "db": db}

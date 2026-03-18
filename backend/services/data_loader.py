@@ -3,9 +3,12 @@ Fetches all dataset tables from Supabase and returns the same dict-of-DataFrames
 structure that Functions_Base.load_data() would produce from local CSVs.
 """
 
+import logging
 import pandas as pd
 from typing import Optional
 from core.supabase import get_supabase
+
+logger = logging.getLogger("backend.data_loader")
 
 
 _FETCH_LIMIT = 5000  # Supabase PostgREST default max is 1000; raise to cover full datasets
@@ -132,7 +135,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None) -> dic
                             ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(codes)
                         ].copy()
     except Exception:
-        pass
+        logger.exception("Vegetarian recipe filtering failed for user_id=%s — serving unfiltered recipes", user_id)
 
     # Exclude recipes the user has explicitly disliked in previous plans
     try:
@@ -152,7 +155,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None) -> dic
                         ~rt["Recipe_Code"].astype(str).str.strip().str.upper().isin(disliked_codes)
                     ].copy()
     except Exception:
-        pass
+        logger.exception("Disliked recipe exclusion failed for user_id=%s — disliked recipes may reappear", user_id)
 
     return ds
 
