@@ -8,3 +8,4 @@ numpy
 openpyxl
 pulp
 pydantic
+PyJWT>=2.8.0
