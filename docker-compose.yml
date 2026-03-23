@@ -11,6 +11,7 @@ services:
       SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       ALLOWED_ORIGINS: http://localhost:3000
+      PYTHONUNBUFFERED: "1"
 
   frontend:
     build:
