@@ -63,12 +63,15 @@ export default function PlanPage() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+
     async function init() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user?.email) { setLoading(false); return; }
+      if (!mounted || !user?.email) { setLoading(false); return; }
 
       const initial = await fetchPlanCards(user.email);
+      if (!mounted) return;
       setPlans(initial);
       initialCountRef.current = initial.length;
       setLoading(false);
@@ -77,7 +80,9 @@ export default function PlanPage() {
 
       // Start polling — stop when plan count grows
       pollRef.current = setInterval(async () => {
+        if (!mounted) { stopPolling(); return; }
         const updated = await fetchPlanCards(user.email!);
+        if (!mounted) return;
         if (updated.length > (initialCountRef.current ?? 0)) {
           setPlans(updated);
           setGenerating(false);
@@ -88,6 +93,7 @@ export default function PlanPage() {
 
       // Timeout fallback
       timeoutRef.current = setTimeout(() => {
+        if (!mounted) return;
         stopPolling();
         setGenerating(false);
         setTimedOut(true);
@@ -95,7 +101,7 @@ export default function PlanPage() {
     }
 
     init();
-    return stopPolling;
+    return () => { mounted = false; stopPolling(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
