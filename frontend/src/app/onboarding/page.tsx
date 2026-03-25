@@ -68,7 +68,7 @@ export default function OnboardingPage() {
       .from("BE_Preference_onboarding_details")
       .insert({
         dietary_type,
-        diet_restrictions: JSON.stringify(diet_restrictions),
+        diet_restrictions: diet_restrictions.length > 0 ? diet_restrictions.join(", ") : null,
         breakfast_time: toTimestamp(breakfast_time),
         lunch_time: toTimestamp(lunch_time),
         dinner_time: toTimestamp(dinner_time),

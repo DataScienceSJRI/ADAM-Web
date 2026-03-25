@@ -119,7 +119,7 @@ export default function PlanPage() {
           <div className="h-10 w-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
           <p className="text-base font-medium">Generating your personalised meal plan…</p>
           <p className="text-sm text-muted-foreground max-w-xs">
-            This usually takes 30–60 seconds. Please keep this page open.
+            This usually takes 5 minutes. Please keep this page open.
           </p>
         </div>
       </div>
