@@ -9,10 +9,11 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
-from services.data_loader import load_data_from_supabase
+from services.data_loader import _fetch, load_data_from_supabase
 from services.profile_builder import build_profile
 from services.recommendation_writer import write_recommendations, get_plan_status
 import logging
+
 
 logger = logging.getLogger("backend.routers.plan")
 from services.lp_optimizer import run_lp
@@ -80,6 +81,9 @@ def generate_plan(
                 user_preference="yes",
                 profile=profile,
             )
+
+            recipes_df = _fetch("Recipes")
+            recdf = _fetch("Rec_ADAM_yes_no")
 
             # weekly_menu and top_personalized_choices are DataFrames in the returned dict.
             # weekly_optimization_summary is a JSON file path — read it while tmpdir exists.
