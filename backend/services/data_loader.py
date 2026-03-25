@@ -15,21 +15,39 @@ _FETCH_LIMIT = 5000  # Supabase PostgREST default max is 1000; raise to cover fu
 
 
 def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
-    """Fetch all rows from a Supabase table, return as DataFrame."""
+    """Fetch all rows using pagination."""
     try:
         supabase = get_supabase()
-        query = supabase.table(table).select("*").limit(_FETCH_LIMIT)
-        if filters:
-            for col, val in filters.items():
-                query = query.eq(col, val)
-        response = query.execute()
-        if response.data:
-            return pd.DataFrame(response.data)
-        return pd.DataFrame()
+        all_rows = []
+        batch_size = 1000
+        start = 0
+
+        while True:
+            query = supabase.table(table).select("*").range(start, start + batch_size - 1)
+
+            if filters:
+                for col, val in filters.items():
+                    query = query.eq(col, val)
+
+            response = query.execute()
+            data = response.data
+
+            if not data:
+                break
+
+            all_rows.extend(data)
+
+            if len(data) < batch_size:
+                break
+
+            start += batch_size
+
+        return pd.DataFrame(all_rows)
+
     except Exception as e:
         print(f"[WARN] Failed to fetch {table}: {e}")
         return pd.DataFrame()
-
+    
 
 _RECIPE_NUMERIC_COLS = [
     "Energy_ENERC_Kcal", "Energy_ENERC_KJ",
