@@ -25,6 +25,7 @@ type PlanOption = {
   start_date: string | null;
   end_date: string | null;
   row_count: number;
+  max_pkey: number;
 };
 
 type UserComment = {
@@ -76,17 +77,18 @@ export default function RecommendationsPage() {
     for (const row of allRows) {
       const pid = row.plan_id ?? "unknown";
       if (!planMap.has(pid)) {
-        planMap.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0 });
+        planMap.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey });
       }
       const p = planMap.get(pid)!;
       p.row_count++;
+      if (row.Pkey > p.max_pkey) p.max_pkey = row.Pkey;
       if (row.Date) {
         if (!p.start_date || row.Date < p.start_date) p.start_date = row.Date;
         if (!p.end_date || row.Date > p.end_date) p.end_date = row.Date;
       }
     }
     const planList = [...planMap.values()].sort((a, b) =>
-      (b.start_date ?? "").localeCompare(a.start_date ?? "")
+      b.max_pkey - a.max_pkey
     );
 
     let selectedPlanId: string | null = null;

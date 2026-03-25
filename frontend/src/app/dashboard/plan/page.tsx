@@ -10,6 +10,7 @@ type PlanCard = {
   start_date: string | null;
   end_date: string | null;
   row_count: number;
+  max_pkey: number;
 };
 
 const POLL_INTERVAL_MS = 5000;
@@ -19,7 +20,7 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   const supabase = createClient();
   const { data } = await supabase
     .from("Recommendation")
-    .select("plan_id, Date")
+    .select("Pkey, plan_id, Date")
     .eq("user_id", email)
     .limit(5000);
 
@@ -29,10 +30,11 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   for (const row of data) {
     const pid = row.plan_id ?? "unknown";
     if (!map.has(pid)) {
-      map.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0 });
+      map.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey ?? 0 });
     }
     const p = map.get(pid)!;
     p.row_count++;
+    if ((row.Pkey ?? 0) > p.max_pkey) p.max_pkey = row.Pkey ?? 0;
     if (row.Date) {
       if (!p.start_date || row.Date < p.start_date) p.start_date = row.Date;
       if (!p.end_date || row.Date > p.end_date) p.end_date = row.Date;
@@ -40,7 +42,7 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   }
 
   return [...map.values()].sort((a, b) =>
-    (b.start_date ?? "").localeCompare(a.start_date ?? "")
+    b.max_pkey - a.max_pkey
   );
 }
 
