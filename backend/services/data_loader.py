@@ -43,7 +43,7 @@ _RECIPE_NUMERIC_COLS = [
 ]
 
 
-def load_data_from_supabase(user_id: str, profile: Optional[dict] = None) -> dict:
+def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboarding_id: str | None = None) -> dict:
     """
     Builds the same `ds` dict that Functions_Base.load_data() returns,
     but sourced from Supabase instead of local CSV files.
@@ -72,7 +72,10 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None) -> dic
     ds["recipe_ingredients"] = _fetch("RecipeINGDBFormat")
     ds["sub_category_gi_gl"] = _fetch_gi_gl()
 
-    prefs = _fetch("BE_Preference_onboarding", {"user_id": user_id})
+    _pref_filters: dict = {"user_id": user_id}
+    if onboarding_id:
+        _pref_filters["onboarding_id"] = onboarding_id
+    prefs = _fetch("BE_Preference_onboarding", _pref_filters)
     if not prefs.empty:
         prefs = prefs.rename(columns={"user_id": "UID"})
         if "Reaction" in prefs.columns:

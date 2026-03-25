@@ -12,7 +12,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, UtensilsCrossed, Heart, ClipboardList, CalendarDays } from "lucide-react";
+import { LayoutDashboard, UtensilsCrossed, Heart, ClipboardList, CalendarDays, History } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserNav } from "./user-nav";
@@ -22,6 +22,7 @@ const navItems = [
   { title: "Preferences", href: "/dashboard/preferences", icon: Heart },
   { title: "My Plans", href: "/dashboard/plan", icon: CalendarDays },
   { title: "Recommendations", href: "/dashboard/recommendations", icon: LayoutDashboard },
+  { title: "Session History", href: "/dashboard/sessions", icon: History },
 ];
 
 export function AppSidebar() {

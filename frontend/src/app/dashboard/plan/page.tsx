@@ -20,7 +20,8 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   const { data } = await supabase
     .from("Recommendation")
     .select("plan_id, Date")
-    .eq("user_id", email);
+    .eq("user_id", email)
+    .limit(5000);
 
   if (!data || data.length === 0) return [];
 

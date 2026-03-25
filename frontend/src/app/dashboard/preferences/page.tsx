@@ -44,7 +44,8 @@ export default function PreferencesPage() {
           .from("BE_Preference_onboarding")
           .select("id, meal_time, dish_type, sub_category, Reaction")
           .eq("user_id", user.email)
-          .order("id", { ascending: true }),
+          .order("id", { ascending: true })
+          .limit(5000),
         supabase
           .from("BE_Preference_onboarding_details")
           .select("id, breakfast_time, lunch_time, dinner_time, dietary_type, step_count, diet_restrictions")
@@ -52,7 +53,8 @@ export default function PreferencesPage() {
           .maybeSingle(),
         supabase
           .from("SubCategory_Onboarding")
-          .select("Code, SubCategory"),
+          .select("Code, SubCategory")
+          .limit(5000),
       ]);
 
       if (cancelled) return;

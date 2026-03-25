@@ -21,7 +21,7 @@ def _get_age_group_col(gender: str, activity: str) -> str:
     return f"{gender_prefix}_{level}"
 
 
-def build_profile(user_id: str) -> Optional[dict]:
+def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[dict]:
     """
     Fetch user details from Supabase and return a profile dict
     compatible with Functions_Base.run() and optimize_weekly_menu_with_constraints().
@@ -29,14 +29,10 @@ def build_profile(user_id: str) -> Optional[dict]:
     """
     supabase = get_supabase()
 
-    bd_resp = (
-        supabase.table("BE_Basic_Details")
-        .select("*")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
+    bd_query = supabase.table("BE_Basic_Details").select("*").eq("user_id", user_id)
+    if onboarding_id:
+        bd_query = bd_query.eq("onboarding_id", onboarding_id)
+    bd_resp = bd_query.order("created_at", desc=True).limit(1).execute()
     if not bd_resp.data:
         return None
 
@@ -49,14 +45,14 @@ def build_profile(user_id: str) -> Optional[dict]:
     hba1c = bd.get("Hba1c")
     activity = bd.get("Activity_levels") or "Sedentary"
 
-    pref_details_resp = (
+    pref_query = (
         supabase.table("BE_Preference_onboarding_details")
         .select("diet_restrictions, breakfast_time, lunch_time, dinner_time")
         .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
     )
+    if onboarding_id:
+        pref_query = pref_query.eq("onboarding_id", onboarding_id)
+    pref_details_resp = pref_query.order("created_at", desc=True).limit(1).execute()
     pref_row = pref_details_resp.data[0] if pref_details_resp.data else {}
 
     _restriction_map = {

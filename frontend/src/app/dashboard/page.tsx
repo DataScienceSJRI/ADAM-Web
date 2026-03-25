@@ -26,11 +26,13 @@ export default async function DashboardPage() {
         .select("*")
         .order("user_id", { ascending: true })
         .order("WeekNo", { ascending: true })
-        .order("Date", { ascending: true }),
+        .order("Date", { ascending: true })
+        .limit(5000),
       supabase
         .from("UserComments")
         .select("id, user_id, comment, created_at, date")
-        .order("created_at", { ascending: true }),
+        .order("created_at", { ascending: true })
+        .limit(5000),
     ]);
 
   if (commentsError) {

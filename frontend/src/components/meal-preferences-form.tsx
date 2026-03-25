@@ -85,6 +85,7 @@ export function MealPreferencesForm({
     createClient()
       .from("SubCategory_Onboarding")
       .select("Code, SubCategory, MainCategoryCode, Breakfast, Side_dish_breakfast, Lunch, Side_dish_lunch, Dinner, Side_dish_dinner, Snacks, Beverage")
+      .limit(5000)
       .then(({ data }) => {
         setRows((data as SubCategoryRow[]) ?? []);
         setLoading(false);

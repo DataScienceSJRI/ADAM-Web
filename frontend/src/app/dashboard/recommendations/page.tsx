@@ -31,6 +31,7 @@ type UserComment = {
   id: number | null;
   date: string;
   comment: string;
+  plan_id: string | null;
 };
 
 const MEAL_ORDER = ["Breakfast", "Lunch", "Dinner", "Snacks"];
@@ -60,7 +61,8 @@ export default function RecommendationsPage() {
       .select("Pkey, plan_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal, Reaction, Combo_Reaction")
       .eq("user_id", user.email)
       .order("Date", { ascending: true })
-      .order("Pkey", { ascending: true });
+      .order("Pkey", { ascending: true })
+      .limit(5000);
 
     if (err) {
       setError(err.message);
@@ -69,7 +71,6 @@ export default function RecommendationsPage() {
     }
 
     const allRows = (data as RecommendationRow[]) ?? [];
-    setRows(allRows);
 
     const planMap = new Map<string, PlanOption>();
     for (const row of allRows) {
@@ -87,27 +88,35 @@ export default function RecommendationsPage() {
     const planList = [...planMap.values()].sort((a, b) =>
       (b.start_date ?? "").localeCompare(a.start_date ?? "")
     );
-    setPlans(planList);
 
+    let selectedPlanId: string | null = null;
+    let firstWeek: number | null = null;
     if (planList.length > 0) {
       const matched = planParam ? planList.find((p) => p.plan_id === planParam) : null;
-      const selectedPlanId = (matched ?? planList[0]).plan_id;
-      setActivePlanId(selectedPlanId);
+      selectedPlanId = (matched ?? planList[0]).plan_id;
       const planRows = allRows.filter((r) => (r.plan_id ?? "unknown") === selectedPlanId);
-      const firstWeek = planRows[0]?.WeekNo ?? null;
-      setActiveWeek(firstWeek);
+      firstWeek = planRows[0]?.WeekNo ?? null;
     }
 
     const { data: commentData } = await supabase
       .from("UserComments")
-      .select("id, date, comment")
-      .eq("user_id", user.email);
+      .select("id, date, comment, plan_id")
+      .eq("user_id", user.email)
+      .limit(5000);
     const commentMap: Record<string, UserComment> = {};
     for (const c of commentData ?? []) {
-      if (c.date) commentMap[c.date] = { id: c.id, date: c.date, comment: c.comment ?? "" };
+      if (c.date) {
+        const key = c.plan_id ? `${c.plan_id}:${c.date}` : c.date;
+        commentMap[key] = { id: c.id, date: c.date, comment: c.comment ?? "", plan_id: c.plan_id ?? null };
+      }
     }
-    setComments(commentMap);
 
+    // Batch all state updates together to avoid cascading renders
+    setRows(allRows);
+    setPlans(planList);
+    setActivePlanId(selectedPlanId);
+    setActiveWeek(firstWeek);
+    setComments(commentMap);
     setLoading(false);
   }, [planParam]);
 
@@ -160,17 +169,18 @@ export default function RecommendationsPage() {
     const email = userEmailRef.current;
     if (!email) return;
     const supabase = createClient();
-    const existing = comments[date];
+    const commentKey = activePlanId ? `${activePlanId}:${date}` : date;
+    const existing = comments[commentKey];
     if (existing?.id != null) {
-      await supabase.from("UserComments").update({ comment: text }).eq("id", existing.id);
-      setComments((prev) => ({ ...prev, [date]: { ...existing, comment: text } }));
+      await supabase.from("UserComments").update({ comment: text, plan_id: activePlanId }).eq("id", existing.id);
+      setComments((prev) => ({ ...prev, [commentKey]: { ...existing, comment: text, plan_id: activePlanId } }));
     } else {
       const { data } = await supabase
         .from("UserComments")
-        .insert({ user_id: email, date, comment: text })
+        .insert({ user_id: email, date, comment: text, plan_id: activePlanId })
         .select("id")
         .single();
-      setComments((prev) => ({ ...prev, [date]: { id: data?.id ?? null, date, comment: text } }));
+      setComments((prev) => ({ ...prev, [commentKey]: { id: data?.id ?? null, date, comment: text, plan_id: activePlanId } }));
     }
   }
 
@@ -411,7 +421,9 @@ export default function RecommendationsPage() {
               {/* Daily comment */}
               <DayComment
                 date={date}
-                initial={comments[date]?.comment ?? ""}
+                initial={
+                  comments[activePlanId ? `${activePlanId}:${date}` : date]?.comment ?? ""
+                }
                 onSave={(text) => handleCommentSave(date, text)}
               />
             </section>

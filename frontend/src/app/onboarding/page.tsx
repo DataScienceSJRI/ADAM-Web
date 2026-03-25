@@ -37,6 +37,13 @@ export default function OnboardingPage() {
       return;
     }
 
+    const onboardingId = crypto.randomUUID();
+
+    // Creating session record for traceability
+    await supabase
+      .from("BE_Onboarding_Sessions")
+      .insert({ onboarding_id: onboardingId, user_id: user.email });
+
     const {
       diet_restrictions,
       breakfast_time,
@@ -47,7 +54,7 @@ export default function OnboardingPage() {
     } = basicDetails;
     const { error: bdError } = await supabase
       .from("BE_Basic_Details")
-      .upsert({ ...basicDetailsOnly, user_id: user.email });
+      .upsert({ ...basicDetailsOnly, user_id: user.email, onboarding_id: onboardingId });
     if (bdError) {
       setError(bdError.message);
       setSubmitting(false);
@@ -65,6 +72,7 @@ export default function OnboardingPage() {
         dinner_time: toTimestamp(dinner_time),
         step_count: step_count || null,
         user_id: user.email,
+        onboarding_id: onboardingId,
       });
     if (pdError) {
       console.warn("Could not save preference details:", pdError.message);
@@ -85,6 +93,7 @@ export default function OnboardingPage() {
             sub_category: s.sub_category,
             dish_type: s.dish_type,
             Reaction: "liked",
+            onboarding_id: onboardingId,
           }))
         );
       if (prefError) {
@@ -98,7 +107,11 @@ export default function OnboardingPage() {
       `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/plan`,
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${session?.access_token ?? ""}` },
+        headers: {
+          Authorization: `Bearer ${session?.access_token ?? ""}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ onboarding_id: onboardingId }),
       }
     ).catch(() => {/* non-fatal */});
 

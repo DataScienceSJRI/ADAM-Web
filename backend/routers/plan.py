@@ -30,12 +30,13 @@ class ModelOptimiser(ADAMPersonalizationModel):
 
     """
 
-    def __init__(self, user_id: str, workspace: str | None = None):
+    def __init__(self, user_id: str, workspace: str | None = None, onboarding_id: str | None = None):
         super().__init__(workspace=workspace)
         self._user_id = user_id
+        self._onboarding_id = onboarding_id
 
     def load_data(self, profile=None):
-        return load_data_from_supabase(self._user_id, profile)
+        return load_data_from_supabase(self._user_id, profile, onboarding_id=self._onboarding_id)
 
     def build_preference_map(self, ds, uid=None):
         prefs = super().build_preference_map(ds, uid=uid)
@@ -61,7 +62,7 @@ def generate_plan(
     user_id: str = Depends(get_current_user),
 ):
     """Generate a 7-day personalised meal plan for the authenticated user."""
-    profile = build_profile(user_id)
+    profile = build_profile(user_id, onboarding_id=body.onboarding_id)
     if profile is None:
         raise HTTPException(
             status_code=404,
@@ -70,7 +71,7 @@ def generate_plan(
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            model = ModelOptimiser(user_id=user_id, workspace=tmpdir)
+            model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
             output_paths = model.run(
                 uid=user_id,
                 top_n=10,
@@ -146,6 +147,7 @@ def generate_plan(
             user_id=user_id,
             weekly_menu=weekly_menu,
             week_no=body.week_no,
+            onboarding_id=body.onboarding_id,
         )
         logger.info("Write completed: rows_written=%d, plan_id=%s, user_id=%s", rows_written, plan_id, user_id)
     except Exception as e:
@@ -156,6 +158,7 @@ def generate_plan(
         status="ok",
         rows_written=rows_written,
         plan_id=plan_id,
+        onboarding_id=body.onboarding_id,
         optimization_status=opt_summary.get("status"),
         message=None,
     )

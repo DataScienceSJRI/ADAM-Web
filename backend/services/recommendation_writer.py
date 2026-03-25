@@ -12,6 +12,7 @@ def write_recommendations(
     user_id: str,
     weekly_menu: pd.DataFrame,
     week_no: int = 1,
+    onboarding_id: str | None = None,
 ) -> tuple[int, str]:
     """
     Writes the new weekly menu as a new plan.
@@ -72,7 +73,7 @@ def write_recommendations(
         desc_raw = tag_info.get("desc")
         portion_desc = str(desc_raw).strip() if desc_raw and str(desc_raw).strip().lower() not in ("nan", "none", "") else "serving"
 
-        rows.append({
+        row_dict = {
             "user_id": user_id,
             "plan_id": plan_id,
             "WeekNo": week_no,
@@ -83,7 +84,10 @@ def write_recommendations(
             "Food_Qty": food_qty,
             "R_desc": str(portion_desc).strip() if portion_desc else None,
             "Energy_kcal": energy,
-        })
+        }
+        if onboarding_id:
+            row_dict["onboarding_id"] = onboarding_id
+        rows.append(row_dict)
 
     if not rows:
         return 0, ""
@@ -111,7 +115,7 @@ def get_plan_status(user_id: str) -> dict:
     supabase = get_supabase()
     resp = (
         supabase.table("Recommendation")
-        .select("plan_id, WeekNo, Date")
+        .select("plan_id, onboarding_id, WeekNo, Date")
         .eq("user_id", user_id)
         .execute()
     )
@@ -121,7 +125,7 @@ def get_plan_status(user_id: str) -> dict:
     for r in data:
         pid = r.get("plan_id") or "unknown"
         if pid not in plans:
-            plans[pid] = {"plan_id": pid, "week_no": r.get("WeekNo"), "dates": [], "row_count": 0}
+            plans[pid] = {"plan_id": pid, "onboarding_id": r.get("onboarding_id"), "week_no": r.get("WeekNo"), "dates": [], "row_count": 0}
         plans[pid]["row_count"] += 1
         if r.get("Date"):
             plans[pid]["dates"].append(r["Date"])
@@ -131,6 +135,7 @@ def get_plan_status(user_id: str) -> dict:
         dates = sorted(p["dates"])
         plan_list.append({
             "plan_id": p["plan_id"],
+            "onboarding_id": p["onboarding_id"],
             "week_no": p["week_no"],
             "start_date": dates[0] if dates else None,
             "end_date": dates[-1] if dates else None,
