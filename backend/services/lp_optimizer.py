@@ -27,7 +27,7 @@ def run_lp(
     category_weekly_rep: Optional[int] = 4,
     non_snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
-    time_limit_sec: int = 120,
+    time_limit_sec: int = 300,
     per_meal_gl_cap: Optional[float] = None,
     per_day_gl_cap: Optional[float] = None,
     per_recipe_max_gl: Optional[float] = None,
