@@ -45,6 +45,7 @@ export default function OnboardingPage() {
       .insert({ onboarding_id: onboardingId, user_id: user.email });
 
     const {
+      dietary_type,
       diet_restrictions,
       breakfast_time,
       lunch_time,
@@ -66,7 +67,8 @@ export default function OnboardingPage() {
     const { error: pdError } = await supabase
       .from("BE_Preference_onboarding_details")
       .insert({
-        diet_restrictions,
+        dietary_type,
+        diet_restrictions: JSON.stringify(diet_restrictions),
         breakfast_time: toTimestamp(breakfast_time),
         lunch_time: toTimestamp(lunch_time),
         dinner_time: toTimestamp(dinner_time),

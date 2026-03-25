@@ -47,7 +47,7 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
 
     pref_query = (
         supabase.table("BE_Preference_onboarding_details")
-        .select("diet_restrictions, breakfast_time, lunch_time, dinner_time")
+        .select("dietary_type, diet_restrictions, breakfast_time, lunch_time, dinner_time")
         .eq("user_id", user_id)
     )
     if onboarding_id:
@@ -55,14 +55,15 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
     pref_details_resp = pref_query.order("created_at", desc=True).limit(1).execute()
     pref_row = pref_details_resp.data[0] if pref_details_resp.data else {}
 
-    _restriction_map = {
+    _diet_type_map = {
         "veg":         "veg",
         "non veg":     "non-veg",
-        "vegan":       "veg", 
-        "gluten free": "gluten-free",
+        "vegan":       "vegan",
+        "eggatarian":  "non-veg",
     }
-    raw_diet = (pref_row.get("diet_restrictions") or "veg").strip().lower()
-    diet_type = _restriction_map.get(raw_diet, "veg")
+    # Prefer dietary_type (new field); fall back to diet_restrictions for old rows
+    raw_diet = (pref_row.get("dietary_type") or pref_row.get("diet_restrictions") or "veg").strip().lower()
+    diet_type = _diet_type_map.get(raw_diet, "veg")
 
     breakfast_time = pref_row.get("breakfast_time")
     lunch_time     = pref_row.get("lunch_time")

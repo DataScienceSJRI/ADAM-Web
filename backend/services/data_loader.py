@@ -172,7 +172,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                         ].copy()
 
     try:
-        if profile and str(profile.get("diet_type", "")).strip().lower() == "veg":
+        if profile and str(profile.get("diet_type", "")).strip().lower() in ("veg", "vegan"):
             rt = ds.get("recipe_tag", pd.DataFrame()).copy()
             if not rt.empty and "Vegetarian" in rt.columns and "Recipe_Code" in rt.columns:
                 mask = pd.to_numeric(rt["Vegetarian"], errors="coerce") == 1

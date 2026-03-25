@@ -19,7 +19,8 @@ export type BasicDetails = {
   Height: number;
   Hba1c: number;
   Activity_levels: string;
-  diet_restrictions: string;
+  dietary_type: string;
+  diet_restrictions: string[];
   breakfast_time: string;   // "HH:MM"
   lunch_time: string;       // "HH:MM"
   dinner_time: string;      // "HH:MM"
@@ -27,7 +28,8 @@ export type BasicDetails = {
 };
 
 const GENDERS = ["Male", "Female", "Other", "Prefer not to say"];
-const DIET_RESTRICTIONS = ["Veg", "Non Veg", "Vegan", "Gluten Free"];
+const DIETARY_TYPES = ["Veg", "Non Veg", "Vegan", "Eggatarian"];
+const DIET_RESTRICTIONS = ["Diabetic", "Gluten Free"];
 const ACTIVITY_LEVELS = [
   "Sedentary",
   "Lightly Active",
@@ -53,7 +55,8 @@ export function BasicDetailsForm({
       Height: 0,
       Hba1c: 0,
       Activity_levels: "",
-      diet_restrictions: "",
+      dietary_type: "",
+      diet_restrictions: [],
       breakfast_time: "",
       lunch_time: "",
       dinner_time: "",
@@ -74,7 +77,7 @@ export function BasicDetailsForm({
     if (!form.Weight || form.Weight <= 0) e.Weight = "Must be greater than 0";
     if (!form.Height || form.Height <= 0) e.Height = "Must be greater than 0";
     if (!form.Activity_levels) e.Activity_levels = "Required";
-    if (!form.diet_restrictions) e.diet_restrictions = "Required";
+    if (!form.dietary_type) e.dietary_type = "Required";
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -190,22 +193,47 @@ export function BasicDetailsForm({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-sm font-medium">Dietary Preference</label>
+          <label className="text-sm font-medium">Dietary Type</label>
           <select
-            value={form.diet_restrictions}
-            onChange={(e) => update("diet_restrictions", e.target.value)}
+            value={form.dietary_type}
+            onChange={(e) => update("dietary_type", e.target.value)}
             className="w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <option value="">Select…</option>
-            {DIET_RESTRICTIONS.map((d) => (
+            {DIETARY_TYPES.map((d) => (
               <option key={d} value={d}>
                 {d}
               </option>
             ))}
           </select>
-          {errors.diet_restrictions && (
-            <p className="text-xs text-destructive">{errors.diet_restrictions}</p>
+          {errors.dietary_type && (
+            <p className="text-xs text-destructive">{errors.dietary_type}</p>
           )}
+        </div>
+
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">
+            Dietary Restrictions{" "}
+            <span className="font-normal text-muted-foreground">(optional)</span>
+          </label>
+          <div className="flex gap-4">
+            {DIET_RESTRICTIONS.map((r) => (
+              <label key={r} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={form.diet_restrictions.includes(r)}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                      ? [...form.diet_restrictions, r]
+                      : form.diet_restrictions.filter((x) => x !== r);
+                    update("diet_restrictions", next);
+                  }}
+                  className="rounded border"
+                />
+                {r}
+              </label>
+            ))}
+          </div>
         </div>
 
         {/* Meal times */}
