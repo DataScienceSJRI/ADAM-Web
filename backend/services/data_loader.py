@@ -117,7 +117,37 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None) -> dic
             prefs["sub_category"] = prefs["sub_category"].apply(_resolve_subcat)
     ds["preferences"] = prefs
 
-    ds["user_recipes"] = pd.DataFrame()
+    # Fetch Rec_ADAM_yes_no and subset recipes/recipe_tag to only "Oota recipes"
+    user_df = _fetch("Rec_ADAM_yes_no")
+    ds["Rec_ADAM_yes_no"] = user_df
+    if not user_df.empty and "Oota recipes" in user_df.columns:
+        user_df = user_df[user_df["Oota recipes"] == 1]
+        if not user_df.empty:
+            code_col = next((c for c in ["Recipe_Code"] if c in user_df.columns), None)
+            if code_col:
+                user_codes = set(user_df[code_col].astype(str).str.strip().str.upper())
+                if user_codes:
+                    # subset recipes
+                    if "Recipe_Code" in ds.get("recipes", pd.DataFrame()).columns:
+                        ds["recipes"] = ds["recipes"][
+                            ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(user_codes)
+                        ].copy()
+                    else:
+                        for rc in ["Recipe code", "RecipeCode"]:
+                            if rc in ds.get("recipes", pd.DataFrame()).columns:
+                                ds["recipes"] = ds["recipes"][
+                                    ds["recipes"][rc].astype(str).str.strip().str.upper().isin(user_codes)
+                                ].copy()
+                                break
+                    # subset recipe_tag
+                    if "Recipe_Code" in ds.get("recipe_tag", pd.DataFrame()).columns:
+                        ds["recipe_tag"] = ds["recipe_tag"][
+                            ds["recipe_tag"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(user_codes)
+                        ].copy()
+                    elif "Recipe code" in ds.get("recipe_tag", pd.DataFrame()).columns:
+                        ds["recipe_tag"] = ds["recipe_tag"][
+                            ds["recipe_tag"]["Recipe code"].astype(str).str.strip().str.upper().isin(user_codes)
+                        ].copy()
 
     try:
         if profile and str(profile.get("diet_type", "")).strip().lower() == "veg":
