@@ -138,11 +138,12 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
             prefs["sub_category"] = prefs["sub_category"].apply(_resolve_subcat)
     ds["preferences"] = prefs
 
-    # Fetch Rec_ADAM_yes_no and subset recipes/recipe_tag to only "Oota recipes"
+    # Fetch Rec_ADAM_yes_no and subset recipes/recipe_tag to only "ADAM_Recipes"
     user_df = _fetch("Rec_ADAM_yes_no")
     ds["Rec_ADAM_yes_no"] = user_df
-    if not user_df.empty and "Oota recipes" in user_df.columns:
-        user_df = user_df[user_df["Oota recipes"] == 1]
+    if not user_df.empty and "ADAM_Recipes" in user_df.columns:
+        # it can be "0" or int(0)    
+        user_df = user_df[(user_df["ADAM_Recipes"] == "1") | (user_df["ADAM_Recipes"] == 1)].copy()
         if not user_df.empty:
             code_col = next((c for c in ["Recipe_Code"] if c in user_df.columns), None)
             if code_col:
