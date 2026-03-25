@@ -195,11 +195,7 @@ def _fetch_recipe_tag() -> pd.DataFrame:
 
 
 def _fetch_main_code() -> pd.DataFrame:
-    df = _fetch("MainCode")
-    if df.empty:
-        return df
-    keep = [c for c in ["Main1_Code", "Main2_Code", "Optional"] if c in df.columns]
-    return df[keep].copy()
+    return _fetch("Main1_Main2_Mapping")
 
 
 def _fetch_ear() -> pd.DataFrame:
@@ -211,4 +207,4 @@ def _fetch_tul() -> pd.DataFrame:
 
 
 def _fetch_gi_gl() -> pd.DataFrame:
-    return pd.DataFrame()
+    return _fetch("SubCategory_foods_GI_GL")

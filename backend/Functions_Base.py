@@ -32,18 +32,18 @@ class ADAMPersonalizationModel:
 		self.workspace = workspace
 		self.config = PersonalizationConfig(workspace_dir=Path(workspace or '.'))
 
-	def load_data(self, profile: Optional[dict] = None) -> dict:
-		"""
-		Load all required CSVs from the workspace directory into a dictionary of DataFrames.
-		Overridden by ModelOptimiser in routers/plan.py → services/data_loader.py (Supabase).
-		"""
-		# ── Overridden in the web backend ────────────────────────────────────────
-		# The ModelOptimiser subclass (routers/plan.py) replaces this with
-		# load_data_from_supabase(), which fetches all tables from Supabase instead
-		# of local CSV files. The CSV-loading body below is retained for reference
-		# and for standalone / local-CSV usage only.
-		# ─────────────────────────────────────────────────────────────────────────
-		pass
+	# def load_data(self, profile: Optional[dict] = None) -> dict:
+	# 	"""
+	# 	Load all required CSVs from the workspace directory into a dictionary of DataFrames.
+	# 	Overridden by ModelOptimiser in routers/plan.py → services/data_loader.py (Supabase).
+	# 	"""
+	# 	# ── Overridden in the web backend ────────────────────────────────────────
+	# 	# The ModelOptimiser subclass (routers/plan.py) replaces this with
+	# 	# load_data_from_supabase(), which fetches all tables from Supabase instead
+	# 	# of local CSV files. The CSV-loading body below is retained for reference
+	# 	# and for standalone / local-CSV usage only.
+	# 	# ─────────────────────────────────────────────────────────────────────────
+	# 	pass
 # 		import os
 # 		data_dir = os.path.join(self.workspace or '.', 'Datasets')
 # 		files = {
@@ -229,7 +229,8 @@ class ADAMPersonalizationModel:
 		sub = ds["subcategories"].copy()
 		sub_gi_gl = ds.get("sub_category_gi_gl", pd.DataFrame()).copy()
 		model = ds.get("model", pd.DataFrame()).copy()
-
+		print(sub)
+		print(sub_gi_gl)
 		keep_tag_cols = [
 			"Recipe_Code",
 			"Recipe_Name",
@@ -421,6 +422,10 @@ class ADAMPersonalizationModel:
 			"Dinner": "Dinner",
 			"Snacks": "Snack",
 		}
+		print(list(rec.columns))
+		print(rec.get("SubCategory"))
+		print(rec.get("GI"))
+		print(rec["Carbohydrate_g"])
 
 		gi_series = pd.to_numeric(rec.get("GI"), errors="coerce")
 		carb_series = pd.to_numeric(rec.get("Carbohydrate_g"), errors="coerce")
@@ -444,6 +449,7 @@ class ADAMPersonalizationModel:
 			gl_filled = gl_series.fillna(gl_series.median())
 			gl_score = 1.0 - ((gl_filled - gl_filled.min()) / (gl_filled.max() - gl_filled.min() + 1e-9))
 		else:
+			return("NO gl info available")
 			# No GL information available at all — assign an extreme high GL so
 			# these recipes are treated as very high-GL by default and
 			# give them neutral score (0.5) for downstream ranking.
@@ -459,6 +465,8 @@ class ADAMPersonalizationModel:
 			delta_filled = delta_series.fillna(delta_series.median())
 			delta_score = 1.0 - ((delta_filled - delta_filled.min()) / (delta_filled.max() - delta_filled.min() + 1e-9))
 		else:
+			return("NO delta glucose info available")
+
 			# No delta glucose info — set an extreme placeholder so these
 			# recipes don't inadvertently get favored; score remains neutral.
 			delta_filled = pd.Series(99999.0, index=rec.index, dtype=float)
@@ -471,6 +479,7 @@ class ADAMPersonalizationModel:
 			t160_filled = t160_series.fillna(t160_series.median())
 			t160_score = 1.0 - ((t160_filled - t160_filled.min()) / (t160_filled.max() - t160_filled.min() + 1e-9))
 		else:
+			return("NO TimeAbove160 info available")
 			# No TimeAbove160 info — use extreme placeholder to avoid giving
 			# these recipes an artificially good score; keep score neutral.
 			t160_filled = pd.Series(99999.0, index=rec.index, dtype=float)
@@ -481,6 +490,8 @@ class ADAMPersonalizationModel:
 		combo_rows = []
 		main1_to_main2, main1_to_optional = self._get_main1_main2_map(ds)
 
+		print(f"[DEBUG][score_personalization] main1_to_main2 mapping: {main1_to_main2}")
+		print(f"[DEBUG][score_personalization] main1_to_optional mapping: {main1_to_optional}")
 		print("///////////-----------------------------")
 		print(main1_to_main2)
 		print(main1_to_optional)
@@ -697,35 +708,35 @@ class ADAMPersonalizationModel:
 
 		return weekly_min, weekly_max, daily_energy_kcal
 
-	def optimize_weekly_menu_with_constraints(
-		self,
-		meal_choices: pd.DataFrame,
-		ds: Dict[str, pd.DataFrame],
-		age_group_col: str,
-		n_days: int = 7,
-		weekly_rep: int = 3,
-		category_weekly_rep: Optional[int] = 4,
-		non_snack_serving_bounds: Tuple[float, float] = (0.5, 1),
-		snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
-		time_limit_sec: int = 120,
-		# GL-related caps (optional): per-meal, per-day, and per-recipe maximum
-		per_meal_gl_cap: Optional[float] = 40,
-		per_day_gl_cap: Optional[float] = None,
-		per_recipe_max_gl: Optional[float] = 40,
-		# Optional explicit dataframes (prefer these over `ds` keys when provided)
-		recipe_ing_df: Optional[pd.DataFrame] = None,
-		main1_main2_mapping: Optional[pd.DataFrame] = None,
-		ear_100: Optional[pd.DataFrame] = None,
-		tul: Optional[pd.DataFrame] = None,
-		profile: Optional[Dict[str, object]] = None,
-	) -> Tuple[pd.DataFrame, Dict[str, object]]:
-		# ── Overridden in the web backend ────────────────────────────────────────
-		# The ModelOptimiser subclass (routers/plan.py) replaces this with
-		# services/lp_optimizer.run_lp(), which removes the hard macronutrient %
-		# constraints (carbs 45-50%) that make this LP infeasible.
-		# The LP body below is retained for reference and standalone usage only.
-		# ─────────────────────────────────────────────────────────────────────────
-		pass
+	# def optimize_weekly_menu_with_constraints(
+	# 	self,
+	# 	meal_choices: pd.DataFrame,
+	# 	ds: Dict[str, pd.DataFrame],
+	# 	age_group_col: str,
+	# 	n_days: int = 7,
+	# 	weekly_rep: int = 3,
+	# 	category_weekly_rep: Optional[int] = 4,
+	# 	non_snack_serving_bounds: Tuple[float, float] = (0.5, 1),
+	# 	snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
+	# 	time_limit_sec: int = 120,
+	# 	# GL-related caps (optional): per-meal, per-day, and per-recipe maximum
+	# 	per_meal_gl_cap: Optional[float] = 40,
+	# 	per_day_gl_cap: Optional[float] = None,
+	# 	per_recipe_max_gl: Optional[float] = 40,
+	# 	# Optional explicit dataframes (prefer these over `ds` keys when provided)
+	# 	recipe_ing_df: Optional[pd.DataFrame] = None,
+	# 	main1_main2_mapping: Optional[pd.DataFrame] = None,
+	# 	ear_100: Optional[pd.DataFrame] = None,
+	# 	tul: Optional[pd.DataFrame] = None,
+	# 	profile: Optional[Dict[str, object]] = None,
+	# ) -> Tuple[pd.DataFrame, Dict[str, object]]:
+	# 	# ── Overridden in the web backend ────────────────────────────────────────
+	# 	# The ModelOptimiser subclass (routers/plan.py) replaces this with
+	# 	# services/lp_optimizer.run_lp(), which removes the hard macronutrient %
+	# 	# constraints (carbs 45-50%) that make this LP infeasible.
+	# 	# The LP body below is retained for reference and standalone usage only.
+	# 	# ─────────────────────────────────────────────────────────────────────────
+	# 	pass
 # 		if profile is None:
 # 			raise ValueError("profile is required for optimize_weekly_menu_with_constraints")
 # 		try:
@@ -1431,6 +1442,7 @@ class ADAMPersonalizationModel:
 		print("[DEBUG] ds keys:", list(ds.keys()))
 		print("[DEBUG] Calling score_personalization...")
 		scored = self.score_personalization(recipe_master, prefs, ds, top_n=top_n)
+		print(scored)
 		print("[DEBUG] scored shape after scoring:", scored.shape)
 		print("[DEBUG] scored columns after scoring:", list(scored.columns))
 		print(f"[DEBUG] prefs shape: {prefs.shape}")
