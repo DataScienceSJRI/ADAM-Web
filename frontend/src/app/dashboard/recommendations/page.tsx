@@ -26,6 +26,8 @@ type PlanOption = {
   end_date: string | null;
   row_count: number;
   max_pkey: number;
+  onboarding_id: string | null;
+  created_at: string | null;
 };
 
 type UserComment = {
@@ -59,7 +61,7 @@ export default function RecommendationsPage() {
 
     const { data, error: err } = await supabase
       .from("Recommendation")
-      .select("Pkey, plan_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal, Reaction, Combo_Reaction")
+      .select("Pkey, plan_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal, Reaction, Combo_Reaction")
       .eq("user_id", user.email)
       .order("Date", { ascending: true })
       .order("Pkey", { ascending: true })
@@ -77,7 +79,7 @@ export default function RecommendationsPage() {
     for (const row of allRows) {
       const pid = row.plan_id ?? "unknown";
       if (!planMap.has(pid)) {
-        planMap.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey });
+        planMap.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey, onboarding_id: (row as any).onboarding_id ?? null, created_at: null });
       }
       const p = planMap.get(pid)!;
       p.row_count++;
@@ -87,6 +89,24 @@ export default function RecommendationsPage() {
         if (!p.end_date || row.Date > p.end_date) p.end_date = row.Date;
       }
     }
+    // Fetch session timestamps for plans with onboarding_id
+    const onbIds = [...new Set([...planMap.values()].map((p) => p.onboarding_id).filter(Boolean))] as string[];
+    if (onbIds.length > 0) {
+      const { data: sessions } = await supabase
+        .from("BE_Onboarding_Sessions")
+        .select("onboarding_id, created_at")
+        .in("onboarding_id", onbIds);
+      const sessionMap = new Map<string, string>();
+      for (const s of sessions ?? []) {
+        if (s.onboarding_id) sessionMap.set(s.onboarding_id, s.created_at);
+      }
+      for (const p of planMap.values()) {
+        if (p.onboarding_id && sessionMap.has(p.onboarding_id)) {
+          p.created_at = sessionMap.get(p.onboarding_id)!;
+        }
+      }
+    }
+
     const planList = [...planMap.values()].sort((a, b) =>
       b.max_pkey - a.max_pkey
     );
@@ -265,9 +285,13 @@ export default function RecommendationsPage() {
                 }`}
               >
                 {i === 0 ? "Latest" : `Plan ${plans.length - i}`}
-                {plan.start_date && (
+                {plan.created_at ? (
+                  <span className="ml-1 opacity-70">· {new Date(plan.created_at).toLocaleDateString("en-IN", {
+                    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+                  })}</span>
+                ) : plan.start_date ? (
                   <span className="ml-1 opacity-70">· {plan.start_date}</span>
-                )}
+                ) : null}
               </button>
             ))}
           </div>
@@ -304,7 +328,10 @@ export default function RecommendationsPage() {
                 : "border-border bg-background text-muted-foreground hover:text-foreground"
             }`}
           >
-            {date}
+            {new Date(date + "T00:00:00").toLocaleDateString("en-IN", {
+              weekday: "short", day: "numeric", month: "short",
+            })}
+            
           </button>
         ))}
       </div>
@@ -318,7 +345,9 @@ export default function RecommendationsPage() {
           return (
             <section key={date} className="space-y-3">
               <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
-                {date}
+                {new Date(date + "T00:00:00").toLocaleDateString("en-IN", {
+                  weekday: "long", day: "numeric", month: "short", year: "numeric",
+                })}
               </h2>
               <div className="space-y-2">
 

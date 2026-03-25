@@ -11,6 +11,8 @@ type PlanCard = {
   end_date: string | null;
   row_count: number;
   max_pkey: number;
+  onboarding_id: string | null;
+  created_at: string | null;
 };
 
 const POLL_INTERVAL_MS = 5000;
@@ -20,7 +22,7 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   const supabase = createClient();
   const { data } = await supabase
     .from("Recommendation")
-    .select("Pkey, plan_id, Date")
+    .select("Pkey, plan_id, onboarding_id, Date")
     .eq("user_id", email)
     .limit(5000);
 
@@ -30,7 +32,7 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   for (const row of data) {
     const pid = row.plan_id ?? "unknown";
     if (!map.has(pid)) {
-      map.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey ?? 0 });
+      map.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey ?? 0, onboarding_id: row.onboarding_id ?? null, created_at: null });
     }
     const p = map.get(pid)!;
     p.row_count++;
@@ -38,6 +40,24 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
     if (row.Date) {
       if (!p.start_date || row.Date < p.start_date) p.start_date = row.Date;
       if (!p.end_date || row.Date > p.end_date) p.end_date = row.Date;
+    }
+  }
+
+  // fetching the timestamsps from the onboarding session to show in the ui -> my plans page. 
+  const onbIds = [...new Set([...map.values()].map((p) => p.onboarding_id).filter(Boolean))] as string[];
+  if (onbIds.length > 0) {
+    const { data: sessions } = await supabase
+      .from("BE_Onboarding_Sessions")
+      .select("onboarding_id, created_at")
+      .in("onboarding_id", onbIds);
+    const sessionMap = new Map<string, string>();
+    for (const s of sessions ?? []) {
+      if (s.onboarding_id) sessionMap.set(s.onboarding_id, s.created_at);
+    }
+    for (const p of map.values()) {
+      if (p.onboarding_id && sessionMap.has(p.onboarding_id)) {
+        p.created_at = sessionMap.get(p.onboarding_id)!;
+      }
     }
   }
 
@@ -166,6 +186,14 @@ export default function PlanPage() {
                   <p className="font-semibold">
                     {i === 0 ? "Latest Plan" : `Plan ${plans.length - i}`}
                   </p>
+                  {plan.created_at && (
+                    <p className="text-xs text-muted-foreground">
+                      Generated: {new Date(plan.created_at).toLocaleDateString("en-IN", {
+                        day: "numeric", month: "short", year: "numeric",
+                        hour: "2-digit", minute: "2-digit",
+                      })}
+                    </p>
+                  )}
                   {plan.start_date && plan.end_date && (
                     <p className="text-sm text-muted-foreground">
                       {plan.start_date} — {plan.end_date}
