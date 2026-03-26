@@ -89,6 +89,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["model"] = _fetch("DataModelling")
     ds["recipe_ingredients"] = _fetch("RecipeINGDBFormat")
     ds["sub_category_gi_gl"] = _fetch_gi_gl()
+    ds["recipe_name_changed"] = _fetch("USER_Recipes_name_changed")
 
     _pref_filters: dict = {"user_id": user_id}
     if onboarding_id:
@@ -171,21 +172,46 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                             ds["recipe_tag"]["Recipe code"].astype(str).str.strip().str.upper().isin(user_codes)
                         ].copy()
 
+    print("Diet type",str(profile.get("diet_type", "")).strip().lower())
+    print("No of recipes - BEFORE",len(ds["recipes"]))
+
     try:
-        if profile and str(profile.get("diet_type", "")).strip().lower() in ("veg", "vegan"):
+        if profile:
+            diet = str(profile.get("diet_type", "")).strip().lower()
             rt = ds.get("recipe_tag", pd.DataFrame()).copy()
-            if not rt.empty and "Vegetarian" in rt.columns and "Recipe_Code" in rt.columns:
-                mask = pd.to_numeric(rt["Vegetarian"], errors="coerce") == 1
-                rt_sub = rt[mask].copy()
-                if not rt_sub.empty:
-                    ds["recipe_tag"] = rt_sub
-                    codes = set(
-                        rt_sub["Recipe_Code"].astype(str).str.strip().str.upper().dropna().unique()
-                    )
-                    if codes and "Recipe_Code" in ds["recipes"].columns:
-                        ds["recipes"] = ds["recipes"][
-                            ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(codes)
-                        ].copy()
+            if not rt.empty and "Recipe_Code" in rt.columns:
+                # One-to-one mapping
+                diet_column_map = {
+                    "veg": "Vegetarian",
+                    "vegan": "Vegetarian",
+                    "non-veg": "Non vegetarian",
+                    "egg": "Ovo-vegetarian",
+                    "ovo-veg": "Ovo-vegetarian",
+                }
+
+                col = diet_column_map.get(diet)
+                if col and col in rt.columns and col != "Non vegetarian":
+                    mask = pd.to_numeric(rt[col], errors="coerce") == 1
+                    rt_sub = rt[mask].copy()
+                    if not rt_sub.empty:
+                        ds["recipe_tag"] = rt_sub
+                        if "Recipe_Code" in ds["recipes"].columns:
+                            valid_codes = (
+                                rt_sub["Recipe_Code"]
+                                .astype(str)
+                                .str.strip()
+                                .str.upper()
+                                .dropna()
+                                .unique()
+                            )
+                            ds["recipes"] = ds["recipes"][
+                                ds["recipes"]["Recipe_Code"]
+                                .astype(str)
+                                .str.strip()
+                                .str.upper()
+                                .isin(valid_codes)
+                            ].copy()
+        print("No of recipes - BEFORE",len(ds["recipes"]))
     except Exception:
         logger.exception("Vegetarian recipe filtering failed for user_id=%s — serving unfiltered recipes", user_id)
 
