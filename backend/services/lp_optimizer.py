@@ -89,12 +89,8 @@ def run_lp(
     # Main2_Target_code assignment diagnostics
     # Auto-fill missing Main2 and Side codes using mapping from Main1
     
-    if "Category" in candidates.columns:
-        candidates["Category_Key"] = candidates["Category"].astype(str).str.strip()
-    elif "SubCategory" in candidates.columns:
-        candidates["Category_Key"] = candidates["SubCategory"].astype(str).str.strip()
-    elif "Subcategories" in candidates.columns:
-        candidates["Category_Key"] = candidates["Subcategories"].astype(str).str.strip()
+    if "Recipe_Category" in candidates.columns:
+        candidates["Category_Key"] = candidates["Recipe_Category"].astype(str).str.strip()
     else:
         candidates["Category_Key"] = ""
     candidates["Category_Key"] = candidates["Category_Key"].replace({"": np.nan})
