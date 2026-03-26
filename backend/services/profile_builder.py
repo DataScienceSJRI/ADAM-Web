@@ -17,7 +17,7 @@ _ACTIVITY_MAP = {
 def _get_age_group_col(gender: str, activity: str) -> str:
     gender_prefix = "Women" if gender.strip().lower().startswith("f") else "Men"
     activity_key = activity.strip().lower()
-    level = _ACTIVITY_MAP.get(activity_key, "sedentary")
+    level = _ACTIVITY_MAP.get(activity_key)
     return f"{gender_prefix}_{level}"
 
 
@@ -38,12 +38,12 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
 
     bd = bd_resp.data[0]
 
-    age = bd.get("Age") or 0
-    gender = bd.get("Gender") or "Male"
-    weight = bd.get("Weight") or 0
-    height = bd.get("Height") or 0
+    age = bd.get("Age")
+    gender = bd.get("Gender")
+    weight = bd.get("Weight")
+    height = bd.get("Height")
     hba1c = bd.get("Hba1c")
-    activity = bd.get("Activity_levels") or "Sedentary"
+    activity = bd.get("Activity_levels")
 
     pref_query = (
         supabase.table("BE_Preference_onboarding_details")
@@ -59,11 +59,13 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
         "veg":         "veg",
         "non veg":     "non-veg",
         "vegan":       "vegan",
-        "eggatarian":  "non-veg",
+        "eggatarian":  "egg",
+        "ovo veg":      "ovo-veg"
     }
+
     # Prefer dietary_type (new field); fall back to diet_restrictions for old rows
-    raw_diet = (pref_row.get("dietary_type") or pref_row.get("diet_restrictions") or "veg").strip().lower()
-    diet_type = _diet_type_map.get(raw_diet, "veg")
+    raw_diet = (pref_row.get("dietary_type")).strip().lower()
+    diet_type = _diet_type_map.get(raw_diet)
 
     breakfast_time = pref_row.get("breakfast_time")
     lunch_time     = pref_row.get("lunch_time")
