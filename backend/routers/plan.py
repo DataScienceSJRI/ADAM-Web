@@ -77,7 +77,7 @@ def generate_plan(
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
             output_paths = model.run(
                 uid=user_id,
-                top_n=10,
+                top_n=20,
                 ear_group_col=profile["age_group_col"],
                 category_weekly_rep=4,
                 user_preference="yes",
