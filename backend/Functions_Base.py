@@ -741,8 +741,7 @@ class ADAMPersonalizationModel:
 						weekly_max[col] = float(tul_lookup[key]) * float(n_days)
 				if "Energy_ENERC_Kcal" in weekly_max:
 					del weekly_max["Energy_ENERC_Kcal"]
-		print(weekly_min)
-		print(wssssss)
+
 		return weekly_min, weekly_max, daily_energy_kcal
 
 	# def optimize_weekly_menu_with_constraints(
