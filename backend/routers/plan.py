@@ -4,7 +4,7 @@ import os
 import tempfile
 import json
 from pathlib import Path
-
+import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from core.auth import get_current_user
@@ -82,22 +82,43 @@ def generate_plan(
                 profile=profile,
             )
 
-            recipes_df = _fetch("Recipes")
-            recdf = _fetch("Rec_ADAM_yes_no")
-
             # weekly_menu and top_personalized_choices are DataFrames in the returned dict.
             # weekly_optimization_summary is a JSON file path — read it while tmpdir exists.
             weekly_menu = output_paths.get("weekly_menu")
             top_choices = output_paths.get("top_personalized_choices")
+            weekly_min = output_paths.get("weekly_min")
+            print(output_paths)
+            summary = output_paths.get("weekly_optimization_summary")
+            if summary.get("status") == "Optimal":
+                print("Solution is optimal")
 
-            os_path = output_paths.get("weekly_optimization_summary")
-            opt_summary: dict = {}
-            if isinstance(os_path, str) and Path(os_path).exists():
-                with open(os_path) as f:
-                    opt_summary = json.load(f)
-            elif isinstance(os_path, dict):
-                opt_summary = os_path
 
+                if len(weekly_menu)>0:
+                    finall_summary = Recomendation_formatting(weekly_menu)
+                    print(finall_summary)
+                    finall_summary.to_csv("final_summary.csv", index=False)  # Save the final summary as CSV
+
+                    final_nut_summary = build_weekly_nutrient_summary(weekly_menu,weekly_min)
+                    print(final_nut_summary)
+                    final_nut_summary.to_csv("final_nutrient_summary.csv", index=False)  # Save the nutrient summary as CSV
+
+
+                os_path = output_paths.get("weekly_optimization_summary")
+                opt_summary: dict = {}
+                if isinstance(os_path, str) and Path(os_path).exists():
+                    with open(os_path) as f:
+                        opt_summary = json.load(f)
+                elif isinstance(os_path, dict):
+                    opt_summary = os_path   
+            else:
+                return GeneratePlanResponse(
+                    status="No solution found please try again with different preferences or check dataset coverage.",
+                    rows_written=0,
+                    plan_id=None,
+                    optimization_status=opt_summary.get("status"),
+                    message="Model ran but produced no menu. Check preferences and dataset coverage.",
+                )
+            
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Model error: {str(e)}")
@@ -179,3 +200,261 @@ async def delete_plan(user_id: str = Depends(get_current_user)):
     from core.supabase import get_supabase
     get_supabase().table("Recommendation").delete().eq("user_id", user_id).execute()
     return {"status": "deleted", "user_id": user_id}
+
+
+def Recomendation_formatting(weekly_menu_df):
+    if not weekly_menu_df.empty:
+        tag_df = _fetch("RecipeTagging")
+        tag_df = tag_df.rename(
+			columns={
+				"Recipe code": "Recipe_Code",
+				"Recipe Name": "Recipe_Name",
+			}
+		)
+        print(list(weekly_menu_df.columns))
+        print(list(tag_df.columns))
+        # Ensure Serving numeric
+        weekly_menu_df["Serving"] = pd.to_numeric(weekly_menu_df.get("Serving", 0.0), errors="coerce").fillna(0.0)
+        # Select tagging columns if present
+        tag_sel_cols = [c for c in ["Recipe_Code", "Portion", "Portion weight (g)", "Description","Subcategories"] if c in tag_df.columns]
+        tag_sel = tag_df[tag_sel_cols].copy() if not tag_df.empty else pd.DataFrame()
+        merged = weekly_menu_df.merge(tag_sel, left_on="Recipe_Code", right_on="Recipe_Code", how="left")
+
+        # Numeric portion weight
+        merged["Portion weight (g)"] = pd.to_numeric(merged.get("Portion weight (g)"), errors="coerce")
+        merged["Recipe weight Original (g)"] = merged["Portion weight (g)"]
+        merged["Portion original"] = merged.get("Portion")
+
+        merged["Optimal proportion"] = merged.get("Serving", 0.0)
+        merged["Recipe weight Optimal (g)"] = (merged["Recipe weight Original (g)"].fillna(0.0) * merged["Optimal proportion"].fillna(0.0)).round(2)
+
+        # Parse numeric portion count from 'Portion' (e.g. '2.0 Number' -> 2.0)
+        try:
+            merged["Portion_count_original"] = pd.to_numeric(merged.get("Portion", "").astype(str).str.extract(r'([-+]?\d*\.?\d+)')[0], errors="coerce")
+        except Exception:
+            merged["Portion_count_original"] = pd.Series([pd.NA] * len(merged))
+        # Compute numeric Portion optimal = Portion_count_original * Optimal proportion
+        _raw_portion_opt = (
+            merged["Portion_count_original"].fillna(0.0).astype(float)
+            * merged["Optimal proportion"].fillna(0.0).astype(float)
+        )
+        # Round to nearest 0.25 for user-friendly portions
+        merged["Portion optimal"] = (np.round(_raw_portion_opt / 0.25) * 0.25).round(2)
+        merged["Description_tagging"] = merged.get("Description")
+        merged["OPTIMAL_STATUS"] = merged["Optimal proportion"].apply(lambda v: "selected" if (pd.notna(v) and float(v) > 0) else "not selected")
+
+        out_cols = [
+            "Day",
+            "Meal_Time",
+            "Recipe_Code",
+            "Code_cooccurence",
+            "Subcategories",
+            "Dish_Type",
+            "Recipe_Name",
+            "Optimal proportion",
+            "Recipe weight Original (g)",
+            "Portion original",
+            "Recipe weight Optimal (g)",
+            "Portion optimal",
+            "Description_tagging",
+            "OPTIMAL_STATUS",
+        ]
+        final_df = merged.reindex(columns=[c for c in out_cols if c in merged.columns])
+
+        # Merge SubCategory GI averages from Excel (Code, GI_Avg) if available
+        try:
+            sub_gi = _fetch("SubCategory_foods_GI_GL")
+            if len(sub_gi)>0:
+                if "Code" in sub_gi.columns and "GI_Avg" in sub_gi.columns:
+                    sg = sub_gi[["Code", "GI_Avg"]].copy()
+                    sg["Code"] = sg["Code"].astype(str).str.strip().str.upper()
+                    final_df["Subcategories_norm"] = final_df.get("Subcategories", "").astype(str).str.strip().str.upper()
+                    final_df = final_df.merge(sg, left_on="Subcategories_norm", right_on="Code", how="left")
+                    # rename merged Code to Subcategory_Code for clarity
+                    if "Code" in final_df.columns:
+                        final_df = final_df.rename(columns={"Code": "Subcategory_Code"})
+                    # drop helper column
+                    final_df = final_df.drop(columns=[c for c in ["Subcategories_norm"] if c in final_df.columns])
+                    # Attach human-readable subcategory name from SubCategory.csv (if available)
+                    try:
+                        sub_ref = _fetch("SubCategory")
+                        if len(sub_ref)>0: #"SubCategory.csv"
+                            if "Code" in sub_ref.columns and "SubCategory" in sub_ref.columns:
+                                # Normalize codes for matching
+                                sub_ref["Code"] = sub_ref["Code"].astype(str).str.strip().str.upper()
+                                final_df["Subcategory_Code"] = final_df.get("Subcategory_Code", "").astype(str).str.strip().str.upper()
+                                final_df = final_df.merge(sub_ref[["Code", "SubCategory"]], left_on="Subcategory_Code", right_on="Code", how="left")
+                                # keep the name under a clear column and drop the merge helper
+                                if "SubCategory" in final_df.columns:
+                                    final_df = final_df.rename(columns={"SubCategory": "Subcategory_Name"})
+                                final_df = final_df.drop(columns=[c for c in ["Code"] if c in final_df.columns])
+                    except Exception:
+                        # non-fatal: proceed without subcategory name
+                        pass
+
+            # Enrich final_df with nutrition from Recipes and compute GL at optimal serving
+            try:
+                rec_df = _fetch("Recipe")
+                if len(rec_df)>0:
+                    # find recipe code column in recipes
+                    code_col = None
+                    for c in ["Recipe code", "Recipe_Code", "Recipe Code", "Code"]:
+                        if c in rec_df.columns:
+                            code_col = c
+                            break
+                    if code_col is not None:
+                        rec_sel = rec_df[[code_col] + [col for col in ["Carbohydrate_g", "TotalDietaryFibre_FIBTG_g"] if col in rec_df.columns]].copy()
+                        rec_sel = rec_sel.rename(columns={code_col: "Recipe_Code"})
+                        final_df = final_df.merge(rec_sel, on="Recipe_Code", how="left")
+
+                    # determine fiber column to use
+                    if "TotalDietaryFibre_FIBTG_g" in final_df.columns:
+                        final_df["_fiber_for_gl"] = pd.to_numeric(final_df["TotalDietaryFibre_FIBTG_g"], errors="coerce").fillna(0.0)
+                    else:
+                        final_df["_fiber_for_gl"] = 0.0
+
+                    # ensure numeric carbs, GI and optimal proportion
+                    final_df["_carb_g"] = pd.to_numeric(final_df.get("Carbohydrate_g"), errors="coerce")
+                    final_df["_gi"] = pd.to_numeric(final_df.get("GI_Avg"), errors="coerce")
+                    final_df["_opt_prop"] = pd.to_numeric(final_df.get("Optimal proportion"), errors="coerce").fillna(0.0)
+
+                    # compute GL at optimal serving: GI * ((Carbs - fiber) * optimal_prop) / 100
+                    carb_minus_fiber = (final_df["_carb_g"].fillna(0.0) - final_df["_fiber_for_gl"].fillna(0.0)).clip(lower=0.0)
+                    final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber * final_df["_opt_prop"])) / 100.0
+                    # if GI or carbs missing, leave GL as NaN
+                else:
+                    # recipes file missing — set GL to NaN
+                    final_df["GL"] = np.nan
+            except Exception:
+                # non-fatal; leave GL unset
+                final_df["GL"] = final_df.get("GL", np.nan)
+        
+        
+        except Exception:
+            # non-fatal; proceed without GI merge
+            pass
+
+        # Save CSV for backward compatibility
+        # Ensure all expected columns are present (create as NaN/defaults if missing)
+        expected_cols = [
+            "Day",
+            "Meal_Time",
+            "Recipe_Code",
+            "Code_cooccurence",
+            "Subcategories",
+            "Dish_Type",
+            "Recipe_Name",
+            "Optimal proportion",
+            "Recipe weight Original (g)",
+            "Portion original",
+            "Recipe weight Optimal (g)",
+            "Portion optimal",
+            "Description_tagging",
+            "OPTIMAL_STATUS",
+            "Subcategory_Code",
+            "GI_Avg",
+            "Carbohydrate_g",
+            "TotalDietaryFibre_FIBTG_g",
+            "_fiber_for_gl",
+            "_carb_g",
+            "_gi",
+            "_opt_prop",
+            "GL",
+        ]
+        for c in expected_cols:
+            if c not in final_df.columns:
+                final_df[c] = pd.NA
+
+        # Ensure numeric columns have numeric dtypes where possible
+        numeric_cols = ["Carbohydrate_g", "TotalDietaryFibre_FIBTG_g", "_fiber_for_gl", "_carb_g", "_gi", "_opt_prop", "GL"]
+        for nc in numeric_cols:
+            if nc in final_df.columns:
+                final_df[nc] = pd.to_numeric(final_df[nc], errors="coerce")
+
+        #Aggregate GL per meal (Day + Meal_Time)
+        try:
+            meal_gl_df = (
+                final_df.groupby(["Day", "Meal_Time"], as_index=False)["GL"]
+                .sum()
+                .rename(columns={"GL": "Meal_GL"})
+            )
+            #Merge back to main dataframe
+            final_df = final_df.merge(meal_gl_df, on=["Day", "Meal_Time"], how="left")
+
+        except Exception:
+            # non-fatal
+            final_df["Meal_GL"] = pd.NA
+
+    else:
+        final_df = pd.DataFrame()
+    
+    return final_df
+
+
+
+def build_weekly_nutrient_summary(weekly_menu,weekly_min):
+    menu = weekly_menu.copy()
+    if menu.empty:
+        return pd.DataFrame([
+            {
+                "Nutrient": nutrient_col,
+                "Weekly_Requirement": float(required_val),
+                "Achieved_From_Menu": 0.0,
+                "Percent_Requirement_Met": 0.0,
+            }
+            for nutrient_col, required_val in weekly_min.items()
+        ])
+
+    serving = pd.to_numeric(menu.get("Serving", 1.0), errors="coerce").fillna(1.0)
+    # Only retain a fixed set of reported nutrients (nutrient_cols) and the
+    # three macro energy-ratio rows as requested.
+    nutrient_cols = [
+        "Energy_ENERC_Kcal", "Protein_PROTCNT_g", "TotalFat_FATCE_g", "TotalDietaryFibre_FIBTG_g",
+        "CalciumCa_CA_mg", "ZincZn_ZN_mg", "IronFe_FE_mg", "MagnesiumMg_MG_mg", "VA_RAE_mcg",
+        "TotalFolatesB9_FOLSUM_mcg", "VB12_mcg", "ThiamineB1_THIA_mg", "RiboflavinB2_RIBF_mg",
+        "NiacinB3_NIA_mg", "TotalB6A_VITB6A_mg", "TotalAscorbicAcid_VITC_mg",
+        "Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg", "PotassiumK_mg", "Cholesterol_mg"
+    ]
+
+    rows = []
+    # helper to safely get column total (serving-weighted)
+    def _total(col_name: str) -> float:
+        if col_name in menu.columns:
+            vals = pd.to_numeric(menu[col_name], errors="coerce").fillna(0.0)
+            return float((vals * serving).sum())
+        return 0.0
+
+    for col in nutrient_cols:
+        req = weekly_min.get(col, None)
+        req_val = float(req) if req is not None else np.nan
+        ach = _total(col)
+        pct = (100.0 * ach / req_val) if (not pd.isna(req_val) and req_val > 0) else np.nan
+        rows.append({
+            "Nutrient": col,
+            "Weekly_Requirement": req_val,
+            "Achieved_From_Menu": ach,
+            "Percent_Requirement_Met": pct,
+        })
+
+    # Add macro percentage rows
+    total_energy = _total("Energy_ENERC_Kcal")
+    total_carb_g = _total("Carbohydrate_g")
+    total_prot_g = _total("Protein_PROTCNT_g")
+    total_fat_g = _total("TotalFat_FATCE_g")
+    carb_energy = 4.0 * total_carb_g
+    prot_energy = 4.0 * total_prot_g
+    fat_energy = 9.0 * total_fat_g
+    energy_den = total_energy if total_energy > 1e-6 else (carb_energy + prot_energy + fat_energy)
+    if energy_den > 1e-6:
+        carb_pct = 100.0 * carb_energy / energy_den
+        prot_pct = 100.0 * prot_energy / energy_den
+        fat_pct = 100.0 * fat_energy / energy_den
+    else:
+        carb_pct = prot_pct = fat_pct = np.nan
+
+    rows.append({"Nutrient": "Carbohydrate_pct_energy", "Weekly_Requirement": np.nan, "Achieved_From_Menu": carb_pct, "Percent_Requirement_Met": np.nan})
+    rows.append({"Nutrient": "Protein_pct_energy", "Weekly_Requirement": np.nan, "Achieved_From_Menu": prot_pct, "Percent_Requirement_Met": np.nan})
+    rows.append({"Nutrient": "Fat_pct_energy", "Weekly_Requirement": np.nan, "Achieved_From_Menu": fat_pct, "Percent_Requirement_Met": np.nan})
+
+    return pd.DataFrame(rows).reset_index(drop=True)
+

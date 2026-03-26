@@ -655,4 +655,4 @@ def run_lp(
     print(weekly_menu)
     weekly_menu.to_csv("weekly_menu_lp_output.csv", index=False)
     print(summary)
-    return weekly_menu, summary
+    return weekly_menu, summary, weekly_min

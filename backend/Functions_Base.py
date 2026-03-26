@@ -1695,7 +1695,7 @@ class ADAMPersonalizationModel:
 
 		# Allow per-user EAR/TUL group to be driven by the profile
 		age_group_for_run = profile.get("age_group_col", ear_group_col)
-		weekly_menu, weekly_optimization_summary = self.optimize_weekly_menu_with_constraints(
+		weekly_menu, weekly_optimization_summary,Weekly_min = self.optimize_weekly_menu_with_constraints(
 			meal_choices=top_choices,
 			ds=ds,
 			age_group_col=age_group_for_run,
@@ -1717,6 +1717,7 @@ class ADAMPersonalizationModel:
 			"weekly_menu": weekly_menu,
 			"weekly_nutrient_summary": weekly_nutrient_summary,
 			"weekly_optimization_summary": weekly_optimization_summary,
+			"weekly_min": Weekly_min,
 		}
 
 	def prepare_combination_summary(self, top_choices_path: Optional[str] = None, top_choices_df: Optional[pd.DataFrame] = None) -> pd.DataFrame:
