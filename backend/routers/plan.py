@@ -64,6 +64,8 @@ def generate_plan(
 ):
     """Generate a 7-day personalised meal plan for the authenticated user."""
     profile = build_profile(user_id, onboarding_id=body.onboarding_id)
+    print(profile)
+
     if profile is None:
         raise HTTPException(
             status_code=404,
@@ -85,6 +87,17 @@ def generate_plan(
             # weekly_menu and top_personalized_choices are DataFrames in the returned dict.
             # weekly_optimization_summary is a JSON file path — read it while tmpdir exists.
             weekly_menu = output_paths.get("weekly_menu")
+            recipe_name_changed = _fetch("USER_Recipes_name_changed")
+            weekly_menu = output_paths.get("weekly_menu")
+
+            # Create mapping (Recipe_Code → New Recipe_Name)
+            name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
+            # Update ONLY matched rows
+            weekly_menu.loc[
+                weekly_menu['Recipe_Code'].isin(name_map.keys()),
+                'Recipe_Name'
+            ] = weekly_menu['Recipe_Code'].map(name_map)
+
             top_choices = output_paths.get("top_personalized_choices")
             weekly_min = output_paths.get("weekly_min")
             print(output_paths)
@@ -115,7 +128,7 @@ def generate_plan(
                     status="No solution found please try again with different preferences or check dataset coverage.",
                     rows_written=0,
                     plan_id=None,
-                    optimization_status=opt_summary.get("status"),
+                    optimization_status="No solution please try again",
                     message="Model ran but produced no menu. Check preferences and dataset coverage.",
                 )
             
@@ -303,24 +316,33 @@ def Recomendation_formatting(weekly_menu_df):
                             code_col = c
                             break
                     if code_col is not None:
-                        rec_sel = rec_df[[code_col] + [col for col in ["Carbohydrate_g", "TotalDietaryFibre_FIBTG_g"] if col in rec_df.columns]].copy()
+                        rec_sel = rec_df[[code_col] + [col for col in ["Energy_ENERC_KJ","Carbohydrate_g", "TotalDietaryFibre_FIBTG_g"] if col in rec_df.columns]].copy()
                         rec_sel = rec_sel.rename(columns={code_col: "Recipe_Code"})
                         final_df = final_df.merge(rec_sel, on="Recipe_Code", how="left")
+                    
+                    final_df["Energy_ENERC_Kcal"] = final_df["Energy_ENERC_KJ"] / 4.184
+                    # STEP 1: Create _opt_prop FIRST
+                    final_df["_opt_prop"] = pd.to_numeric(final_df.get("Optimal proportion"), errors="coerce").fillna(0.0)
 
-                    # determine fiber column to use
-                    if "TotalDietaryFibre_FIBTG_g" in final_df.columns:
-                        final_df["_fiber_for_gl"] = pd.to_numeric(final_df["TotalDietaryFibre_FIBTG_g"], errors="coerce").fillna(0.0)
-                    else:
-                        final_df["_fiber_for_gl"] = 0.0
+                    #Convert ALL relevant columns to numeric
+                    num_cols = ["Energy_ENERC_Kcal", "Carbohydrate_g", "TotalDietaryFibre_FIBTG_g", "GI_Avg"]
+                    for col in num_cols:
+                        if col in final_df.columns:
+                            final_df[col] = pd.to_numeric(final_df[col], errors="coerce")
+
+                    #Multiply by optimal proportion
+                    final_df["Energy_ENERC_Kcal"] = final_df["Energy_ENERC_Kcal"] * final_df["_opt_prop"]
+                    final_df["Carbohydrate_g"] = final_df["Carbohydrate_g"] * final_df["_opt_prop"]
+                    final_df["TotalDietaryFibre_FIBTG_g"] = final_df["TotalDietaryFibre_FIBTG_g"] * final_df["_opt_prop"]
 
                     # ensure numeric carbs, GI and optimal proportion
                     final_df["_carb_g"] = pd.to_numeric(final_df.get("Carbohydrate_g"), errors="coerce")
                     final_df["_gi"] = pd.to_numeric(final_df.get("GI_Avg"), errors="coerce")
-                    final_df["_opt_prop"] = pd.to_numeric(final_df.get("Optimal proportion"), errors="coerce").fillna(0.0)
+                    final_df["_fiber_for_gl"] = pd.to_numeric(final_df["TotalDietaryFibre_FIBTG_g"], errors="coerce").fillna(0.0)
 
-                    # compute GL at optimal serving: GI * ((Carbs - fiber) * optimal_prop) / 100
+                    # compute GL at optimal serving: GI * ((Carbs - fiber)) / 100
                     carb_minus_fiber = (final_df["_carb_g"].fillna(0.0) - final_df["_fiber_for_gl"].fillna(0.0)).clip(lower=0.0)
-                    final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber * final_df["_opt_prop"])) / 100.0
+                    final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber)) / 100.0
                     # if GI or carbs missing, leave GL as NaN
                 else:
                     # recipes file missing — set GL to NaN
@@ -353,6 +375,7 @@ def Recomendation_formatting(weekly_menu_df):
             "OPTIMAL_STATUS",
             "Subcategory_Code",
             "GI_Avg",
+            "Energy_ENERC_Kcal",
             "Carbohydrate_g",
             "TotalDietaryFibre_FIBTG_g",
             "_fiber_for_gl",
@@ -366,7 +389,7 @@ def Recomendation_formatting(weekly_menu_df):
                 final_df[c] = pd.NA
 
         # Ensure numeric columns have numeric dtypes where possible
-        numeric_cols = ["Carbohydrate_g", "TotalDietaryFibre_FIBTG_g", "_fiber_for_gl", "_carb_g", "_gi", "_opt_prop", "GL"]
+        numeric_cols = ["Energy_ENERC_Kcal","Carbohydrate_g", "TotalDietaryFibre_FIBTG_g", "_fiber_for_gl", "_carb_g", "_gi", "_opt_prop", "GL"]
         for nc in numeric_cols:
             if nc in final_df.columns:
                 final_df[nc] = pd.to_numeric(final_df[nc], errors="coerce")
