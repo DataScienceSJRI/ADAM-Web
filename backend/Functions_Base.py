@@ -641,6 +641,42 @@ class ADAMPersonalizationModel:
 		ear = ds.get("ear_100", pd.DataFrame()).copy()
 		tul = ds.get("tul", pd.DataFrame()).copy()
 
+		
+		#### make the energy based on Age, BMI and 
+		## use profile 
+		print(profile)		
+		# Mifflin-St Jeor Equation to calculate BMR
+		def calculate_bmr(height, age, weight, sex):
+			if sex.lower() == "male":
+				bmr = 10 * weight + 6.25 * height - 5 * age + 5
+			else:  # female
+				bmr = 10 * weight + 6.25 * height - 5 * age - 161
+			return bmr
+
+		height = float(profile.get("height"))
+		age = float(profile.get("age"))
+		weight = float(profile.get("weight"))
+		sex = str(profile.get("gender"))
+		PAL_level = str(profile.get("activity_levels"))
+		if PAL_level == "sedentary":
+			PAL = 1.2
+		if PAL_level == "Lightly Active":
+			PAL = 1.375
+		if PAL_level == "Moderately Active":
+			PAL = 1.55
+		if PAL_level == "Very Active":
+			PAL = 1.725
+		if PAL_level == "Extra Active":
+			PAL = 1.9
+		BMR_cal = calculate_bmr(height, age, weight, sex)
+		print(BMR_cal)
+		print(PAL)
+		# Calculate BMR, TDEE, and Required Caloric Intake for each day
+		TDEE = BMR_cal * PAL
+		print(TDEE)
+		#### make the energy based on Age, BMI and 
+		ear.loc[ear["Nutrients_name"] == "Energy", age_group_col] = TDEE
+
 		nutrient_name_candidates = [c for c in ["Nutrients_name"] if c in ear.columns]
 		if not nutrient_name_candidates or age_group_col not in ear.columns:
 			return {}, {}, None
@@ -705,7 +741,8 @@ class ADAMPersonalizationModel:
 						weekly_max[col] = float(tul_lookup[key]) * float(n_days)
 				if "Energy_ENERC_Kcal" in weekly_max:
 					del weekly_max["Energy_ENERC_Kcal"]
-
+		print(weekly_min)
+		print(wssssss)
 		return weekly_min, weekly_max, daily_energy_kcal
 
 	# def optimize_weekly_menu_with_constraints(
