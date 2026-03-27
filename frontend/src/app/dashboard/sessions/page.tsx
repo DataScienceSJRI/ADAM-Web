@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 type Session = {
   onboarding_id: string;
@@ -13,9 +14,20 @@ type Session = {
   plan: { plan_id: string; row_count: number; start_date: string | null } | null;
 };
 
+type PrefRow = {
+  meal_time: string;
+  dish_type: string;
+  sub_category: string;
+  Reaction: string | null;
+};
+
 export default function SessionsPage() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [prefData, setPrefData] = useState<Record<string, PrefRow[]>>({});
+  const [prefLoading, setPrefLoading] = useState<string | null>(null);
+  const [subCatMap, setSubCatMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
     async function load() {
@@ -23,7 +35,6 @@ export default function SessionsPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.email) return;
 
-      // Fetch all onboarding sessions
       const { data: sessionRows, error: sessErr } = await supabase
         .from("BE_Onboarding_Sessions")
         .select("onboarding_id, created_at")
@@ -41,7 +52,6 @@ export default function SessionsPage() {
         return;
       }
 
-      // Fetch related data for all sessions in parallel
       const ids = sessionRows.map((s) => s.onboarding_id);
 
       const [basicRes, prefDetailRes, prefRes, recRes] = await Promise.all([
@@ -67,7 +77,6 @@ export default function SessionsPage() {
           .limit(5000),
       ]);
 
-      // Index basic details by onboarding_id
       const basicMap = new Map<string, Session["basic"]>();
       for (const b of basicRes.data ?? []) {
         if (b.onboarding_id) {
@@ -78,19 +87,16 @@ export default function SessionsPage() {
         }
       }
 
-      // Index diet by onboarding_id
       const dietMap = new Map<string, string>();
       for (const d of prefDetailRes.data ?? []) {
         if (d.onboarding_id) dietMap.set(d.onboarding_id, d.diet_restrictions);
       }
 
-      // Count preferences per onboarding_id
       const prefCountMap = new Map<string, number>();
       for (const p of prefRes.data ?? []) {
         if (p.onboarding_id) prefCountMap.set(p.onboarding_id, (prefCountMap.get(p.onboarding_id) ?? 0) + 1);
       }
 
-      // Get plan info per onboarding_id
       const planMap = new Map<string, { plan_id: string; row_count: number; dates: string[] }>();
       for (const r of recRes.data ?? []) {
         if (r.onboarding_id && r.plan_id) {
@@ -122,6 +128,62 @@ export default function SessionsPage() {
     }
     load();
   }, []);
+
+  async function togglePreferences(onboarding_id: string) {
+    if (expandedId === onboarding_id) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(onboarding_id);
+    if (prefData[onboarding_id]) return; // already loaded
+
+    setPrefLoading(onboarding_id);
+    const supabase = createClient();
+
+    const [{ data, error }, subCatRes] = await Promise.all([
+      supabase
+        .from("BE_Preference_onboarding")
+        .select("meal_time, dish_type, sub_category, Reaction")
+        .eq("onboarding_id", onboarding_id)
+        .order("meal_time")
+        .limit(500),
+      Object.keys(subCatMap).length === 0
+        ? supabase.from("SubCategory").select("Code, SubCategory").limit(5000)
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
+    if (subCatRes.data) {
+      const map: Record<string, string> = {};
+      for (const r of subCatRes.data) {
+        if (r.Code) map[String(r.Code).trim()] = r.SubCategory ?? r.Code;
+      }
+      setSubCatMap(map);
+    }
+
+    if (!error && data) {
+      setPrefData((prev) => ({ ...prev, [onboarding_id]: data as PrefRow[] }));
+    }
+    setPrefLoading(null);
+  }
+
+  // Group preferences by meal_time
+  function groupByMealTime(prefs: PrefRow[]) {
+    const order = ["Breakfast", "Lunch", "Dinner", "Snacks"];
+    const map: Record<string, PrefRow[]> = {};
+    for (const p of prefs) {
+      const key = p.meal_time ?? "Other";
+      if (!map[key]) map[key] = [];
+      map[key].push(p);
+    }
+    return order
+      .filter((k) => map[k])
+      .map((k) => ({ meal_time: k, items: map[k] }))
+      .concat(
+        Object.keys(map)
+          .filter((k) => !order.includes(k))
+          .map((k) => ({ meal_time: k, items: map[k] }))
+      );
+  }
 
   return (
     <div className="space-y-6">
@@ -158,48 +220,107 @@ export default function SessionsPage() {
             </thead>
             <tbody>
               {sessions.map((s, i) => (
-                <tr key={s.onboarding_id} className="border-b last:border-0 hover:bg-muted/30 transition-colors">
-                  <td className="px-4 py-3">
-                    <span className="font-mono text-xs text-muted-foreground">
-                      #{sessions.length - i}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 whitespace-nowrap">
-                    {new Date(s.created_at).toLocaleDateString("en-IN", {
-                      day: "numeric", month: "short", year: "numeric",
-                      hour: "2-digit", minute: "2-digit",
-                    })}
-                  </td>
-                  <td className="px-4 py-3">
-                    {s.basic ? (
-                      <span className="text-xs">
-                        {s.basic.Gender}, {s.basic.Age}y, {s.basic.Weight}kg, {s.basic.Height}cm
-                        {s.basic.Hba1c != null && <>, HbA1c: {s.basic.Hba1c}</>}
+                <Fragment key={s.onboarding_id}>
+                  <tr
+                    className="border-b hover:bg-muted/30 transition-colors"
+                  >
+                    <td className="px-4 py-3">
+                      <span className="font-mono text-xs text-muted-foreground">
+                        #{sessions.length - i}
                       </span>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="text-xs">{s.diet ?? "—"}</span>
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <span className="text-xs font-medium">{s.pref_count}</span>
-                    <span className="text-xs text-muted-foreground"> items</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    {s.plan ? (
-                      <Link
-                        href={`/dashboard/recommendations?plan=${s.plan.plan_id}`}
-                        className="text-xs font-medium text-primary hover:underline"
-                      >
-                        View plan ({s.plan.row_count} meals)
-                      </Link>
-                    ) : (
-                      <span className="text-xs text-muted-foreground">No plan generated</span>
-                    )}
-                  </td>
-                </tr>
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {new Date(s.created_at).toLocaleDateString("en-IN", {
+                        day: "numeric", month: "short", year: "numeric",
+                        hour: "2-digit", minute: "2-digit",
+                      })}
+                    </td>
+                    <td className="px-4 py-3">
+                      {s.basic ? (
+                        <span className="text-xs">
+                          {s.basic.Gender}, {s.basic.Age}y, {s.basic.Weight}kg, {s.basic.Height}cm
+                          {s.basic.Hba1c != null && <>, HbA1c: {s.basic.Hba1c}</>}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-xs">{s.diet ?? "—"}</span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {s.pref_count > 0 ? (
+                        <button
+                          onClick={() => togglePreferences(s.onboarding_id)}
+                          className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                        >
+                          {expandedId === s.onboarding_id ? (
+                            <ChevronDown className="h-3 w-3" />
+                          ) : (
+                            <ChevronRight className="h-3 w-3" />
+                          )}
+                          {s.pref_count} items
+                        </button>
+                      ) : (
+                        <>
+                          <span className="text-xs font-medium">0</span>
+                          <span className="text-xs text-muted-foreground"> items</span>
+                        </>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {s.plan ? (
+                        <Link
+                          href={`/dashboard/recommendations?plan=${s.plan.plan_id}`}
+                          className="text-xs font-medium text-primary hover:underline"
+                        >
+                          View plan ({s.plan.row_count} meals)
+                        </Link>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No plan generated</span>
+                      )}
+                    </td>
+                  </tr>
+
+                  {expandedId === s.onboarding_id && (
+                    <tr key={`${s.onboarding_id}-prefs`} className="border-b bg-muted/10">
+                      <td colSpan={6} className="px-6 py-4">
+                        {prefLoading === s.onboarding_id ? (
+                          <p className="text-xs text-muted-foreground">Loading preferences…</p>
+                        ) : prefData[s.onboarding_id]?.length ? (
+                          <div className="flex flex-wrap gap-6">
+                            {groupByMealTime(prefData[s.onboarding_id]).map(({ meal_time, items }) => (
+                              <div key={meal_time} className="min-w-[140px]">
+                                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                  {meal_time}
+                                </p>
+                                <ul className="space-y-0.5">
+                                  {items.map((p, idx) => (
+                                    <li key={idx} className="flex items-center gap-1.5 text-xs">
+                                      <span
+                                        className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${
+                                          p.Reaction?.toLowerCase() === "dislike"
+                                            ? "bg-red-400"
+                                            : "bg-green-500"
+                                        }`}
+                                      />
+                                      <span>{subCatMap[String(p.sub_category).trim()] ?? p.sub_category}</span>
+                                      {p.dish_type && p.dish_type !== "Main" && (
+                                        <span className="text-muted-foreground">({p.dish_type})</span>
+                                      )}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-muted-foreground">No preference details found.</p>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
