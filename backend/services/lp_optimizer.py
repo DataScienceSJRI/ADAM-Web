@@ -648,7 +648,7 @@ def run_lp(
         "days": int(n_days),
         "required_slots": int(len(required_slots)),
     }
-    print(weekly_menu)
-    weekly_menu.to_csv("weekly_menu_lp_output.csv", index=False)
-    print(summary)
+    # print(weekly_menu)
+    # weekly_menu.to_csv("weekly_menu_lp_output.csv", index=False)
+    # print(summary)
     return weekly_menu, summary, weekly_min

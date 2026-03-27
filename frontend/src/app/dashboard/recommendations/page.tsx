@@ -129,13 +129,12 @@ export default function RecommendationsPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.email) return;
 
-      // Own rows — reliable, filtered by user_id
+      // Own rows 
       const { data: myRecData, error: recErr } = await supabase
         .from("Recommendation")
         .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
         .eq("user_id", user.email)
-        .order("Date", { ascending: true })
-        .order("Pkey", { ascending: true })
+        .order("Pkey", { ascending: false })
         .limit(5000);
 
       if (recErr) { setError(recErr.message); setLoading(false); return; }

@@ -24,6 +24,7 @@ async function fetchPlanCards(email: string): Promise<PlanCard[]> {
     .from("Recommendation")
     .select("Pkey, plan_id, onboarding_id, Date")
     .eq("user_id", email)
+    .order("Pkey", { ascending: false })
     .limit(5000);
 
   if (!data || data.length === 0) return [];

@@ -171,13 +171,14 @@ def generate_plan(
                 weekly_menu = pd.concat(
                     [weekly_menu, pd.DataFrame(extra_rows)], ignore_index=True
                 ).sort_values(["Day", "Meal_Time", "Dish_Type"]).reset_index(drop=True)
-                print(f"[INFO] Supplemented weekly_menu with {len(extra_rows)} rows for missing meal times: "
-                      f"{[m for m, _ in all_slots if str(m).strip() not in present_times]}")
+                logger.info("Supplemented weekly_menu with %d rows for missing meal times: %s",
+                            len(extra_rows), [m for m, _ in all_slots if str(m).strip() not in present_times])
     except Exception as _supp_err:
         logger.warning("Could not supplement missing meal times: %s", _supp_err)
 
     try:
-        logger.info("Writing %d rows to recommendations for user_id=%s", len(weekly_menu) if weekly_menu is not None else 0, user_id)
+        unique_days = sorted(weekly_menu["Day"].dropna().unique().tolist()) if weekly_menu is not None and "Day" in weekly_menu.columns else []
+        logger.info("Writing %d rows to recommendations for user_id=%s | unique days: %s", len(weekly_menu) if weekly_menu is not None else 0, user_id, unique_days)
         rows_written, plan_id = write_recommendations(
             user_id=user_id,
             weekly_menu=weekly_menu,
