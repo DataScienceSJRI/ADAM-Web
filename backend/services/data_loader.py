@@ -104,10 +104,10 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                                                  "SubCategory_merge", "codeoccurance",
                                                  "MainCategoryCode"] if c in prefs.columns])
         # "Main2" (frontend) → "Main 2" (Functions_Base internal label) so side dishes share the LP slot
-        if "dish_type" in prefs.columns:
-            prefs["dish_type"] = prefs["dish_type"].apply(
-                lambda x: "Main 2" if x == "Main2" else (x if x == "Main" else "Main")
-            )
+        # if "dish_type" in prefs.columns:
+        #     prefs["dish_type"] = prefs["dish_type"].apply(
+        #         lambda x: "Main 2" if x == "Main2" else (x if x == "Main" else "Main")
+        #     )
         # map SubCategory codes (e.g. "A1A") → names (e.g. "Dosa") so the model's merge resolves correctly
         if "sub_category" in prefs.columns:
             _code_to_name: dict = {}
