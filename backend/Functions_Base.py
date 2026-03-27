@@ -1450,14 +1450,9 @@ class ADAMPersonalizationModel:
 		profile: Optional[Dict[str, object]] = None,
 	) -> Dict[str, pd.DataFrame | Dict[str, object]]:
 		print("\n[DEBUG] Filtering for top choices...")
-		if user_preference.lower() == "no":
-			ds = self.load_data(profile)
-			recipe_master = self.build_recipe_master(ds)
-			main1_to_main2, main1_to_optional = self._get_main1_main2_map(ds)
-			mapping_df = ds.get("main1_main2_mapping", pd.DataFrame()).copy()
-			scored = self.score_personalization(recipe_master, pd.DataFrame(), ds, top_n=top_n)
-			prefs = pd.DataFrame()
-		else:
+		
+
+		if user_preference.lower() == "yes":
 			ds = self.load_data(profile)
 			recipe_master = self.build_recipe_master(ds)
 			prefs = self.build_preference_map(ds, uid=uid)
@@ -1507,72 +1502,8 @@ class ADAMPersonalizationModel:
 				print(f"[DEBUG]   No candidates for subcat_code={subcat_code}")
 		ds = self.load_data(profile)
 		recipe_master = self.build_recipe_master(ds)
-		if user_preference.lower() == "no":
-			# Strict, code-driven mapping logic for Main, Main 2, and Optional
-			main1_to_main2, main1_to_optional = self._get_main1_main2_map(ds)
-			mapping_df = ds.get("main1_main2_mapping", pd.DataFrame()).copy()
-			scored = self.score_personalization(recipe_master, pd.DataFrame(), ds, top_n=top_n)
-			meal_times = ["Breakfast", "Lunch", "Dinner","Snacks"]
-			all_rows = []
 
-
-			# Determine which columns are available in scored
-			code_cols = [c for c in ["Code_cooccurence", "MainCategoryCode", "Subcategories"] if c in scored.columns]
-			for _, row in mapping_df.iterrows():
-				main1 = str(row["Main1_Code"]).strip().upper()
-				main2_codes = set(x.strip().upper() for x in str(row["Main2_Code"]).split("/") if x)
-				optional_codes = set(x.strip().upper() for x in str(row["Optional"]).split("/") if x)
-				# Main
-				if code_cols:
-					mask_main1 = pd.Series(False, index=scored.index)
-					for col in code_cols:
-						mask_main1 = mask_main1 | scored[col].astype(str).str.upper().str.startswith(main1)
-					subset_main1 = scored[mask_main1].copy()
-				else:
-					subset_main1 = pd.DataFrame()
-				if not subset_main1.empty:
-					subset_main1["Preferred_SubCategory_code"] = main1
-					subset_main1["Dish_Type"] = "Main"
-					for meal_time in meal_times:
-						subset_main1["Meal_Time"] = meal_time
-						all_rows.append(subset_main1.sort_values("Personalization_Score", ascending=False).head(top_n))
-				# Main 2
-					for main2 in main2_codes:
-						if code_cols:
-							mask_main2 = pd.Series(False, index=scored.index)
-							for col in code_cols:
-								mask_main2 = mask_main2 | scored[col].astype(str).str.upper().str.startswith(main2)
-							subset_main2 = scored[mask_main2.astype(bool)].copy()
-					else:
-						subset_main2 = pd.DataFrame()
-					if not subset_main2.empty:
-						subset_main2["Preferred_SubCategory_code"] = main2
-						subset_main2["Dish_Type"] = "Main 2"
-						for meal_time in meal_times:
-							subset_main2["Meal_Time"] = meal_time
-							all_rows.append(subset_main2.sort_values("Personalization_Score", ascending=False).head(top_n))
-				# Optional
-					for opt in optional_codes:
-						if code_cols:
-							mask_opt = pd.Series(False, index=scored.index)
-							for col in code_cols:
-								mask_opt = mask_opt | scored[col].astype(str).str.upper().str.startswith(opt)
-							subset_opt = scored[mask_opt.astype(bool)].copy()
-					else:
-						subset_opt = pd.DataFrame()
-					if not subset_opt.empty:
-						subset_opt["Preferred_SubCategory_code"] = opt
-						subset_opt["Dish_Type"] = "Side"
-						for meal_time in meal_times:
-							subset_opt["Meal_Time"] = meal_time
-							all_rows.append(subset_opt.sort_values("Personalization_Score", ascending=False).head(top_n))
-			top_choices = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
-			# Limit to top_n candidates per preference/meal/dish to keep consistent truncation
-			if not top_choices.empty:
-				top_choices = top_choices.sort_values("Personalization_Score", ascending=False)
-				top_choices = top_choices.groupby(["Preference_Row_ID", "Meal_Time", "Dish_Type"], as_index=False, sort=False).head(top_n).reset_index(drop=True)
-			prefs = pd.DataFrame()
-		else:
+		if len(user_preference)>0 and user_preference.lower() != "no":
 			prefs = self.build_preference_map(ds, uid=uid)
 			# Use robust merge to ensure sub_category_code is filled for all preferences
 			subcat_df = ds.get("subcategories", pd.DataFrame()).copy()
@@ -1587,8 +1518,6 @@ class ADAMPersonalizationModel:
 			print(main1_to_main2)
 			print(main1_to_optional)
 			scored.to_csv("scored_debug.csv", index=False)
-			prefs.to_csv("prefs_debug.csv", index=False)
-			
 			for _, pref in prefs.iterrows():
 				# Use sub_category_code for matching
 				subcat_code = str(pref.get("sub_category_code", "")).strip().upper()
