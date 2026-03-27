@@ -535,7 +535,8 @@ class ADAMPersonalizationModel:
 
 		print(f"[DEBUG][score_personalization] combo_rows contents: {combo_rows}")
 		combos = pd.DataFrame(combo_rows).drop_duplicates().reset_index(drop=True)
-
+		combos.to_csv("preference_combos_debug.csv", index=False)
+		
 		all_rows = []
 		for _, combo in combos.iterrows():
 			print(f"[DEBUG][score_personalization] Combo: {combo.to_dict()}")
@@ -658,7 +659,7 @@ class ADAMPersonalizationModel:
 		weight = float(profile.get("weight"))
 		sex = str(profile.get("gender"))
 		PAL_level = str(profile.get("activity_levels"))
-		if PAL_level == "sedentary":
+		if PAL_level == "Sedentary":
 			PAL = 1.2
 		if PAL_level == "Lightly Active":
 			PAL = 1.375
