@@ -27,6 +27,7 @@ type SubCategoryRow = {
   Side_dish_dinner: string | null;
   Snacks: string | null;
   Beverage: string | null;
+  Veg: number | null;
 };
 
 type SubTab = {
@@ -53,7 +54,6 @@ const SUB_TABS: Record<MealTime, SubTab[]> = {
   ],
   Snacks: [
     { key: "main", label: "Snacks", filter: (r) => r.Snacks === "1" || (r.Snacks != null && r.Snacks !== "" && r.Snacks !== "0") },
-    { key: "bev", label: "Beverages", filter: (r) => r.Beverage === "1" },
   ],
 };
 
@@ -69,11 +69,13 @@ export function MealPreferencesForm({
   onChange,
   onBack,
   onNext,
+  dietaryType,
 }: {
   selections: MealSelection[];
   onChange: (selections: MealSelection[]) => void;
   onBack: () => void;
   onNext: () => void;
+  dietaryType?: string;
 }) {
   const [activeTab, setActiveTab] = useState<MealTime>("Breakfast");
   const [activeSubTab, setActiveSubTab] = useState<string>("main");
@@ -84,7 +86,7 @@ export function MealPreferencesForm({
   useEffect(() => {
     createClient()
       .from("SubCategory_Onboarding")
-      .select("Code, SubCategory, MainCategoryCode, Breakfast, Side_dish_breakfast, Lunch, Side_dish_lunch, Dinner, Side_dish_dinner, Snacks, Beverage")
+      .select("Code, SubCategory, MainCategoryCode, Breakfast, Side_dish_breakfast, Lunch, Side_dish_lunch, Dinner, Side_dish_dinner, Snacks, Beverage, Veg")
       .limit(5000)
       .then(({ data }) => {
         setRows((data as SubCategoryRow[]) ?? []);
@@ -110,9 +112,10 @@ export function MealPreferencesForm({
     );
   }
 
-  function dishTypeFor(subTabKey: string): string | null {
-    if (subTabKey === "side") return "Main2";
-    if (subTabKey === "bev") return null;
+  function dishTypeFor(subTabKey: string, meal: MealTime): string {
+    if (meal === "Snacks") return "Snacks";
+    if (subTabKey === "side") return "Side";
+    if (subTabKey === "bev") return "Beverage";
     return "Main";
   }
 
@@ -130,7 +133,7 @@ export function MealPreferencesForm({
           meal_time: meal,
           sub_category: row.Code,
           sub_category_name: row.SubCategory ?? row.Code,
-          dish_type: dishTypeFor(subTabKey),
+          dish_type: dishTypeFor(subTabKey, meal),
         },
       ]);
     }
@@ -139,17 +142,23 @@ export function MealPreferencesForm({
   const subTabs = SUB_TABS[activeTab];
   const currentSubTab = subTabs.find((t) => t.key === activeSubTab) ?? subTabs[0];
 
+  const isVegOnly = dietaryType?.toLowerCase() !== "non veg";
+
   const visibleRows = useMemo(() => {
-    const filtered = rows.filter(currentSubTab.filter);
+    let filtered = rows.filter(currentSubTab.filter);
+    if (isVegOnly) filtered = filtered.filter((r) => r.Veg === 1);
     if (!search.trim()) return filtered;
     const q = search.toLowerCase();
     return filtered.filter((r) =>
       (r.SubCategory ?? r.Code).toLowerCase().includes(q)
     );
-  }, [rows, currentSubTab, search]);
+  }, [rows, currentSubTab, search, isVegOnly]);
 
-  const incompleteMealTimes = MEAL_TIMES.filter(
-    (mt) => selections.filter((s) => s.meal_time === mt).length < 3
+  const REQUIRED_MEAL_TIMES = ["Breakfast", "Lunch", "Dinner"] as const;
+  const MAIN_MIN = 5;
+
+  const incompleteMealTimes = REQUIRED_MEAL_TIMES.filter(
+    (mt) => selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length < MAIN_MIN
   );
   const canProceed = incompleteMealTimes.length === 0;
 
@@ -165,7 +174,10 @@ export function MealPreferencesForm({
         {/* Meal time tabs */}
         <div className="flex gap-1 rounded-lg bg-muted p-1">
           {MEAL_TIMES.map((mt) => {
-            const count = selections.filter((s) => s.meal_time === mt).length;
+            const mainCount = selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length;
+            const totalCount = selections.filter((s) => s.meal_time === mt).length;
+            const isRequired = (REQUIRED_MEAL_TIMES as readonly string[]).includes(mt);
+            const done = isRequired ? mainCount >= MAIN_MIN : true;
             return (
               <button
                 key={mt}
@@ -177,9 +189,15 @@ export function MealPreferencesForm({
                 }`}
               >
                 {mt}
-                {count > 0 && (
-                  <span className="ml-1.5 rounded-full bg-primary/15 text-primary px-1.5 py-0.5 text-[10px] font-semibold">
-                    {count}
+                {isRequired ? (
+                  <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                    done ? "bg-emerald-100 text-emerald-700" : "bg-primary/15 text-primary"
+                  }`}>
+                    {mainCount}/{MAIN_MIN}
+                  </span>
+                ) : totalCount > 0 && (
+                  <span className="ml-1.5 rounded-full bg-muted text-muted-foreground px-1.5 py-0.5 text-[10px] font-semibold">
+                    {totalCount}
                   </span>
                 )}
               </button>
@@ -252,13 +270,13 @@ export function MealPreferencesForm({
           {!canProceed && (
             <div className="flex flex-wrap gap-1.5">
               {incompleteMealTimes.map((mt) => {
-                const count = selections.filter((s) => s.meal_time === mt).length;
+                const count = selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length;
                 return (
                   <span
                     key={mt}
                     className="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground"
                   >
-                    {mt}: {count}/3
+                    {mt}: {count}/{MAIN_MIN} main items
                   </span>
                 );
               })}

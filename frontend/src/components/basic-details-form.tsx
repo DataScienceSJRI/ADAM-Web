@@ -28,7 +28,7 @@ export type BasicDetails = {
 };
 
 const GENDERS = ["Male", "Female", "Other", "Prefer not to say"];
-const DIETARY_TYPES = ["Veg", "Non Veg", "Vegan", "Eggatarian"];
+const DIETARY_TYPES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"];
 const DIET_RESTRICTIONS = ["Diabetic", "Gluten Free"];
 const ACTIVITY_LEVELS = [
   "Sedentary",

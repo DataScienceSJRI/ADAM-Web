@@ -80,11 +80,6 @@ export default function OnboardingPage() {
       console.warn("Could not save preference details:", pdError.message);
     }
 
-    await supabase
-      .from("BE_Preference_onboarding")
-      .delete()
-      .eq("user_id", user.email);
-
     if (selections.length > 0) {
       const { error: prefError } = await supabase
         .from("BE_Preference_onboarding")
@@ -168,6 +163,7 @@ export default function OnboardingPage() {
           onChange={setSelections}
           onBack={() => setStep(0)}
           onNext={() => setStep(2)}
+          dietaryType={basicDetails?.dietary_type}
         />
       )}
 
