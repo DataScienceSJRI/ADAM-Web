@@ -10,6 +10,7 @@ import { createClient } from "@/lib/supabase/client";
 type RecommendationRow = {
   Pkey: number;
   plan_id: string | null;
+  user_id: string | null;
   Date: string | null;
   Timings: string | null;
   Food_Name: string | null;
@@ -22,6 +23,7 @@ type RecommendationRow = {
 
 type PlanOption = {
   plan_id: string;
+  owner_id: string | null;
   start_date: string | null;
   created_at: string | null;
   row_count: number;
@@ -110,7 +112,7 @@ export default function RecommendationsPage() {
   const [rows, setRows] = useState<RecommendationRow[]>([]);
   const [plans, setPlans] = useState<PlanOption[]>([]);
   const [activePlanId, setActivePlanId] = useState<string | null>(null);
-  const [activeWeek, setActiveWeek] = useState<number | null>(null);
+  const [activeWeek, setActiveWeek] = useState<number | "all" | null>("all");
   const [reactions, setReactions] = useState<MealReaction[]>([]);
   const [comments, setComments] = useState<MealComment[]>([]);
   const [glData, setGlData] = useState<GLRow[]>([]);
@@ -127,16 +129,29 @@ export default function RecommendationsPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.email) return;
 
-      const { data: recData, error: recErr } = await supabase
+      // Own rows — reliable, filtered by user_id
+      const { data: myRecData, error: recErr } = await supabase
         .from("Recommendation")
-        .select("Pkey, plan_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
+        .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
         .eq("user_id", user.email)
         .order("Date", { ascending: true })
         .order("Pkey", { ascending: true })
         .limit(5000);
 
       if (recErr) { setError(recErr.message); setLoading(false); return; }
-      const allRows = (recData ?? []) as RecommendationRow[];
+
+      // Other users' rows — for social discovery (latest 2000 rows by Pkey)
+      const { data: othersRecData } = await supabase
+        .from("Recommendation")
+        .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
+        .neq("user_id", user.email)
+        .order("Pkey", { ascending: false })
+        .limit(2000);
+
+      const allRows = [
+        ...((myRecData ?? []) as RecommendationRow[]),
+        ...((othersRecData ?? []) as RecommendationRow[]),
+      ];
 
       // Build plan list
       const planMap = new Map<string, PlanOption>();
@@ -144,7 +159,8 @@ export default function RecommendationsPage() {
         const pid = row.plan_id ?? "unknown";
         if (!planMap.has(pid)) {
           planMap.set(pid, {
-            plan_id: pid, start_date: row.Date, created_at: null,
+            plan_id: pid, owner_id: row.user_id ?? null,
+            start_date: row.Date, created_at: null,
             row_count: 0, max_pkey: row.Pkey,
             onboarding_id: (row as any).onboarding_id ?? null,
           });
@@ -165,25 +181,37 @@ export default function RecommendationsPage() {
         }
       }
 
-      const planList = [...planMap.values()].sort((a, b) => b.max_pkey - a.max_pkey);
-      const matched = planParam ? planList.find(p => p.plan_id === planParam) : null;
-      const selectedPid = (matched ?? planList[0])?.plan_id ?? null;
-      const firstWeek = allRows.find(r => r.plan_id === selectedPid)?.WeekNo ?? null;
+      // My plans first (by max_pkey desc), then others (by max_pkey desc)
+      const allPlans = [...planMap.values()];
+      const myPlans = allPlans.filter(p => p.owner_id === user.email).sort((a, b) => b.max_pkey - a.max_pkey);
+      const otherPlans = allPlans.filter(p => p.owner_id !== user.email).sort((a, b) => b.max_pkey - a.max_pkey);
+      // Fallback: if owner_id is null (which shouldn't happen), include in myPlans bucket by treating nulls as own
+      const unknownPlans = allPlans.filter(p => !p.owner_id).sort((a, b) => b.max_pkey - a.max_pkey);
+      const planList = [...myPlans, ...unknownPlans, ...otherPlans];
 
-      // Ensure user profile
-      const { data: profileData } = await supabase
-        .from("UserProfiles").select("user_id, display_name").eq("user_id", user.email).maybeSingle();
-      const myProfile: UserProfile = (profileData as UserProfile) ?? { user_id: user.email, display_name: null };
-      if (!profileData) {
+      const matched = planParam ? planList.find(p => p.plan_id === planParam) : null;
+      // Always default to own latest plan; if none, fall back to first in list
+      const selectedPid = matched?.plan_id ?? myPlans[0]?.plan_id ?? planList[0]?.plan_id ?? null;
+
+      // Load profiles for all plan owners
+      const ownerIds = [...new Set(allPlans.map(p => p.owner_id).filter(Boolean))] as string[];
+      const { data: allProfileData } = await supabase
+        .from("UserProfiles").select("user_id, display_name").in("user_id", ownerIds.length > 0 ? ownerIds : [user.email]);
+      const profileMap: Record<string, UserProfile> = {};
+      for (const p of (allProfileData ?? []) as UserProfile[]) profileMap[p.user_id] = p;
+
+      // Ensure current user has a profile
+      const myProfile: UserProfile = profileMap[user.email] ?? { user_id: user.email, display_name: null };
+      if (!profileMap[user.email]) {
         await supabase.from("UserProfiles").upsert({ user_id: user.email });
       }
 
       setRows(allRows);
       setPlans(planList);
       setActivePlanId(selectedPid);
-      setActiveWeek(firstWeek);
+      setActiveWeek("all");
       setCurrentUser(myProfile);
-      setProfiles({ [user.email]: myProfile });
+      setProfiles({ ...profileMap, [user.email]: myProfile });
       setLoading(false);
     }
     load();
@@ -219,7 +247,7 @@ export default function RecommendationsPage() {
     loadSocial();
   }, [activePlanId]);
 
-  useEffect(() => { setSelectedMeal(null); }, [activePlanId, activeWeek]);
+  useEffect(() => { setSelectedMeal(null); setActiveWeek("all"); }, [activePlanId]);
 
   // ── Reaction handlers ────────────────────────────────────────────────────────
   async function handleItemReaction(pkey: number, myReaction: string | null, reaction: "liked" | "disliked") {
@@ -295,8 +323,8 @@ export default function RecommendationsPage() {
   );
 
   const activeRows = rows.filter(r => (r.plan_id ?? "unknown") === activePlanId);
-  const weeks = [...new Set(activeRows.map(r => r.WeekNo).filter(w => w != null))] as number[];
-  const weekRows = activeRows.filter(r => r.WeekNo === activeWeek);
+  const weeks = [...new Set(activeRows.map(r => r.WeekNo).filter(w => w != null))].sort((a, b) => (a ?? 0) - (b ?? 0)) as number[];
+  const weekRows = activeWeek === "all" ? activeRows : activeRows.filter(r => r.WeekNo === activeWeek);
 
   const byDate: Record<string, Record<string, RecommendationRow[]>> = {};
   for (const row of weekRows) {
@@ -337,28 +365,44 @@ export default function RecommendationsPage() {
       </div>
 
       {/* Plan selector */}
-      {plans.length > 1 && (
+      {plans.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {plans.map((plan, i) => (
-            <button key={plan.plan_id} onClick={() => setActivePlanId(plan.plan_id)}
-              className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                activePlanId === plan.plan_id
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {i === 0 ? "Latest" : `Plan ${plans.length - i}`}
-              {plan.created_at && (
-                <span className="ml-1 opacity-70">· {new Date(plan.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>
-              )}
-            </button>
-          ))}
+          {plans.map((plan, i) => {
+            const isOwn = plan.owner_id === currentUser?.user_id;
+            const ownerProfile = plan.owner_id ? profiles[plan.owner_id] : null;
+            const ownerLabel = ownerProfile?.display_name ?? plan.owner_id?.split("@")[0] ?? "Unknown";
+            const myPlanIndex = plans.filter((p, j) => j <= i && p.owner_id === currentUser?.user_id).length;
+            const label = isOwn
+              ? (myPlanIndex === 1 ? "My Latest" : `My Plan ${myPlanIndex}`)
+              : ownerLabel;
+            return (
+              <button key={plan.plan_id} onClick={() => setActivePlanId(plan.plan_id)}
+                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  activePlanId === plan.plan_id
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {!isOwn && plan.owner_id && (
+                  <Avatar userId={plan.owner_id} displayName={ownerProfile?.display_name} size="sm" />
+                )}
+                {label}
+                {plan.created_at && (
+                  <span className="opacity-70">· {new Date(plan.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
 
       {/* Week selector */}
       {weeks.length > 1 && (
         <div className="flex gap-1 rounded-lg bg-muted p-1 w-fit">
+          <button onClick={() => setActiveWeek("all")}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${activeWeek === "all" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
+            All
+          </button>
           {weeks.map(w => (
             <button key={w} onClick={() => setActiveWeek(w)}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${activeWeek === w ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
