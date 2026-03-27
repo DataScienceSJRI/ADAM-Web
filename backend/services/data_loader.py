@@ -190,28 +190,37 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                 }
 
                 col = diet_column_map.get(diet)
-                if col and col in rt.columns and col != "Non vegetarian":
-                    mask = pd.to_numeric(rt[col], errors="coerce") == 1
-                    rt_sub = rt[mask].copy()
-                    if not rt_sub.empty:
-                        ds["recipe_tag"] = rt_sub
-                        if "Recipe_Code" in ds["recipes"].columns:
-                            valid_codes = (
-                                rt_sub["Recipe_Code"]
-                                .astype(str)
-                                .str.strip()
-                                .str.upper()
-                                .dropna()
-                                .unique()
-                            )
-                            ds["recipes"] = ds["recipes"][
-                                ds["recipes"]["Recipe_Code"]
-                                .astype(str)
-                                .str.strip()
-                                .str.upper()
-                                .isin(valid_codes)
-                            ].copy()
-        print("No of recipes - BEFORE",len(ds["recipes"]))
+                if col and col in rt.columns:
+                    if col == "Ovo-vegetarian":
+                        veg_series = pd.to_numeric(rt.get("Vegetarian"), errors="coerce")
+                        ovo_series = pd.to_numeric(rt.get("Ovo-vegetarian"), errors="coerce")
+                        mask = (veg_series == 1) | ((veg_series == 0) & (ovo_series == 1))
+                    elif col != "Non vegetarian":
+                        mask = pd.to_numeric(rt[col], errors="coerce") == 1
+                    else:
+                        mask = None
+
+                    if mask is not None:
+                        rt_sub = rt[mask].copy()
+                        if not rt_sub.empty:
+                            ds["recipe_tag"] = rt_sub
+                            if "Recipe_Code" in ds["recipes"].columns:
+                                valid_codes = (
+                                    rt_sub["Recipe_Code"]
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    .dropna()
+                                    .unique()
+                                )
+                                ds["recipes"] = ds["recipes"][
+                                    ds["recipes"]["Recipe_Code"]
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    .isin(valid_codes)
+                                ].copy()
+        print("No of recipes - AFTER",len(ds["recipes"]))
     except Exception:
         logger.exception("Vegetarian recipe filtering failed for user_id=%s — serving unfiltered recipes", user_id)
 
