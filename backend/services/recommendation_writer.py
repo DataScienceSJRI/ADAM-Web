@@ -1,11 +1,29 @@
 import uuid
 import logging
+import math
 import pandas as pd
 from datetime import date, timedelta
 from typing import Optional
 from core.supabase import get_supabase
 
 logger = logging.getLogger("backend.recommendation_writer")
+
+
+def _to_float(val) -> float | None:
+    """Convert value to float, returning None for NaN/None/invalid."""
+    try:
+        v = float(val)
+        return None if math.isnan(v) or math.isinf(v) else v
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_str(val) -> str | None:
+    """Convert value to stripped string, returning None for empty/nan."""
+    if val is None:
+        return None
+    s = str(val).strip()
+    return None if s.lower() in ("nan", "none", "") else s
 
 
 def write_recommendations(
@@ -148,3 +166,99 @@ def get_plan_status(user_id: str) -> dict:
         "row_count": sum(p["row_count"] for p in plan_list),
         "plans": plan_list,
     }
+
+
+def write_final_summary(
+    user_id: str,
+    plan_id: str,
+    final_summary_df: pd.DataFrame,
+) -> int:
+    """
+    Writes the formatted weekly menu summary to FinalSummary table.
+    Day numbers are converted to actual dates. Internal computation
+    columns (_opt_prop, _carb_g, etc.) are excluded.
+    Returns rows written.
+    """
+    if final_summary_df is None or final_summary_df.empty:
+        return 0
+
+    supabase = get_supabase()
+    today = date.today()
+    rows = []
+
+    for _, row in final_summary_df.iterrows():
+        try:
+            meal_date = (today + timedelta(days=int(row.get("Day", 1)) - 1)).isoformat()
+        except (TypeError, ValueError):
+            meal_date = None
+
+        rows.append({
+            "plan_id": plan_id,
+            "user_id": user_id,
+            "Date": meal_date,
+            "Meal_Time": _to_str(row.get("Meal_Time")),
+            "Recipe_Code": _to_str(row.get("Recipe_Code")),
+            "Code_cooccurence": _to_str(row.get("Code_cooccurence")),
+            "Subcategories": _to_str(row.get("Subcategories")),
+            "Dish_Type": _to_str(row.get("Dish_Type")),
+            "Recipe_Name": _to_str(row.get("Recipe_Name")),
+            "Optimal_proportion": _to_float(row.get("Optimal proportion")),
+            "Recipe_weight_original_g": _to_float(row.get("Recipe weight Original (g)")),
+            "Portion_original": _to_str(row.get("Portion original")),
+            "Recipe_weight_optimal_g": _to_float(row.get("Recipe weight Optimal (g)")),
+            "Portion_optimal": _to_float(row.get("Portion optimal")),
+            "Description_tagging": _to_str(row.get("Description_tagging")),
+            "OPTIMAL_STATUS": _to_str(row.get("OPTIMAL_STATUS")),
+            "Subcategory_Code": _to_str(row.get("Subcategory_Code")),
+            "GI_Avg": _to_float(row.get("GI_Avg")),
+            "Subcategory_Name": _to_str(row.get("Subcategory_Name")),
+            "Energy_ENERC_KJ": _to_float(row.get("Energy_ENERC_KJ")),
+            "Carbohydrate_g": _to_float(row.get("Carbohydrate_g")),
+            "TotalDietaryFibre_FIBTG_g": _to_float(row.get("TotalDietaryFibre_FIBTG_g")),
+            "Energy_ENERC_Kcal": _to_float(row.get("Energy_ENERC_Kcal")),
+            "GL": _to_float(row.get("GL")),
+            "Meal_GL": _to_float(row.get("Meal_GL")),
+        })
+
+    if not rows:
+        return 0
+
+    batch_size = 100
+    for i in range(0, len(rows), batch_size):
+        supabase.table("FinalSummary").insert(rows[i : i + batch_size]).execute()
+
+    logger.info("Inserted %d rows to FinalSummary for plan_id=%s", len(rows), plan_id)
+    return len(rows)
+
+
+def write_final_nutrient_summary(
+    user_id: str,
+    plan_id: str,
+    nutrient_summary_df: pd.DataFrame,
+) -> int:
+    """
+    Writes the weekly nutrient achievement summary to FinalNutrientSummary table.
+    Returns rows written.
+    """
+    if nutrient_summary_df is None or nutrient_summary_df.empty:
+        return 0
+
+    supabase = get_supabase()
+    rows = [
+        {
+            "plan_id": plan_id,
+            "user_id": user_id,
+            "Nutrient": _to_str(row.get("Nutrient")),
+            "Weekly_Requirement": _to_float(row.get("Weekly_Requirement")),
+            "Achieved_From_Menu": _to_float(row.get("Achieved_From_Menu")),
+            "Percent_Requirement_Met": _to_float(row.get("Percent_Requirement_Met")),
+        }
+        for _, row in nutrient_summary_df.iterrows()
+    ]
+
+    if not rows:
+        return 0
+
+    supabase.table("FinalNutrientSummary").insert(rows).execute()
+    logger.info("Inserted %d rows to FinalNutrientSummary for plan_id=%s", len(rows), plan_id)
+    return len(rows)

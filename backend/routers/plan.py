@@ -11,7 +11,12 @@ from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
 from services.data_loader import _fetch, load_data_from_supabase
 from services.profile_builder import build_profile
-from services.recommendation_writer import write_recommendations, get_plan_status
+from services.recommendation_writer import (
+    write_recommendations,
+    write_final_summary,
+    write_final_nutrient_summary,
+    get_plan_status,
+)
 import logging
 
 
@@ -64,13 +69,15 @@ def generate_plan(
 ):
     """Generate a 7-day personalised meal plan for the authenticated user."""
     profile = build_profile(user_id, onboarding_id=body.onboarding_id)
-    print(profile)
 
     if profile is None:
         raise HTTPException(
             status_code=404,
             detail=f"No basic details found for user {user_id}. Complete onboarding first.",
         )
+
+    finall_summary = None
+    final_nut_summary = None
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -88,7 +95,6 @@ def generate_plan(
             # weekly_optimization_summary is a JSON file path — read it while tmpdir exists.
             weekly_menu = output_paths.get("weekly_menu")
             recipe_name_changed = _fetch("USER_Recipes_name_changed")
-            weekly_menu = output_paths.get("weekly_menu")
 
             # Create mapping (Recipe_Code → New Recipe_Name)
             name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
@@ -100,20 +106,11 @@ def generate_plan(
 
             top_choices = output_paths.get("top_personalized_choices")
             weekly_min = output_paths.get("weekly_min")
-            print(output_paths)
             summary = output_paths.get("weekly_optimization_summary")
             if summary.get("status") == "Optimal":
-                print("Solution is optimal")
-
-
-                if len(weekly_menu)>0:
+                if len(weekly_menu) > 0:
                     finall_summary = Recomendation_formatting(weekly_menu)
-                    print(finall_summary)
-                    finall_summary.to_csv("final_summary.csv", index=False)  # Save the final summary as CSV
-
-                    final_nut_summary = build_weekly_nutrient_summary(weekly_menu,weekly_min)
-                    print(final_nut_summary)
-                    final_nut_summary.to_csv("final_nutrient_summary.csv", index=False)  # Save the nutrient summary as CSV
+                    final_nut_summary = build_weekly_nutrient_summary(weekly_menu, weekly_min)
 
 
                 os_path = output_paths.get("weekly_optimization_summary")
@@ -192,6 +189,12 @@ def generate_plan(
         logger.exception("Failed to write recommendations for user_id=%s: %s", user_id, e)
         raise HTTPException(status_code=500, detail=f"Failed to write recommendations: {str(e)}")
 
+    try:
+        write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
+        write_final_nutrient_summary(user_id=user_id, plan_id=plan_id, nutrient_summary_df=final_nut_summary)
+    except Exception as e:
+        logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
+
     return GeneratePlanResponse(
         status="ok",
         rows_written=rows_written,
@@ -224,8 +227,6 @@ def Recomendation_formatting(weekly_menu_df):
 				"Recipe Name": "Recipe_Name",
 			}
 		)
-        print(list(weekly_menu_df.columns))
-        print(list(tag_df.columns))
         # Ensure Serving numeric
         weekly_menu_df["Serving"] = pd.to_numeric(weekly_menu_df.get("Serving", 0.0), errors="coerce").fillna(0.0)
         # Select tagging columns if present
@@ -291,7 +292,7 @@ def Recomendation_formatting(weekly_menu_df):
                     # Attach human-readable subcategory name from SubCategory.csv (if available)
                     try:
                         sub_ref = _fetch("SubCategory")
-                        if len(sub_ref)>0: #"SubCategory.csv"
+                        if len(sub_ref) > 0:
                             if "Code" in sub_ref.columns and "SubCategory" in sub_ref.columns:
                                 # Normalize codes for matching
                                 sub_ref["Code"] = sub_ref["Code"].astype(str).str.strip().str.upper()
@@ -356,8 +357,7 @@ def Recomendation_formatting(weekly_menu_df):
             # non-fatal; proceed without GI merge
             pass
 
-        # Save CSV for backward compatibility
-        # Ensure all expected columns are present (create as NaN/defaults if missing)
+        # Ensure all expected columns are present (fill missing with NaN)
         expected_cols = [
             "Day",
             "Meal_Time",
