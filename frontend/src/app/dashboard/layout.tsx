@@ -24,7 +24,7 @@ export default async function DashboardLayout({
   }
 
   if (!user) {
-    redirect("/ADAM/login");
+    redirect("/login");
   }
 
   return (

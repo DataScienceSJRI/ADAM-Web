@@ -33,12 +33,12 @@ export async function middleware(request: NextRequest) {
 
   // Redirect unauthenticated users to login
   if (!user && !pathname.startsWith("/login")) {
-    return NextResponse.redirect(new URL("/ADAM/login", request.url));
+    return NextResponse.redirect(new URL("/login", request.url));
   }
 
   // Redirect authenticated users away from login
   if (user && pathname.startsWith("/login")) {
-    return NextResponse.redirect(new URL("/ADAM/dashboard", request.url));
+    return NextResponse.redirect(new URL("/dashboard", request.url));
   }
 
   return supabaseResponse;
