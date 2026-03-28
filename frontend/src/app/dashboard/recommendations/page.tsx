@@ -63,6 +63,7 @@ type GLRow = {
   GL: number | null;
   Meal_GL: number | null;
   GI_Avg: number | null;
+  Portion_optimal: number | null;
 };
 
 
@@ -225,7 +226,7 @@ export default function RecommendationsPage() {
       const [reactRes, commentRes, glRes] = await Promise.all([
         supabase.from("MealReactions").select("*").eq("plan_id", activePlanId).limit(5000),
         supabase.from("MealComments").select("*").eq("plan_id", activePlanId).order("created_at").limit(5000),
-        supabase.from("FinalSummary").select("Date, Meal_Time, Recipe_Code, GL, Meal_GL, GI_Avg").eq("plan_id", activePlanId).limit(5000),
+        supabase.from("FinalSummary").select("Date, Meal_Time, Recipe_Code, GL, Meal_GL, GI_Avg, Portion_optimal").eq("plan_id", activePlanId).limit(5000),
       ]);
       const allReacts = (reactRes.data ?? []) as MealReaction[];
       const allComments = (commentRes.data ?? []) as MealComment[];
@@ -337,13 +338,13 @@ export default function RecommendationsPage() {
 
   // Build GL lookup maps
   // "Date|Meal_Time|Recipe_Code" → { GL, GI_Avg }
-  const glItemMap = new Map<string, { GL: number | null; GI_Avg: number | null }>();
+  const glItemMap = new Map<string, { GL: number | null; GI_Avg: number | null; Portion_optimal: number | null }>();
   // "Date|Meal_Time" → Meal_GL
   const mealGlMap = new Map<string, number | null>();
   for (const g of glData) {
     const mealKey = `${g.Date ?? ""}|${g.Meal_Time ?? ""}`;
     if (g.Recipe_Code) {
-      glItemMap.set(`${mealKey}|${g.Recipe_Code}`, { GL: g.GL, GI_Avg: g.GI_Avg });
+      glItemMap.set(`${mealKey}|${g.Recipe_Code}`, { GL: g.GL, GI_Avg: g.GI_Avg, Portion_optimal: g.Portion_optimal });
     }
     if (!mealGlMap.has(mealKey)) {
       mealGlMap.set(mealKey, g.Meal_GL);
@@ -564,7 +565,7 @@ function MealDetailPanel({
   comments: MealComment[];
   profiles: Record<string, UserProfile>;
   currentUser: UserProfile | null;
-  glItemMap: Map<string, { GL: number | null; GI_Avg: number | null }>;
+  glItemMap: Map<string, { GL: number | null; GI_Avg: number | null; Portion_optimal: number | null }>;
   mealGL: number | null;
   onItemReact: (pkey: number, myReaction: string | null, reaction: "liked" | "disliked") => void;
   onComboReact: (date: string, timing: string, myReaction: string | null, reaction: "liked" | "disliked") => void;
@@ -617,8 +618,8 @@ function MealDetailPanel({
                   <p className="text-sm font-medium">{row.Food_Name ?? row.Food_Name_desc ?? "—"}</p>
                   <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                     <p className="text-xs text-muted-foreground">
-                      {row.Food_Qty != null && `${row.Food_Qty}${row.R_desc ? ` ${row.R_desc}` : ""}`}
-                      {row.Food_Qty != null && row.Energy_kcal != null && " · "}
+                      {glInfo?.Portion_optimal != null && `${glInfo.Portion_optimal}${row.R_desc ? ` ${row.R_desc}` : ""}`}
+                      {glInfo?.Portion_optimal != null && row.Energy_kcal != null && " · "}
                       {row.Energy_kcal != null && `${Math.round(row.Energy_kcal)} kcal`}
                     </p>
                     {glInfo?.GL != null && (

@@ -29,6 +29,19 @@ from Functions_Base import ADAMPersonalizationModel
 router = APIRouter(prefix="/plan", tags=["plan"])
 
 
+def _write_plan_status(onboarding_id: str | None, status: str) -> None:
+    """Persist plan generation result to BE_Onboarding_Sessions.plan_status."""
+    if not onboarding_id:
+        return
+    try:
+        from core.supabase import get_supabase
+        get_supabase().table("BE_Onboarding_Sessions").update(
+            {"plan_status": status}
+        ).eq("onboarding_id", onboarding_id).execute()
+    except Exception as _e:
+        logger.warning("Could not write plan_status for onboarding_id=%s: %s", onboarding_id, _e)
+
+
 class ModelOptimiser(ADAMPersonalizationModel):
     """
     Subclass that overrides load_data() to fetch from Supabase
@@ -121,6 +134,7 @@ def generate_plan(
                 elif isinstance(os_path, dict):
                     opt_summary = os_path   
             else:
+                _write_plan_status(body.onboarding_id, "No solution please try again")
                 return GeneratePlanResponse(
                     status="No solution found please try again with different preferences or check dataset coverage.",
                     rows_written=0,
@@ -134,6 +148,7 @@ def generate_plan(
         raise HTTPException(status_code=500, detail=f"Model error: {str(e)}")
 
     if weekly_menu is None or weekly_menu.empty:
+        _write_plan_status(body.onboarding_id, "Model ran but produced no menu. Check preferences and dataset coverage.")
         return GeneratePlanResponse(
             status="no_output",
             rows_written=0,
@@ -196,6 +211,7 @@ def generate_plan(
     except Exception as e:
         logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
+    _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}")
     return GeneratePlanResponse(
         status="ok",
         rows_written=rows_written,

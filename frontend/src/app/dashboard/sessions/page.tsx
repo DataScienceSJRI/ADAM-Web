@@ -12,6 +12,7 @@ type Session = {
   diet: string | null;
   pref_count: number;
   plan: { plan_id: string; row_count: number; start_date: string | null } | null;
+  plan_status: string | null;
 };
 
 type PrefRow = {
@@ -37,7 +38,7 @@ export default function SessionsPage() {
 
       const { data: sessionRows, error: sessErr } = await supabase
         .from("BE_Onboarding_Sessions")
-        .select("onboarding_id, created_at")
+        .select("onboarding_id, created_at, plan_status")
         .eq("user_id", user.email)
         .order("created_at", { ascending: false })
         .limit(100);
@@ -62,7 +63,7 @@ export default function SessionsPage() {
           .limit(5000),
         supabase
           .from("BE_Preference_onboarding_details")
-          .select("onboarding_id, diet_restrictions")
+          .select("onboarding_id, diet_restrictions, dietary_type")
           .in("onboarding_id", ids)
           .limit(5000),
         supabase
@@ -89,7 +90,7 @@ export default function SessionsPage() {
 
       const dietMap = new Map<string, string>();
       for (const d of prefDetailRes.data ?? []) {
-        if (d.onboarding_id) dietMap.set(d.onboarding_id, d.diet_restrictions);
+        if (d.onboarding_id) dietMap.set(d.onboarding_id, d.dietary_type ?? d.diet_restrictions);
       }
 
       const prefCountMap = new Map<string, number>();
@@ -120,6 +121,7 @@ export default function SessionsPage() {
           plan: plan
             ? { plan_id: plan.plan_id, row_count: plan.row_count, start_date: plan.dates.sort()[0] ?? null }
             : null,
+          plan_status: (s as any).plan_status ?? null,
         };
       });
 
@@ -276,6 +278,10 @@ export default function SessionsPage() {
                         >
                           View plan ({s.plan.row_count} meals)
                         </Link>
+                      ) : s.plan_status ? (
+                        <span className="text-xs text-amber-600" title={s.plan_status}>
+                          {s.plan_status.startsWith("ok:") ? "Plan written" : s.plan_status}
+                        </span>
                       ) : (
                         <span className="text-xs text-muted-foreground">No plan generated</span>
                       )}
