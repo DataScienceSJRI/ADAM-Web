@@ -276,7 +276,7 @@ export default function SessionsPage() {
                           href={`/dashboard/recommendations?plan=${s.plan.plan_id}`}
                           className="text-xs font-medium text-primary hover:underline"
                         >
-                          View plan ({s.plan.row_count} meals)
+                          View Meals →
                         </Link>
                       ) : s.plan_status ? (
                         <span className="text-xs text-amber-600" title={s.plan_status}>
