@@ -112,7 +112,7 @@ export default function OnboardingPage() {
       }
     ).catch(() => {/* non-fatal */});
 
-    router.push("/dashboard/plan?generating=true");
+    router.push(`/dashboard/plan?generating=true&onboarding_id=${encodeURIComponent(onboardingId)}`);
   }
 
   return (

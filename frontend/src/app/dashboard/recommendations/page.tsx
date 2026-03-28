@@ -74,11 +74,8 @@ const AVATAR_COLORS = [
   "bg-rose-500", "bg-cyan-600", "bg-fuchsia-500", "bg-lime-600",
 ];
 
-function glColor(gl: number | null): string {
-  if (gl == null) return "text-muted-foreground";
-  if (gl < 10) return "text-emerald-600";
-  if (gl < 20) return "text-amber-500";
-  return "text-rose-500";
+function glColor(_gl: number | null): string {
+  return "text-muted-foreground";
 }
 
 function avatarColor(uid: string) {
@@ -365,36 +362,57 @@ export default function RecommendationsPage() {
       </div>
 
       {/* Plan selector */}
-      {plans.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {plans.map((plan, i) => {
-            const isOwn = plan.owner_id === currentUser?.user_id;
-            const ownerProfile = plan.owner_id ? profiles[plan.owner_id] : null;
-            const ownerLabel = ownerProfile?.display_name ?? plan.owner_id?.split("@")[0] ?? "Unknown";
-            const myPlanIndex = plans.filter((p, j) => j <= i && p.owner_id === currentUser?.user_id).length;
-            const label = isOwn
-              ? (myPlanIndex === 1 ? "My Latest" : `My Plan ${myPlanIndex}`)
-              : ownerLabel;
-            return (
-              <button key={plan.plan_id} onClick={() => setActivePlanId(plan.plan_id)}
-                className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                  activePlanId === plan.plan_id
-                    ? "border-primary bg-primary text-primary-foreground"
-                    : "border-border bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {!isOwn && plan.owner_id && (
-                  <Avatar userId={plan.owner_id} displayName={ownerProfile?.display_name} size="sm" />
-                )}
-                {label}
-                {plan.created_at && (
-                  <span className="opacity-70">· {new Date(plan.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      {plans.length > 0 && (() => {
+        const myPlans = plans.filter(p => p.owner_id === currentUser?.user_id);
+        const otherPlans = plans.filter(p => p.owner_id !== currentUser?.user_id);
+        const renderBtn = (plan: PlanOption, label: string, isOwn: boolean) => {
+          const ownerProfile = plan.owner_id ? profiles[plan.owner_id] : null;
+          return (
+            <button key={plan.plan_id} onClick={() => setActivePlanId(plan.plan_id)}
+              className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                activePlanId === plan.plan_id
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-background text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {!isOwn && plan.owner_id && (
+                <Avatar userId={plan.owner_id} displayName={ownerProfile?.display_name} size="sm" />
+              )}
+              {label}
+              {plan.created_at && (
+                <span className="opacity-70">· {new Date(plan.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+              )}
+            </button>
+          );
+        };
+        return (
+          <div className="space-y-2">
+            {myPlans.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">My Plans</p>
+                <div className="flex flex-wrap gap-2">
+                  {myPlans.map((plan, i) => {
+                    const label = i === 0 ? "My Latest" : `My Plan ${i + 1}`;
+                    return renderBtn(plan, label, true);
+                  })}
+                </div>
+              </div>
+            )}
+            {otherPlans.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Team</p>
+                <div className="flex flex-wrap gap-2">
+                  {otherPlans.map((plan) => {
+                    const ownerProfile = plan.owner_id ? profiles[plan.owner_id] : null;
+                    const label = ownerProfile?.display_name ?? plan.owner_id?.split("@")[0] ?? "Unknown";
+                    return renderBtn(plan, label, false);
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Week selector */}
       {weeks.length > 1 && (

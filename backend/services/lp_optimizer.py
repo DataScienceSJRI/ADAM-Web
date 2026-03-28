@@ -205,15 +205,15 @@ def run_lp(
     # Slot -> candidate indices mapping will be (re)built after index normalization below
     slot_to_ids: Dict[Tuple[str, str], List[int]] = {}
 
-    print(f"[DEBUG] Number of candidates: {len(candidates)}")
-    print(f"[DEBUG] Required slots:\n{required_slots}")
-    print(f"[DEBUG] Slot to IDs mapping:\n{slot_to_ids}")
+    # print(f"[DEBUG] Number of candidates: {len(candidates)}")
+    # print(f"[DEBUG] Required slots:\n{required_slots}")
+    # print(f"[DEBUG] Slot to IDs mapping:\n{slot_to_ids}")
 
     # Profile (external) available for use in constraints/selection
-    if profile is not None:
-        print(f"[DEBUG] Profile: {profile}")
+    # if profile is not None:
+    #     print(f"[DEBUG] Profile: {profile}")
 
-    #### model starts 
+    #### model starts
     # Defensive preprocessing: ensure integer 0-based index and numeric objective column
     candidates = candidates.reset_index(drop=True)
     # ensure objective metric exists and is numeric
@@ -227,7 +227,7 @@ def run_lp(
             med = candidates[objective_metric_col].median()
             candidates[objective_metric_col] = candidates[objective_metric_col].fillna(med)
 
-    candidates.to_csv("candidates_debug.csv", index=False)
+    # candidates.to_csv("candidates_debug.csv", index=False)
 
     # --- Sugar and salt aggregation: compute grams per standard serving per recipe
     # Prefer explicit `recipe_ing_df` parameter; otherwise fall back to `ds` lookup.
@@ -300,7 +300,7 @@ def run_lp(
     for idx, row in candidates.iterrows():
         slot_to_ids.setdefault((str(row["Meal_Time"]), str(row["Dish_Type"])), []).append(int(idx))
 
-    print(f"[DEBUG] Rebuilt slot_to_ids after index reset: {slot_to_ids}")
+    # print(f"[DEBUG] Rebuilt slot_to_ids after index reset: {slot_to_ids}")
 
     days = list(range(1, int(n_days) + 1))
     model = LpProblem("weekly_menu_min_weighted_gl_time_delta", LpMinimize)

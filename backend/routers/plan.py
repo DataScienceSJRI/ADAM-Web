@@ -29,15 +29,16 @@ from Functions_Base import ADAMPersonalizationModel
 router = APIRouter(prefix="/plan", tags=["plan"])
 
 
-def _write_plan_status(onboarding_id: str | None, status: str) -> None:
+def _write_plan_status(onboarding_id: str | None, status: str, plan_id: str | None = None) -> None:
     """Persist plan generation result to BE_Onboarding_Sessions.plan_status."""
     if not onboarding_id:
         return
     try:
         from core.supabase import get_supabase
-        get_supabase().table("BE_Onboarding_Sessions").update(
-            {"plan_status": status}
-        ).eq("onboarding_id", onboarding_id).execute()
+        payload: dict = {"plan_status": status}
+        if plan_id:
+            payload["plan_id"] = plan_id
+        get_supabase().table("BE_Onboarding_Sessions").update(payload).eq("onboarding_id", onboarding_id).execute()
     except Exception as _e:
         logger.warning("Could not write plan_status for onboarding_id=%s: %s", onboarding_id, _e)
 
@@ -91,6 +92,7 @@ def generate_plan(
 
     finall_summary = None
     final_nut_summary = None
+    opt_summary: dict = {}
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -211,7 +213,7 @@ def generate_plan(
     except Exception as e:
         logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
-    _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}")
+    _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
     return GeneratePlanResponse(
         status="ok",
         rows_written=rows_written,

@@ -13,6 +13,7 @@ type Session = {
   pref_count: number;
   plan: { plan_id: string; row_count: number; start_date: string | null } | null;
   plan_status: string | null;
+  session_plan_id: string | null;
 };
 
 type PrefRow = {
@@ -38,7 +39,7 @@ export default function SessionsPage() {
 
       const { data: sessionRows, error: sessErr } = await supabase
         .from("BE_Onboarding_Sessions")
-        .select("onboarding_id, created_at, plan_status")
+        .select("onboarding_id, created_at, plan_status, plan_id")
         .eq("user_id", user.email)
         .order("created_at", { ascending: false })
         .limit(100);
@@ -74,7 +75,7 @@ export default function SessionsPage() {
         supabase
           .from("Recommendation")
           .select("onboarding_id, plan_id, Date")
-          .in("onboarding_id", ids)
+          .eq("user_id", user.email)
           .limit(5000),
       ]);
 
@@ -99,8 +100,11 @@ export default function SessionsPage() {
       }
 
       const planMap = new Map<string, { plan_id: string; row_count: number; dates: string[] }>();
+      // plan_id → { row_count, dates } for plans without onboarding_id
+      const planIdMap = new Map<string, { row_count: number; dates: string[] }>();
       for (const r of recRes.data ?? []) {
-        if (r.onboarding_id && r.plan_id) {
+        if (!r.plan_id) continue;
+        if (r.onboarding_id) {
           if (!planMap.has(r.onboarding_id)) {
             planMap.set(r.onboarding_id, { plan_id: r.plan_id, row_count: 0, dates: [] });
           }
@@ -108,20 +112,62 @@ export default function SessionsPage() {
           p.row_count++;
           if (r.Date) p.dates.push(r.Date);
         }
+        if (!planIdMap.has(r.plan_id)) {
+          planIdMap.set(r.plan_id, { row_count: 0, dates: [] });
+        }
+        const q = planIdMap.get(r.plan_id)!;
+        q.row_count++;
+        if (r.Date) q.dates.push(r.Date);
       }
 
+      // Collect plan_ids already claimed by onboarding_id or session plan_id
+      const claimedPlanIds = new Set<string>();
+      for (const p of planMap.values()) claimedPlanIds.add(p.plan_id);
+      for (const s of sessionRows) {
+        const pid = (s as any).plan_id;
+        if (pid) claimedPlanIds.add(pid);
+      }
+
+      // Unmatched plans (no onboarding_id link) sorted by start_date desc
+      const unmatchedPlans = [...planIdMap.entries()]
+        .filter(([pid]) => !claimedPlanIds.has(pid))
+        .map(([pid, data]) => ({ plan_id: pid, ...data }))
+        .sort((a, b) => (b.dates.sort()[0] ?? "").localeCompare(a.dates.sort()[0] ?? ""));
+
+      // Sessions with ok: status and no plan, sorted by created_at desc — assign unmatched plans in order
+      const unmatchedSessionIds = sessionRows
+        .filter(s => {
+          const status: string | null = (s as any).plan_status ?? null;
+          const hasPlan = planMap.has(s.onboarding_id) || !!(s as any).plan_id;
+          return status?.startsWith("ok:") && !hasPlan;
+        })
+        .map(s => s.onboarding_id);
+
+      const sessionPlanOverride = new Map<string, { plan_id: string; row_count: number; dates: string[] }>();
+      unmatchedSessionIds.forEach((oid, i) => {
+        if (unmatchedPlans[i]) sessionPlanOverride.set(oid, unmatchedPlans[i]);
+      });
+
       const result: Session[] = sessionRows.map((s) => {
+        const sessionPlanId: string | null = (s as any).plan_id ?? null;
         const plan = planMap.get(s.onboarding_id);
+        const fallbackPlanData = !plan && sessionPlanId ? planIdMap.get(sessionPlanId) : null;
+        const overridePlan = sessionPlanOverride.get(s.onboarding_id);
+        const resolvedPlan = plan
+          ?? (fallbackPlanData && sessionPlanId ? { plan_id: sessionPlanId, row_count: fallbackPlanData.row_count, dates: fallbackPlanData.dates } : null)
+          ?? overridePlan
+          ?? null;
         return {
           onboarding_id: s.onboarding_id,
           created_at: s.created_at,
           basic: basicMap.get(s.onboarding_id) ?? null,
           diet: dietMap.get(s.onboarding_id) ?? null,
           pref_count: prefCountMap.get(s.onboarding_id) ?? 0,
-          plan: plan
-            ? { plan_id: plan.plan_id, row_count: plan.row_count, start_date: plan.dates.sort()[0] ?? null }
+          plan: resolvedPlan
+            ? { plan_id: resolvedPlan.plan_id, row_count: resolvedPlan.row_count, start_date: resolvedPlan.dates.sort()[0] ?? null }
             : null,
           plan_status: (s as any).plan_status ?? null,
+          session_plan_id: sessionPlanId,
         };
       });
 
@@ -271,20 +317,25 @@ export default function SessionsPage() {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {s.plan ? (
-                        <Link
-                          href={`/dashboard/recommendations?plan=${s.plan.plan_id}`}
-                          className="text-xs font-medium text-primary hover:underline"
-                        >
-                          View Meals →
-                        </Link>
-                      ) : s.plan_status ? (
-                        <span className="text-xs text-amber-600" title={s.plan_status}>
-                          {s.plan_status.startsWith("ok:") ? "Plan written" : s.plan_status}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">No plan generated</span>
-                      )}
+                      {(() => {
+                        const planId = s.plan?.plan_id ?? (s.plan_status?.startsWith("ok:") ? s.session_plan_id : null);
+                        if (planId) {
+                          return (
+                            <Link
+                              href={`/dashboard/recommendations?plan=${planId}`}
+                              className="text-xs font-medium text-primary hover:underline"
+                            >
+                              View Meals →
+                            </Link>
+                          );
+                        }
+                        if (s.plan_status) {
+                          return (
+                            <span className="text-xs text-amber-600">{s.plan_status}</span>
+                          );
+                        }
+                        return <span className="text-xs text-muted-foreground">No plan generated</span>;
+                      })()}
                     </td>
                   </tr>
 

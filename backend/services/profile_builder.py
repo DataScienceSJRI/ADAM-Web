@@ -64,7 +64,7 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
     }
 
     # Prefer dietary_type (new field); fall back to diet_restrictions for old rows
-    raw_diet = (pref_row.get("dietary_type")).strip().lower()
+    raw_diet = (pref_row.get("dietary_type") or "").strip().lower()
     diet_type = _diet_type_map.get(raw_diet)
 
     breakfast_time = pref_row.get("breakfast_time")

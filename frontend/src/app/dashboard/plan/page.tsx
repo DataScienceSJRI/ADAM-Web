@@ -5,6 +5,14 @@ import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
+const STAGES = [
+  { at: 0,   label: "Loading your preferences…" },
+  { at: 30,  label: "Scoring recipes for your profile…" },
+  { at: 60,  label: "Running optimisation…" },
+  { at: 90,  label: "Building your 7-day plan…" },
+  { at: 110, label: "Almost there…" },
+];
+
 type PlanCard = {
   plan_id: string;
   start_date: string | null;
@@ -71,19 +79,25 @@ export default function PlanPage() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const startedGenerating = searchParams.get("generating") === "true";
+  const onboardingIdParam = searchParams.get("onboarding_id");
 
   const [generating, setGenerating] = useState(startedGenerating);
+  const [genFailed, setGenFailed] = useState(false);
+  const [failMessage, setFailMessage] = useState<string | null>(null);
   const [timedOut, setTimedOut] = useState(false);
   const [plans, setPlans] = useState<PlanCard[]>([]);
   const [loading, setLoading] = useState(true);
+  const [elapsed, setElapsed] = useState(0);
 
   const initialCountRef = useRef<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
   }, []);
 
   useEffect(() => {
@@ -102,9 +116,40 @@ export default function PlanPage() {
 
       if (!startedGenerating) return;
 
-      // Start polling — stop when plan count grows
+      // Elapsed time ticker
+      tickRef.current = setInterval(() => {
+        setElapsed(e => e + 1);
+      }, 1000);
+
+      // Poll plan_status on BE_Onboarding_Sessions if we have onboarding_id
+      // AND poll Recommendation row count — whichever resolves first wins
       pollRef.current = setInterval(async () => {
         if (!mounted) { stopPolling(); return; }
+
+        // Check session plan_status if onboarding_id is known
+        if (onboardingIdParam) {
+          const { data: sess } = await supabase
+            .from("BE_Onboarding_Sessions")
+            .select("plan_status")
+            .eq("onboarding_id", onboardingIdParam)
+            .single();
+          if (!mounted) return;
+          const status: string | null = sess?.plan_status ?? null;
+          if (status) {
+            stopPolling();
+            if (status.startsWith("ok:")) {
+              const updated = await fetchPlanCards(user.email!);
+              if (mounted) { setPlans(updated); setGenerating(false); router.replace("/dashboard/plan"); }
+            } else {
+              setFailMessage(status);
+              setGenFailed(true);
+              setGenerating(false);
+            }
+            return;
+          }
+        }
+
+        // Fallback: check if new Recommendation rows appeared
         const updated = await fetchPlanCards(user.email!);
         if (!mounted) return;
         if (updated.length > (initialCountRef.current ?? 0)) {
@@ -115,7 +160,7 @@ export default function PlanPage() {
         }
       }, POLL_INTERVAL_MS);
 
-      // Timeout fallback
+      // Hard timeout fallback
       timeoutRef.current = setTimeout(() => {
         if (!mounted) return;
         stopPolling();
@@ -130,18 +175,37 @@ export default function PlanPage() {
   }, []);
 
   if (generating) {
+    const stage = [...STAGES].reverse().find(s => elapsed >= s.at) ?? STAGES[0];
+    const progressPct = Math.min(95, (elapsed / 300) * 100);
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+    const elapsedLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
     return (
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">My Plans</h1>
           <p className="text-muted-foreground">Your personalised meal plan history.</p>
         </div>
-        <div className="rounded-xl border p-12 flex flex-col items-center justify-center text-center gap-4 min-h-64">
+        <div className="rounded-xl border p-10 flex flex-col items-center justify-center text-center gap-6 min-h-64">
           <div className="h-10 w-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-          <p className="text-base font-medium">Generating your personalised meal plan…</p>
-          <p className="text-sm text-muted-foreground max-w-xs">
-            This usually takes 5 minutes. Please keep this page open.
-          </p>
+          <div className="space-y-1">
+            <p className="text-base font-medium">{stage.label}</p>
+            <p className="text-xs text-muted-foreground">Elapsed: {elapsedLabel} · usually takes ~5 minutes</p>
+          </div>
+          <div className="w-full max-w-sm space-y-1.5">
+            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary transition-all duration-1000"
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-[10px] text-muted-foreground">
+              {STAGES.slice(0, -1).map((s) => (
+                <span key={s.at} className={elapsed >= s.at ? "text-primary font-medium" : ""}>·</span>
+              ))}
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">Please keep this page open</p>
         </div>
       </div>
     );
@@ -155,9 +219,13 @@ export default function PlanPage() {
       </div>
 
       {timedOut && (
-        <div className="rounded-lg border border-yellow-300 bg-yellow-50 p-4 text-sm text-yellow-800">
-          Plan generation is taking longer than expected. It may still be running in the
-          background — refresh this page in a moment.
+        <div className="rounded-lg border border-yellow-300 bg-yellow-50 dark:bg-yellow-950 dark:border-yellow-800 p-4 text-sm text-yellow-800 dark:text-yellow-300">
+          Plan generation is taking longer than expected. It may still be running in the background — refresh this page in a moment.
+        </div>
+      )}
+      {genFailed && failMessage && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
+          {failMessage}
         </div>
       )}
 
@@ -176,38 +244,45 @@ export default function PlanPage() {
         </div>
       ) : (
         <div className="space-y-3">
-          {plans.map((plan, i) => (
-            <Link
-              key={plan.plan_id}
-              href={`/dashboard/recommendations?plan=${encodeURIComponent(plan.plan_id)}`}
-              className="block rounded-xl border p-5 hover:bg-muted/30 transition-colors"
-            >
-              <div className="flex items-center justify-between">
-                <div className="space-y-0.5">
-                  <p className="font-semibold">
-                    {i === 0 ? "Latest Plan" : `Plan ${plans.length - i}`}
-                  </p>
-                  {plan.created_at && (
+          {plans.map((plan, i) => {
+            const fmtDate = (iso: string) =>
+              new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+            return (
+              <Link
+                key={plan.plan_id}
+                href={`/dashboard/recommendations?plan=${encodeURIComponent(plan.plan_id)}`}
+                className="block rounded-xl border p-5 hover:bg-muted/30 transition-colors"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-semibold">{i === 0 ? "Latest Plan" : `Plan ${plans.length - i}`}</p>
+                      {i === 0 && (
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">Latest</span>
+                      )}
+                    </div>
+                    {plan.created_at && (
+                      <p className="text-xs text-muted-foreground">
+                        Generated: {new Date(plan.created_at).toLocaleString("en-IN", {
+                          day: "numeric", month: "short", year: "numeric",
+                          hour: "2-digit", minute: "2-digit",
+                        })}
+                      </p>
+                    )}
+                    {plan.start_date && plan.end_date && (
+                      <p className="text-xs text-muted-foreground">
+                        {fmtDate(plan.start_date)} — {fmtDate(plan.end_date)}
+                      </p>
+                    )}
                     <p className="text-xs text-muted-foreground">
-                      Generated: {new Date(plan.created_at).toLocaleDateString("en-IN", {
-                        day: "numeric", month: "short", year: "numeric",
-                        hour: "2-digit", minute: "2-digit",
-                      })}
+                      {plan.row_count} meal {plan.row_count === 1 ? "entry" : "entries"}
                     </p>
-                  )}
-                  {plan.start_date && plan.end_date && (
-                    <p className="text-sm text-muted-foreground">
-                      {plan.start_date} — {plan.end_date}
-                    </p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    {plan.row_count} meal {plan.row_count === 1 ? "entry" : "entries"}
-                  </p>
+                  </div>
+                  <span className="text-sm text-primary font-medium shrink-0">View Meals →</span>
                 </div>
-                <span className="text-sm text-primary font-medium shrink-0">View Meals →</span>
-              </div>
-            </Link>
-          ))}
+              </Link>
+            );
+          })}
         </div>
       )}
     </div>

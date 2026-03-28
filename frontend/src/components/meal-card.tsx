@@ -47,12 +47,12 @@ export function MealCard({ meal }: { meal: Recommendation }) {
 
     // 2. Sync feedback to BE_Preference_onboarding so the next plan
     //    generation respects the user's likes/dislikes.
-    if (meal.user_id && meal.Food_Name && meal.Timings) {
+    if (meal.user_id && meal.Food_Name_desc && meal.Timings) {
       // Look up the subcategory code for this recipe from RecipeTagging
       const { data: tag } = await supabase
         .from("RecipeTagging")
         .select("Subcategories")
-        .eq("Recipe_Code", meal.Food_Name)
+        .eq("Recipe_Code", meal.Food_Name_desc)
         .single();
       const subCategory = tag?.Subcategories as string | null;
       if (subCategory) {
