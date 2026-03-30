@@ -4,6 +4,7 @@ import os
 import tempfile
 import json
 from pathlib import Path
+from typing import Optional
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
@@ -71,8 +72,9 @@ class ModelOptimiser(ADAMPersonalizationModel):
         return prefs
 
     def optimize_weekly_menu_with_constraints(self, meal_choices, ds, age_group_col, **kwargs):
-        kwargs.setdefault("per_recipe_max_gl", None)
-        kwargs.setdefault("per_meal_gl_cap", None)
+        kwargs.setdefault("per_recipe_max_gl", 20)
+        kwargs.setdefault("per_meal_gl_cap", 30)
+        kwargs.setdefault("per_day_gl_cap", 90)
         return run_lp(self, meal_choices, ds, age_group_col, **kwargs)
 
 
@@ -361,7 +363,7 @@ def Recomendation_formatting(weekly_menu_df):
                     final_df["_fiber_for_gl"] = pd.to_numeric(final_df["TotalDietaryFibre_FIBTG_g"], errors="coerce").fillna(0.0)
 
                     # compute GL at optimal serving: GI * ((Carbs - fiber)) / 100
-                    carb_minus_fiber = (final_df["_carb_g"].fillna(0.0) - final_df["_fiber_for_gl"].fillna(0.0)).clip(lower=0.0)
+                    carb_minus_fiber = final_df["_carb_g"].fillna(0.0) #### for USDA recipes we need to subract the fiber "_fiber_for_gl" 
                     final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber)) / 100.0
                     # if GI or carbs missing, leave GL as NaN
                 else:
