@@ -28,9 +28,9 @@ def run_lp(
     non_snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     time_limit_sec: int = 300,
-    per_meal_gl_cap: Optional[float] = None,
-    per_day_gl_cap: Optional[float] = None,
-    per_recipe_max_gl: Optional[float] = None,
+    per_meal_gl_cap: int = 30,
+    per_day_gl_cap: int = 90,
+    per_recipe_max_gl: int = 20,
     recipe_ing_df: Optional[pd.DataFrame] = None,
     main1_main2_mapping: Optional[pd.DataFrame] = None,
     ear_100: Optional[pd.DataFrame] = None,
@@ -168,39 +168,46 @@ def run_lp(
     else:
         req_ds['tul'] = ds.get('tul', pd.DataFrame())
     weekly_min, weekly_max, daily_energy_kcal = self._get_weekly_requirement_maps(req_ds, age_group_col=age_group_col, n_days=n_days, profile=profile)
+    weekly_min_100 = weekly_min.copy()
     # Compute effective daily energy requirement (`eff_daily`) and the
     # upper multiplier (`upper_mult`) once, based on the profile. This
     # keeps the energy logic centralized and avoids recomputing later.
     eff_daily = None
     upper_mult = 1.2  # default maximum multiplier for daily energy
-    try:
-        if daily_energy_kcal is not None:
-            eff_daily = float(daily_energy_kcal)
-            # Apply BMI reduction first
-            if profile is not None:
-                _bmi = profile.get("bmi")
-                if _bmi is not None:
-                    try:
-                        _bmi_val = float(_bmi)
-                        if _bmi_val >= 25.0:
-                            eff_daily = eff_daily *1 ### 0.8 ####Jawa
-                    except Exception:
-                        pass
-            # Apply age-based reductions on top of BMI adjustment
-            if profile is not None:
-                _age = profile.get("age")
-                if _age is not None:
-                    try:
-                        _age_val = float(_age)
-                        if _age_val > 60:
-                            eff_daily = eff_daily * 1 ### 0.9 ####Jawa
-                        elif _age_val > 50:
-                            eff_daily = eff_daily * 1 ### 0.95 ####Jawa
-                    except Exception:
-                        pass
-    except Exception:
-        # non-fatal; leave eff_daily as None so downstream code can skip
-        pass
+    
+    if daily_energy_kcal is not None:
+        eff_daily = float(daily_energy_kcal)
+        # Apply BMI reduction first
+        if profile is not None:
+            _bmi = profile.get("bmi")
+            if _bmi is not None:
+                _bmi_val = float(_bmi)
+                if _bmi_val >= 23.0 and _bmi_val < 25.0:
+                    eff_daily = eff_daily * 0.8 ### 0.8 ####Jawa
+                    ##multiply all nutrients by 0.8
+                    weekly_min = {k: v * 0.8 for k, v in weekly_min.items()}
+
+                if _bmi_val >= 25.0:
+                    eff_daily = eff_daily * 0.7 ### 0.7 ####Jawa
+                    ##multiply all nutrients by 0.7
+                    weekly_min = {k: v * 0.7 for k, v in weekly_min.items()}
+
+
+        # Apply age-based reductions on top of BMI adjustment
+        if profile is not None:
+            _age = profile.get("age")
+            if _age is not None:
+                _age_val = float(_age)
+                if _age_val > 60:
+                    eff_daily = eff_daily * 0.9 ### 0.9 ####Jawa
+                    ##multiply all nutrients by 0.9
+                    weekly_min = {k: v * 0.9 for k, v in weekly_min.items()}
+                    
+                elif _age_val > 50:
+                    eff_daily = eff_daily * 0.95 ### 0.95 ####Jawa
+                    ##multiply all nutrients by 0.95
+                    weekly_min = {k: v * 0.95 for k, v in weekly_min.items()}
+
 
     # Slot -> candidate indices mapping will be (re)built after index normalization below
     slot_to_ids: Dict[Tuple[str, str], List[int]] = {}
@@ -286,15 +293,18 @@ def run_lp(
         candidates['Sugar_per_serving_g'] = 0.0
         candidates['Salt_per_serving_g'] = 0.0
 
+    print(per_recipe_max_gl)
+    print(per_meal_gl_cap)
+    print(per_day_gl_cap)
+    print(candidates[["Recipe_Code", "GL"]].head(10))
+
     # Apply optional per-recipe GL filter (drop very high-GL recipes entirely)
     if per_recipe_max_gl is not None:
-        try:
-            _per = float(per_recipe_max_gl)
-            candidates = candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True)
-        except Exception:
-            # if conversion fails, ignore the filter
-            pass
-
+        _per = float(per_recipe_max_gl)
+        candidates = candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True)
+        print(f"[DEBUG] Candidates after applying per-recipe GL cap of {_per}: {len(candidates)}")
+        print(candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True))
+    
     # Rebuild slot -> ids mapping now that indices are stable (0..N-1)
     slot_to_ids = {}
     for idx, row in candidates.iterrows():
@@ -374,28 +384,25 @@ def run_lp(
                         model += lpSum(y[(d, s)] for s in sides) == 0
 
     # Write pairing constraint debug info (which candidate indices were considered for each pref+meal)
-    try:
-        pairing_debug_rows = []
-        for d in days:
-            for meal_time in sorted(candidates["Meal_Time"].dropna().astype(str).unique().tolist()):
-                slot_candidates = candidates[candidates["Meal_Time"].astype(str) == str(meal_time)]
-                for pref_id, group in slot_candidates.groupby("Preference_Row_ID"):
-                    main_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
-                    main2_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
-                    pairing_debug_rows.append({
-                        "Day": d,
-                        "Meal_Time": meal_time,
-                        "Preference_Row_ID": pref_id,
-                        "main_ids": ";".join([str(x) for x in main_ids]),
-                        "main2_ids": ";".join([str(x) for x in main2_ids]),
-                        "has_main": bool(len(main_ids) > 0),
-                        "has_main2": bool(len(main2_ids) > 0),
-                    })
-        out_dir = self.config.outputs_dir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(pairing_debug_rows).to_csv(out_dir / "pairing_constraints_debug.csv", index=False)
-    except Exception:
-        pass
+    pairing_debug_rows = []
+    for d in days:
+        for meal_time in sorted(candidates["Meal_Time"].dropna().astype(str).unique().tolist()):
+            slot_candidates = candidates[candidates["Meal_Time"].astype(str) == str(meal_time)]
+            for pref_id, group in slot_candidates.groupby("Preference_Row_ID"):
+                main_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
+                main2_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
+                pairing_debug_rows.append({
+                    "Day": d,
+                    "Meal_Time": meal_time,
+                    "Preference_Row_ID": pref_id,
+                    "main_ids": ";".join([str(x) for x in main_ids]),
+                    "main2_ids": ";".join([str(x) for x in main2_ids]),
+                    "has_main": bool(len(main_ids) > 0),
+                    "has_main2": bool(len(main2_ids) > 0),
+                })
+    out_dir = self.config.outputs_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(pairing_debug_rows).to_csv(out_dir / "pairing_constraints_debug.csv", index=False)
 
 
     for d in days:
@@ -408,25 +415,21 @@ def run_lp(
 
     # GL-cap constraints: per-meal and per-day (if provided)
     if per_meal_gl_cap is not None:
-        try:
-            pmeal = float(per_meal_gl_cap)
-            for d in days:
-                for _, slot_row in required_slots.iterrows():
-                    slot = (str(slot_row["Meal_Time"]), str(slot_row["Dish_Type"]))
-                    ids = slot_to_ids.get(slot, [])
-                    if not ids:
-                        continue
-                    model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in ids) <= float(pmeal)
-        except Exception:
-            pass
+        pmeal = float(per_meal_gl_cap)
+        for d in days:
+            for _, slot_row in required_slots.iterrows():
+                slot = (str(slot_row["Meal_Time"]), str(slot_row["Dish_Type"]))
+                ids = slot_to_ids.get(slot, [])
+                if not ids:
+                    continue
+                model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in ids) <= float(pmeal)
+
 
     if per_day_gl_cap is not None:
-        try:
-            pday = float(per_day_gl_cap)
-            for d in days:
-                model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in candidates.index) <= float(pday)
-        except Exception:
-            pass
+        pday = float(per_day_gl_cap)
+        for d in days:
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in candidates.index) <= float(pday)
+
 
     for _, group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
         ids = [int(i) for i in group_df.index.tolist()]
@@ -600,25 +603,23 @@ def run_lp(
                 selected_rows.append(row)
 
     # Dump post-solve variable values for diagnostics (y and x)
-    try:
-        vars_rows = []
-        for d in days:
-            for i in candidates.index:
-                y_val = float(y[(d, int(i))].value() or 0)
-                x_val = float(x[(d, int(i))].value() or 0)
-                vars_rows.append({
-                    "Day": d,
-                    "Candidate_Index": int(i),
-                    "y_var": f"y_d{d}_r{int(i)}",
-                    "y_val": y_val,
-                    "x_var": f"x_d{d}_r{int(i)}",
-                    "x_val": x_val,
-                })
-        out_dir = self.config.outputs_dir
-        out_dir.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(vars_rows).to_csv(out_dir / "y_x_values_postsolve.csv", index=False)
-    except Exception:
-        pass
+    vars_rows = []
+    for d in days:
+        for i in candidates.index:
+            y_val = float(y[(d, int(i))].value() or 0)
+            x_val = float(x[(d, int(i))].value() or 0)
+            vars_rows.append({
+                "Day": d,
+                "Candidate_Index": int(i),
+                "y_var": f"y_d{d}_r{int(i)}",
+                "y_val": y_val,
+                "x_var": f"x_d{d}_r{int(i)}",
+                "x_val": x_val,
+            })
+    out_dir = self.config.outputs_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(vars_rows).to_csv(out_dir / "y_x_values_postsolve.csv", index=False)
+
 
     weekly_menu = pd.DataFrame(selected_rows)
     if not weekly_menu.empty:
@@ -651,4 +652,4 @@ def run_lp(
     # print(weekly_menu)
     # weekly_menu.to_csv("weekly_menu_lp_output.csv", index=False)
     # print(summary)
-    return weekly_menu, summary, weekly_min
+    return weekly_menu, summary, weekly_min_100
