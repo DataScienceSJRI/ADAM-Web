@@ -16,6 +16,7 @@ export default function LoginPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -75,7 +76,7 @@ export default function LoginPage() {
           </div>
           <div className="text-center">
             <h1 className="text-2xl font-bold tracking-tight">ADAM</h1>
-            <p className="text-sm text-muted-foreground">AI Dietary &amp; Meal Advisor</p>
+            <p className="text-sm text-muted-foreground"> Meal Planner</p>
           </div>
         </div>
 
