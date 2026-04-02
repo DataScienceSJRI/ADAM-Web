@@ -70,7 +70,6 @@ export default function SessionsPage() {
         supabase
           .from("BE_Preference_onboarding")
           .select("onboarding_id")
-          .eq("user_id", user.email)
           .in("onboarding_id", ids)
           .limit(5000),
         supabase
