@@ -262,7 +262,7 @@ export default function SessionsPage() {
                 <th className="px-4 py-3 text-left font-medium">Date</th>
                 <th className="px-4 py-3 text-left font-medium">Profile</th>
                 <th className="px-4 py-3 text-left font-medium">Diet</th>
-                <th className="px-4 py-3 text-right font-medium">Preferences</th>
+                {/* <th className="px-4 py-3 text-right font-medium">Preferences</th> */}
                 <th className="px-4 py-3 text-left font-medium">Meal Plan</th>
               </tr>
             </thead>
@@ -296,6 +296,7 @@ export default function SessionsPage() {
                     <td className="px-4 py-3">
                       <span className="text-xs">{s.diet ?? "—"}</span>
                     </td>
+                    {/* Preferences column hidden until RLS policies are configured
                     <td className="px-4 py-3 text-right">
                       {s.pref_count > 0 ? (
                         <button
@@ -316,6 +317,7 @@ export default function SessionsPage() {
                         </>
                       )}
                     </td>
+                    */}
                     <td className="px-4 py-3">
                       {(() => {
                         const planId = s.plan?.plan_id ?? (s.plan_status?.startsWith("ok:") ? s.session_plan_id : null);
@@ -339,6 +341,7 @@ export default function SessionsPage() {
                     </td>
                   </tr>
 
+                  {/* Preferences expanded row hidden
                   {expandedId === s.onboarding_id && (
                     <tr key={`${s.onboarding_id}-prefs`} className="border-b bg-muted/10">
                       <td colSpan={6} className="px-6 py-4">
@@ -377,6 +380,7 @@ export default function SessionsPage() {
                       </td>
                     </tr>
                   )}
+                  */}
                 </Fragment>
               ))}
             </tbody>
