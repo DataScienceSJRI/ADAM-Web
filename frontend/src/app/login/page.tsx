@@ -45,14 +45,19 @@ export default function LoginPage() {
       router.push("/dashboard");
       router.refresh();
     } else {
-      const { error } = await supabase.auth.signUp({ email, password });
+      const { data, error } = await supabase.auth.signUp({ email, password });
       if (error) {
         setError(error.message);
         setLoading(false);
         return;
       }
-      router.push("/onboarding");
-      router.refresh();
+      if (data.session) {
+        router.push("/onboarding");
+        router.refresh();
+      } else {
+        setLoading(false);
+        setAwaitingConfirmation(true);
+      }
     }
   }
 
@@ -64,6 +69,53 @@ export default function LoginPage() {
   }
 
   const isSignUp = mode === "signup";
+
+  if (awaitingConfirmation) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/40 px-4">
+        <div className="w-full max-w-md">
+          <div className="mb-8 flex flex-col items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+              <UtensilsCrossed className="h-6 w-6" />
+            </div>
+            <div className="text-center">
+              <h1 className="text-2xl font-bold tracking-tight">ADAM</h1>
+              <p className="text-sm text-muted-foreground">Meal Planner</p>
+            </div>
+          </div>
+          <Card className="shadow-sm">
+            <CardContent className="pt-6 pb-6 text-center space-y-3">
+              <div className="flex justify-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                  <svg className="h-6 w-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                  </svg>
+                </div>
+              </div>
+              <h2 className="text-lg font-semibold">Check your email</h2>
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                We&apos;ve sent a confirmation link to <span className="font-medium text-foreground">{email}</span>.
+                Please confirm your email address to activate your account.
+              </p>
+              <p className="text-xs text-muted-foreground pt-2">
+                Once confirmed, you can{" "}
+                <button
+                  type="button"
+                  onClick={() => { setAwaitingConfirmation(false); setMode("signin"); }}
+                  className="font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  sign in here
+                </button>.
+              </p>
+            </CardContent>
+          </Card>
+          <p className="mt-6 text-center text-xs text-muted-foreground">
+            &copy; 2026 ADAM. All rights reserved.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted/40 px-4">
