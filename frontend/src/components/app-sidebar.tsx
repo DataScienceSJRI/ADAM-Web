@@ -17,12 +17,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserNav } from "./user-nav";
 
-const navItems = [
+const planItems = [
+  { title: "Recommendations", href: "/dashboard/recommendations", icon: LayoutDashboard },
+  { title: "My Plans", href: "/dashboard/plan", icon: CalendarDays },
+  { title: "Session History", href: "/dashboard/sessions", icon: History },
+];
+
+const setupItems = [
   { title: "Onboarding", href: "/onboarding", icon: ClipboardList },
   { title: "Preferences", href: "/dashboard/preferences", icon: Heart },
-  { title: "My Plans", href: "/dashboard/plan", icon: CalendarDays },
-  { title: "Recommendations", href: "/dashboard/recommendations", icon: LayoutDashboard },
-  { title: "Session History", href: "/dashboard/sessions", icon: History },
 ];
 
 export function AppSidebar() {
@@ -41,10 +44,28 @@ export function AppSidebar() {
 
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Navigation</SidebarGroupLabel>
+          <SidebarGroupLabel>Meal Plans</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems.map((item) => (
+              {planItems.map((item) => (
+                <SidebarMenuItem key={item.href}>
+                  <SidebarMenuButton asChild isActive={pathname === item.href}>
+                    <Link href={item.href}>
+                      <item.icon className="h-4 w-4" />
+                      <span>{item.title}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Profile & Setup</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {setupItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton asChild isActive={pathname === item.href}>
                     <Link href={item.href}>

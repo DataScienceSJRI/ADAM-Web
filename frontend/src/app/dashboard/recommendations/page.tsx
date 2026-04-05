@@ -127,7 +127,6 @@ export default function RecommendationsPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.email) return;
 
-      // Own rows 
       const { data: myRecData, error: recErr } = await supabase
         .from("Recommendation")
         .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
@@ -137,18 +136,7 @@ export default function RecommendationsPage() {
 
       if (recErr) { setError(recErr.message); setLoading(false); return; }
 
-      // Other users' rows — for social discovery (latest 2000 rows by Pkey)
-      const { data: othersRecData } = await supabase
-        .from("Recommendation")
-        .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
-        .neq("user_id", user.email)
-        .order("Pkey", { ascending: false })
-        .limit(2000);
-
-      const allRows = [
-        ...((myRecData ?? []) as RecommendationRow[]),
-        ...((othersRecData ?? []) as RecommendationRow[]),
-      ];
+      const allRows = (myRecData ?? []) as RecommendationRow[];
 
       // Build plan list
       const planMap = new Map<string, PlanOption>();
@@ -178,22 +166,13 @@ export default function RecommendationsPage() {
         }
       }
 
-      // My plans first (by max_pkey desc), then others (by max_pkey desc)
-      const allPlans = [...planMap.values()];
-      const myPlans = allPlans.filter(p => p.owner_id === user.email).sort((a, b) => b.max_pkey - a.max_pkey);
-      const otherPlans = allPlans.filter(p => p.owner_id !== user.email).sort((a, b) => b.max_pkey - a.max_pkey);
-      // Fallback: if owner_id is null (which shouldn't happen), include in myPlans bucket by treating nulls as own
-      const unknownPlans = allPlans.filter(p => !p.owner_id).sort((a, b) => b.max_pkey - a.max_pkey);
-      const planList = [...myPlans, ...unknownPlans, ...otherPlans];
+      const planList = [...planMap.values()].sort((a, b) => b.max_pkey - a.max_pkey);
 
       const matched = planParam ? planList.find(p => p.plan_id === planParam) : null;
-      // Always default to own latest plan; if none, fall back to first in list
-      const selectedPid = matched?.plan_id ?? myPlans[0]?.plan_id ?? planList[0]?.plan_id ?? null;
+      const selectedPid = matched?.plan_id ?? planList[0]?.plan_id ?? null;
 
-      // Load profiles for all plan owners
-      const ownerIds = [...new Set(allPlans.map(p => p.owner_id).filter(Boolean))] as string[];
       const { data: allProfileData } = await supabase
-        .from("UserProfiles").select("user_id, display_name").in("user_id", ownerIds.length > 0 ? ownerIds : [user.email]);
+        .from("UserProfiles").select("user_id, display_name").in("user_id", [user.email]);
       const profileMap: Record<string, UserProfile> = {};
       for (const p of (allProfileData ?? []) as UserProfile[]) profileMap[p.user_id] = p;
 
@@ -362,57 +341,31 @@ export default function RecommendationsPage() {
       </div>
 
       {/* Plan selector */}
-      {plans.length > 0 && (() => {
-        const myPlans = plans.filter(p => p.owner_id === currentUser?.user_id);
-        const otherPlans = plans.filter(p => p.owner_id !== currentUser?.user_id);
-        const renderBtn = (plan: PlanOption, label: string, isOwn: boolean) => {
-          const ownerProfile = plan.owner_id ? profiles[plan.owner_id] : null;
-          return (
-            <button key={plan.plan_id} onClick={() => setActivePlanId(plan.plan_id)}
-              className={`flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
-                activePlanId === plan.plan_id
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border bg-background text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {!isOwn && plan.owner_id && (
-                <Avatar userId={plan.owner_id} displayName={ownerProfile?.display_name} size="sm" />
-              )}
-              {label}
-              {plan.created_at && (
-                <span className="opacity-70">· {new Date(plan.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
-              )}
-            </button>
-          );
-        };
-        return (
-          <div className="space-y-2">
-            {myPlans.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">My Plans</p>
-                <div className="flex flex-wrap gap-2">
-                  {myPlans.map((plan, i) => {
-                    const label = i === 0 ? "My Latest" : `My Plan ${i + 1}`;
-                    return renderBtn(plan, label, true);
-                  })}
-                </div>
-              </div>
-            )}
-            {otherPlans.length > 0 && (
-              <div className="space-y-1.5">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Team</p>
-                <div className="flex flex-wrap gap-2">
-                  {otherPlans.map((plan) => {
-                    const ownerProfile = plan.owner_id ? profiles[plan.owner_id] : null;
-                    const label = ownerProfile?.display_name ?? plan.owner_id?.split("@")[0] ?? "Unknown";
-                    return renderBtn(plan, label, false);
-                  })}
-                </div>
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {plans.length > 0 && (
+        <div className="flex items-center gap-2">
+          <label htmlFor="plan-select" className="text-xs font-medium text-muted-foreground whitespace-nowrap">
+            Plan
+          </label>
+          <select
+            id="plan-select"
+            value={activePlanId ?? ""}
+            onChange={(e) => setActivePlanId(e.target.value)}
+            className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 max-w-xs"
+          >
+            {plans.map((plan, i) => {
+              const label = i === 0 ? "Latest Plan" : `Plan ${plans.length - i}`;
+              const date = plan.created_at
+                ? new Date(plan.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+                : plan.start_date ?? "";
+              return (
+                <option key={plan.plan_id} value={plan.plan_id}>
+                  {label}{date ? ` · ${date}` : ""}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+      )}
 
       {/* Week selector */}
       {weeks.length > 1 && (
