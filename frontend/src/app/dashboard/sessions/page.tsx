@@ -243,7 +243,9 @@ export default function SessionsPage() {
                       <td className="px-4 py-3">
                         <span className="inline-flex items-center gap-1.5">
                           <span className="h-1.5 w-1.5 rounded-full bg-primary flex-shrink-0" />
-                          <span className="text-xs font-medium">You</span>
+                          <span className="text-xs font-medium">
+                            {s.user_id === "test@example.com" ? "You" : shortEmail(s.user_id)}
+                          </span>
                         </span>
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap text-xs">{fmtDate(s.created_at)}</td>
