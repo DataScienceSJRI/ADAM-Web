@@ -127,12 +127,14 @@ export default function RecommendationsPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.email) return;
 
-      const { data: myRecData, error: recErr } = await supabase
+      const isAdmin = user.email === "test@example.com";
+      let recQuery = supabase
         .from("Recommendation")
         .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
-        .eq("user_id", user.email)
         .order("Pkey", { ascending: false })
         .limit(5000);
+      if (!isAdmin) recQuery = recQuery.eq("user_id", user.email);
+      const { data: myRecData, error: recErr } = await recQuery;
 
       if (recErr) { setError(recErr.message); setLoading(false); return; }
 

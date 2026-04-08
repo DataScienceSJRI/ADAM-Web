@@ -36,6 +36,7 @@ export default function SessionsPage() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user?.email) return;
+      const isAdmin = user.email === "test@example.com";
 
       // Fetch ALL sessions across all users
       const { data: sessionRows, error: sessErr } = await supabase
@@ -55,8 +56,13 @@ export default function SessionsPage() {
         return;
       }
 
-      const ownRows = sessionRows.filter((s) => s.user_id === user.email);
-      const otherRows = sessionRows.filter((s) => s.user_id !== user.email);
+      // Admin sees full detail for all sessions; others only see their own in full
+      const ownRows = isAdmin
+        ? sessionRows
+        : sessionRows.filter((s) => s.user_id === user.email);
+      const otherRows = isAdmin
+        ? []
+        : sessionRows.filter((s) => s.user_id !== user.email);
 
       // Fetch detailed data only for own sessions
       const ownIds = ownRows.map((s) => s.onboarding_id);
@@ -73,11 +79,11 @@ export default function SessionsPage() {
               .select("onboarding_id, diet_restrictions, dietary_type")
               .in("onboarding_id", ownIds)
               .limit(5000),
-            supabase
-              .from("Recommendation")
-              .select("onboarding_id, plan_id, Date")
-              .eq("user_id", user.email)
-              .limit(5000),
+            (() => {
+              let q = supabase.from("Recommendation").select("onboarding_id, plan_id, Date").limit(5000);
+              if (!isAdmin) q = q.eq("user_id", user.email);
+              return q;
+            })(),
           ])
         : [{ data: [] }, { data: [] }, { data: [] }];
 
