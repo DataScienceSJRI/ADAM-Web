@@ -117,6 +117,7 @@ export default function RecommendationsPage() {
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({});
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [selectedMeal, setSelectedMeal] = useState<{ date: string; timing: string } | null>(null);
+  const [ownerFilter, setOwnerFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -342,32 +343,67 @@ export default function RecommendationsPage() {
         <p className="text-muted-foreground">Your personalised 7-day meal plan.</p>
       </div>
 
+      {/* Admin: owner tabs */}
+      {currentUser?.user_id === "test@example.com" && plans.length > 0 && (() => {
+        const owners = [...new Set(plans.map(p => p.owner_id).filter(Boolean))] as string[];
+        if (owners.length <= 1) return null;
+        return (
+          <div className="space-y-1">
+            <p className="text-xs font-medium text-muted-foreground">Filter by user</p>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                onClick={() => { setOwnerFilter(null); setActivePlanId(plans[0]?.plan_id ?? null); }}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-colors border ${ownerFilter === null ? "bg-primary text-primary-foreground border-primary" : "bg-background text-muted-foreground border-border hover:text-foreground"}`}
+              >
+                All
+              </button>
+              {owners.map(owner => (
+                <button
+                  key={owner}
+                  onClick={() => {
+                    setOwnerFilter(owner);
+                    const first = plans.find(p => p.owner_id === owner);
+                    if (first) setActivePlanId(first.plan_id);
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition-colors border ${ownerFilter === owner ? "bg-primary text-primary-foreground border-primary" : "bg-background text-muted-foreground border-border hover:text-foreground"}`}
+                >
+                  {owner.split("@")[0]}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Plan selector */}
-      {plans.length > 0 && (
-        <div className="flex items-center gap-2">
-          <label htmlFor="plan-select" className="text-xs font-medium text-muted-foreground whitespace-nowrap">
-            Plan
-          </label>
-          <select
-            id="plan-select"
-            value={activePlanId ?? ""}
-            onChange={(e) => setActivePlanId(e.target.value)}
-            className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 max-w-xs"
-          >
-            {plans.map((plan, i) => {
-              const label = i === 0 ? "Latest Plan" : `Plan ${plans.length - i}`;
-              const date = plan.created_at
-                ? new Date(plan.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
-                : plan.start_date ?? "";
-              return (
-                <option key={plan.plan_id} value={plan.plan_id}>
-                  {label}{date ? ` · ${date}` : ""}
-                </option>
-              );
-            })}
-          </select>
-        </div>
-      )}
+      {plans.length > 0 && (() => {
+        const visiblePlans = ownerFilter ? plans.filter(p => p.owner_id === ownerFilter) : plans;
+        return (
+          <div className="flex items-center gap-2">
+            <label htmlFor="plan-select" className="text-xs font-medium text-muted-foreground whitespace-nowrap">
+              Plan
+            </label>
+            <select
+              id="plan-select"
+              value={activePlanId ?? ""}
+              onChange={(e) => setActivePlanId(e.target.value)}
+              className="rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 max-w-xs"
+            >
+              {visiblePlans.map((plan, i) => {
+                const label = i === 0 ? "Latest Plan" : `Plan ${visiblePlans.length - i}`;
+                const date = plan.created_at
+                  ? new Date(plan.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+                  : plan.start_date ?? "";
+                return (
+                  <option key={plan.plan_id} value={plan.plan_id}>
+                    {label}{date ? ` · ${date}` : ""}
+                  </option>
+                );
+              })}
+            </select>
+          </div>
+        );
+      })()}
 
       {/* Week selector */}
       {weeks.length > 1 && (
