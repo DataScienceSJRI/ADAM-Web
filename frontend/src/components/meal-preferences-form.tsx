@@ -155,7 +155,7 @@ export function MealPreferencesForm({
   }, [rows, currentSubTab, search, isVegOnly]);
 
   const REQUIRED_MEAL_TIMES = ["Breakfast", "Lunch", "Dinner"] as const;
-  const MAIN_MIN = 5;
+  const MAIN_MIN = 0;
 
   const incompleteMealTimes = REQUIRED_MEAL_TIMES.filter(
     (mt) => selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length < MAIN_MIN
