@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 import argparse
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -190,33 +191,56 @@ class ADAMPersonalizationModel:
 			return "Snacks"
 		return "Main"
 
-	def _get_main1_main2_map(self, ds: Dict[str, pd.DataFrame]):
+	def _get_main1_main2_main3_map(self, ds: Dict[str, pd.DataFrame]):
 		mapping_df = ds.get("main1_main2_mapping", pd.DataFrame()).copy()
 		if mapping_df.empty:
-			return {}, {}
+			return {}, {}, {}
+
+		def split_codes(value: object) -> Set[str]:
+			if pd.isna(value):
+				return set()
+			if isinstance(value, (list, tuple, set, pd.Series)):
+				values = value
+			else:
+				values = re.split(r"[,/;]", str(value))
+			codes = set()
+			for item in values:
+				code = str(item).strip().upper()
+				if code:
+					codes.add(code)
+			return codes
 
 		normalized_cols = {str(c).strip().lower().replace(" ", "_"): c for c in mapping_df.columns}
 		main1_col = normalized_cols.get("main1_code") or normalized_cols.get("main1")
 		main2_col = normalized_cols.get("main2_code") or normalized_cols.get("main2")
+		main3_col = normalized_cols.get("main3_code") or normalized_cols.get("main3")
 		optional_col = normalized_cols.get("optional_code") or normalized_cols.get("optional")
 
 		main1_to_main2 = {}
+		main1_to_main3 = {}
 		main1_to_optional = {}
 		if main1_col and main2_col:
 			df = mapping_df.dropna(subset=[main1_col, main2_col])
 			for m1, m2 in zip(df[main1_col], df[main2_col]):
 				key = str(m1).strip().upper()
-				val = str(m2).strip().upper()
-				if key and val:
-					main1_to_main2.setdefault(key, set()).add(val)
+				for val in split_codes(m2):
+					if key and val:
+						main1_to_main2.setdefault(key, set()).add(val)
+		if main1_col and main3_col:
+			df_m3 = mapping_df.dropna(subset=[main1_col, main3_col])
+			for m1, m3 in zip(df_m3[main1_col], df_m3[main3_col]):
+				key = str(m1).strip().upper()
+				for val in split_codes(m3):
+					if key and val:
+						main1_to_main3.setdefault(key, set()).add(val)
 		if main1_col and optional_col:
 			df_opt = mapping_df.dropna(subset=[main1_col, optional_col])
 			for m1, opt in zip(df_opt[main1_col], df_opt[optional_col]):
 				key = str(m1).strip().upper()
-				val = str(opt).strip().upper()
-				if key and val:
-					main1_to_optional.setdefault(key, set()).add(val)
-		return main1_to_main2, main1_to_optional
+				for val in split_codes(opt):
+					if key and val:
+						main1_to_optional.setdefault(key, set()).add(val)
+		return main1_to_main2, main1_to_main3, main1_to_optional
 
 	def build_recipe_master(self, ds: Dict[str, pd.DataFrame]) -> pd.DataFrame:
 		recipes = ds["recipes"].copy()
@@ -488,14 +512,17 @@ class ADAMPersonalizationModel:
 		rec["TimeAbove160_Score"] = t160_score
 
 		combo_rows = []
-		main1_to_main2, main1_to_optional = self._get_main1_main2_map(ds)
+		main1_to_main2, main1_to_main3, main1_to_optional = self._get_main1_main2_main3_map(ds)
 
 		print(f"[DEBUG][score_personalization] main1_to_main2 mapping: {main1_to_main2}")
+		print(f"[DEBUG][score_personalization] main1_to_main3 mapping: {main1_to_main3}")
 		print(f"[DEBUG][score_personalization] main1_to_optional mapping: {main1_to_optional}")
 		print("///////////-----------------------------")
 		print(main1_to_main2)
+		print(main1_to_main3)
 		print(main1_to_optional)
 		print(prefs)
+		prefs.to_csv("prefs.csv", index=False)
 		if not prefs.empty:
 			for _, pref in prefs.iterrows():
 				pref_row_id = int(pref.get("Preference_Row_ID", 0))
@@ -505,17 +532,51 @@ class ADAMPersonalizationModel:
 				subcat_code = str(pref.get("sub_category_code", "")).strip().upper()
 				codeoccurance = str(pref.get("codeoccurance", "")).strip().upper()
 				print(f"[DEBUG] Processing preference {pref_row_id}: meal_time={meal_time}, dish_type={dish_type}, subcat_code={subcat_code}")
-				combo_rows.append({
-					"Preference_Row_ID": pref_row_id,
-					"Meal_Time": meal_time,
-					"Dish_Type": dish_type,
-					"Preferred_SubCategory": subcat,
-					"Preferred_SubCategory_code": subcat_code,
-				})
+				if dish_type == "Main" or dish_type == "Snacks":
+					combo_rows.append({
+						"Preference_Row_ID": pref_row_id,
+						"Meal_Time": meal_time,
+						"Dish_Type": dish_type,
+						"Preferred_SubCategory": subcat,
+						"Preferred_SubCategory_code": subcat_code,
+					})
+				if dish_type == "Beverage":
+					combo_rows.append({
+						"Preference_Row_ID": pref_row_id,
+						"Meal_Time": meal_time,
+						"Dish_Type": "Optional",
+						"Preferred_SubCategory": subcat,
+						"Preferred_SubCategory_code": subcat_code,
+					})
 				if dish_type == "Main":
-					main1_code = codeoccurance or subcat_code or subcat.strip().upper()
+					# Prefer the explicit subcategory code first, then raw subcategory text.
+					main1_code = subcat_code or subcat.strip().upper()
+					main1_code_candidates = [c for c in [main1_code, subcat.strip().upper()] if c]
+					# Resolve mapping key by exact match first, then by prefix/suffix match.
+					resolved_main1_code = main1_code
+					for mapping_dict in (main1_to_main2, main1_to_main3, main1_to_optional):
+						found = False
+						for candidate in main1_code_candidates:
+							if candidate in mapping_dict:
+								resolved_main1_code = candidate
+								found = True
+								break
+						if found:
+							break
+						for key in mapping_dict:
+							if not key:
+								continue
+							for candidate in main1_code_candidates:
+								if candidate.startswith(key) or key.startswith(candidate):
+									resolved_main1_code = key
+									found = True
+									break
+							if found:
+								break
+						if found:
+							break
 					# Add Main2 if present in mapping
-					for m2 in main1_to_main2.get(main1_code, set()):
+					for m2 in main1_to_main2.get(resolved_main1_code, set()):
 						combo_rows.append({
 							"Preference_Row_ID": pref_row_id,
 							"Meal_Time": meal_time,
@@ -523,26 +584,34 @@ class ADAMPersonalizationModel:
 							"Preferred_SubCategory": m2,
 							"Preferred_SubCategory_code": m2,
 						})
-					# Add Optional as sides for this Main
-					for opt in main1_to_optional.get(main1_code, set()):
+					# Add Main3 if present in mapping
+					for m3 in main1_to_main3.get(resolved_main1_code, set()):
 						combo_rows.append({
 							"Preference_Row_ID": pref_row_id,
 							"Meal_Time": meal_time,
-							"Dish_Type": "Side",
-							"Preferred_SubCategory": opt,
-							"Preferred_SubCategory_code": opt,
+							"Dish_Type": "Main 3",
+							"Preferred_SubCategory": m3,
+							"Preferred_SubCategory_code": m3,
 						})
-
-		print(f"[DEBUG][score_personalization] combo_rows contents: {combo_rows}")
+					# Add Optional as sides for this Main
+					for opt in main1_to_optional.get(resolved_main1_code, set()):
+						if opt in list(prefs[prefs["meal_time"] == meal_time]["sub_category_code"].values):
+							combo_rows.append({
+								"Preference_Row_ID": pref_row_id,
+								"Meal_Time": meal_time,
+								"Dish_Type": "Optional",
+								"Preferred_SubCategory": opt,
+								"Preferred_SubCategory_code": opt,
+							})
+					print(f"[DEBUG][score_personalization] main1_code={main1_code}, resolved_main1_code={resolved_main1_code}, Main2={main1_to_main2.get(resolved_main1_code, set())}, Main3={main1_to_main3.get(resolved_main1_code, set())}, Optional={main1_to_optional.get(resolved_main1_code, set())}")
 		combos = pd.DataFrame(combo_rows).drop_duplicates().reset_index(drop=True)
 		combos.to_csv("preference_combos_debug.csv", index=False)
 		
 		all_rows = []
 		for _, combo in combos.iterrows():
-			print(f"[DEBUG][score_personalization] Combo: {combo.to_dict()}")
 			pref_row_id = int(combo.get("Preference_Row_ID", 0))
-			meal_time = str(combo["Meal_Time"]).strip().title()
-			dish_type = str(combo["Dish_Type"]).strip().title()
+			meal_time = str(combo.get("Meal_Time", "")).strip().title()
+			dish_type = str(combo.get("Dish_Type", "")).strip().title()
 			# Use the preferred subcategory CODE as the primary matching key
 			preferred_code_upper = str(combo.get("Preferred_SubCategory_code", "")).strip().upper()
 			# keep a readable subcat field but prefer the code for matching
@@ -602,6 +671,7 @@ class ADAMPersonalizationModel:
 				cooc_subset = main_data[_cooc_mask(main_data)].copy()
 				print(f"[DEBUG][score_personalization] cooc_subset shape: {cooc_subset.shape}")
 				cooc_subset = _score_frame(cooc_subset, "fallback_code_cooccurence")
+				cooc_subset = pd.DataFrame() #### Jawa - disabling cooc for now since the mappings are not very reliable and it's adding noise; can re-enable once we have better cooc data
 				if not cooc_subset.empty:
 					cooc_subset = cooc_subset[~cooc_subset["Recipe_Code"].astype(str).isin(selected_codes)].copy()
 					cooc_subset = cooc_subset.drop_duplicates(subset=["Recipe_Code"]).head(remaining).copy()
@@ -1502,7 +1572,8 @@ class ADAMPersonalizationModel:
 				print(f"[DEBUG]   No candidates for subcat_code={subcat_code}")
 		ds = self.load_data(profile)
 		recipe_master = self.build_recipe_master(ds)
-
+		print(user_preference)
+		print(user_preference.lower())
 		if len(user_preference)>0 and user_preference.lower() != "no":
 			prefs = self.build_preference_map(ds, uid=uid)
 			# Use robust merge to ensure sub_category_code is filled for all preferences
@@ -1511,13 +1582,18 @@ class ADAMPersonalizationModel:
 				prefs = self.merge_preferences_with_subcategory(prefs, subcat_df)
 			scored = self.score_personalization(recipe_master, prefs, ds, top_n=top_n)
 			# Strict, auditable mapping for YES logic
-			main1_to_main2, main1_to_optional = self._get_main1_main2_map(ds)
+			main1_to_main2, main1_to_main3, main1_to_optional = self._get_main1_main2_main3_map(ds)
 			all_rows = []
 			meal_times = ["Breakfast", "Lunch", "Dinner", "Snacks"]
 			print("/////////////////////////////////////")
 			print(main1_to_main2)
+			print(main1_to_main3)
 			print(main1_to_optional)
 			scored.to_csv("scored_debug.csv", index=False)
+			prefs.to_csv("prefs_debug.csv", index=False)
+			### prefs df make the column dish_type as Optional if value is Beverage
+			prefs.loc[prefs["dish_type"] == "Beverage", "dish_type"] = "Optional"
+			prefs.to_csv("prefs_debug_new.csv", index=False)
 			for _, pref in prefs.iterrows():
 				# Use sub_category_code for matching
 				subcat_code = str(pref.get("sub_category_code", "")).strip().upper()
@@ -1570,6 +1646,30 @@ class ADAMPersonalizationModel:
 									subset_main2["Meal_Time"] = meal_time
 									subset_main2["Preference_Row_ID"] = pref_row_id
 									all_rows.append(subset_main2.sort_values("Personalization_Score", ascending=False))
+						# Main3 (from mapping file, using code_cooc)
+						mapped_main3_keys = set()
+						if subcat_code and subcat_code in main1_to_main3:
+							mapped_main3_keys |= set(main1_to_main3.get(subcat_code, set()))
+						if code_cooc and code_cooc in main1_to_main3:
+							mapped_main3_keys |= set(main1_to_main3.get(code_cooc, set()))
+						for k, vals in main1_to_main3.items():
+							if not k:
+								continue
+							if (subcat_code and str(subcat_code).startswith(k)) or (code_cooc and str(code_cooc).startswith(k)):
+								mapped_main3_keys |= set(vals)
+						for key in mapped_main3_keys:
+							for main3 in [m.strip().upper() for m in str(key).split('/') if m.strip()]:
+								main3_mask = pd.Series(False, index=scored.index)
+								for col in ["Code_cooccurence", "MainCategoryCode", "Subcategories"]:
+									if col in scored.columns:
+										main3_mask = main3_mask | (scored[col].astype(str).str.upper().str.startswith(main3))
+								subset_main3 = scored[main3_mask.astype(bool)].copy()
+								if not subset_main3.empty:
+									subset_main3["Preferred_SubCategory_code"] = main3
+									subset_main3["Dish_Type"] = "Main 3"
+									subset_main3["Meal_Time"] = meal_time
+									subset_main3["Preference_Row_ID"] = pref_row_id
+									all_rows.append(subset_main3.sort_values("Personalization_Score", ascending=False))
 						# Optional (from mapping file, using code_cooc)
 						# Robust lookup for optional mappings as well (same logic as main2)
 						mapped_opt_keys = set()
@@ -1591,7 +1691,7 @@ class ADAMPersonalizationModel:
 								subset_opt = scored[opt_mask.astype(bool)].copy()
 								if not subset_opt.empty:
 									subset_opt["Preferred_SubCategory_code"] = opt
-									subset_opt["Dish_Type"] = "Side"
+									subset_opt["Dish_Type"] = "Optional"
 									subset_opt["Meal_Time"] = meal_time
 									subset_opt["Preference_Row_ID"] = pref_row_id
 									all_rows.append(subset_opt.sort_values("Personalization_Score", ascending=False))
@@ -1599,7 +1699,11 @@ class ADAMPersonalizationModel:
 					# For non-Main, apply scoring and select top_n
 					non_main = matched_recipes.copy()
 					non_main["Preferred_SubCategory_code"] = subcat_code
-					non_main["Dish_Type"] = dish_type
+					# non_main["Dish_Type"] = dish_type
+					if dish_type != "Beverage":
+						non_main["Dish_Type"] = dish_type
+					else:
+						non_main["Dish_Type"] = "Optional"
 					non_main["Meal_Time"] = meal_time
 					non_main["Preference_Row_ID"] = pref_row_id
 					# Recalculate Personalization_Score if needed (already present from scored)
@@ -1610,11 +1714,8 @@ class ADAMPersonalizationModel:
 				top_choices = top_choices.loc[:, top_choices.columns != top_choices.columns[0]]
 		
 		# Save intermediate outputs as soon as they are ready
-		out_dir = self.config.outputs_dir
-		out_dir.mkdir(parents=True, exist_ok=True)
-		pd.DataFrame(prefs).to_csv(out_dir / "preferences_used.csv", index=False)
-		pd.DataFrame(scored).to_csv(out_dir / "personalization_scored_recipes.csv", index=False)
-		
+		pd.DataFrame(prefs).to_csv("preferences_used.csv", index=False)
+		pd.DataFrame(scored).to_csv("personalization_scored_recipes.csv", index=False)
 		# Ensure top_choices is a DataFrame with proper columns and no extra index
 		if not isinstance(top_choices, pd.DataFrame):
 			top_choices = pd.DataFrame(top_choices)
@@ -1645,20 +1746,12 @@ class ADAMPersonalizationModel:
 		keep_cols = [col for col in required_cols if col in top_choices.columns]
 		top_choices = top_choices[keep_cols].copy()
 		top_choices = top_choices.drop_duplicates().reset_index(drop=True)
-		top_choices.to_csv(out_dir / "personalized_top_choices.csv", index=False)
+		top_choices.to_csv("personalized_top_choices.csv", index=False)
 
 		# If a profile was provided to run(), use it; otherwise build one from prefs/defaults
 		if profile is None:
-			profile = {
-				"age": 55,
-				"gender": "female",
-				"bmi": 26.5,
-				"hba1c": None,
-				"diet_type": "Veg",
-				# default EAR/TUL age-group column; callers/users can override this in the profile
-				"age_group_col": ear_group_col or "Men_sedentary",
-			}
-
+			return "profile missing"
+		
 		# Allow per-user EAR/TUL group to be driven by the profile
 		age_group_for_run = profile.get("age_group_col", ear_group_col)
 		weekly_menu, weekly_optimization_summary,Weekly_min = self.optimize_weekly_menu_with_constraints(
@@ -1726,7 +1819,7 @@ class ADAMPersonalizationModel:
 			mt = str(m["Meal_Time_str"]) if "Meal_Time_str" in m else str(m.get("Meal_Time", ""))
 			mask = (df["Pref_ID_str"] == pr) & (df["Meal_Time_str"] == mt)
 			main2_count = int(df[mask & (df["Dish_Type_norm"] == "main 2")].shape[0])
-			side_count = int(df[mask & (df["Dish_Type_norm"] == "side")].shape[0])
+			side_count = int(df[mask & (df["Dish_Type_norm"] == "Optional")].shape[0])
 			# Build combination string from Code_cooccurence (fallback to Preferred_SubCategory_code)
 			vals = set()
 			if "Code_cooccurence" in df.columns:

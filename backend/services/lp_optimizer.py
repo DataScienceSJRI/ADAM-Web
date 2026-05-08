@@ -444,6 +444,14 @@ def run_lp(
                 if sides:
                     model += lpSum(y[(d, s)] for s in sides) <= 1
 
+                # If main is selected from this preference, optional must also come from this preference
+                # (or not be selected at all)
+                if mains and sides:
+                    main_selected = lpSum(y[(d, i)] for i in mains)
+                    sides_selected = lpSum(y[(d, s)] for s in sides)
+                    # Optional can only be selected if main from this pref is selected
+                    model += sides_selected <= main_selected
+
                 # Main 3 can only be selected if Main 2 is selected
                 if mains2 and mains3:
                     for main3 in mains3:

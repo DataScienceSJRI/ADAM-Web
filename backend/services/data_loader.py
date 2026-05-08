@@ -252,7 +252,7 @@ def _fetch_recipe_tag() -> pd.DataFrame:
 
 
 def _fetch_main_code() -> pd.DataFrame:
-    return _fetch("Main1_Main2_Mapping")
+    return _fetch("Main1_Main2_Mapping Subcategory")
 
 
 def _fetch_ear() -> pd.DataFrame:
