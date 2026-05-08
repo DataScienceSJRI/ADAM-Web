@@ -48,11 +48,11 @@ def run_lp(
     if meal_choices is None or (hasattr(meal_choices, "empty") and meal_choices.empty):
         return pd.DataFrame(), {"status": "no_candidates"}
 
-    # Use set-based mapping for Main1→Main2. Prefer explicit mapping if provided.
-    if main1_main2_mapping is not None:
-        main1_to_main2, main1_to_optional = self._get_main1_main2_map({'main1_main2_mapping': main1_main2_mapping})
-    else:
-        main1_to_main2, main1_to_optional = self._get_main1_main2_map(ds)
+    # # Use set-based mapping for Main1→Main2. Prefer explicit mapping if provided.
+    # if main1_main2_mapping is not None:
+    #     ds = ds.copy()
+    #     ds["main1_main2_mapping"] = main1_main2_mapping
+    # main1_to_main2, main1_to_main3, main1_to_optional = self._get_main1_main2_main3_map(ds)
 
     candidates = meal_choices.copy()#.sort_values("Personalization_Score", ascending=False)
     # Preserve candidates per preference — include Preference_Row_ID in duplicate subset
@@ -74,6 +74,7 @@ def run_lp(
     keep_cols = [col for col in required_cols if col in candidates.columns]
     candidates = candidates[keep_cols].copy()
     candidates = candidates.drop_duplicates().reset_index(drop=True)
+    candidates["__candidate_id__"] = np.arange(len(candidates), dtype=np.int64)
 
     # Normalize dish type and identifiers to avoid grouping mismatches
     candidates["Dish_Type"] = candidates["Dish_Type"].astype(str).str.strip()
@@ -140,6 +141,7 @@ def run_lp(
         else:
             candidates[f"{col}_z"] = (candidates[col] - mean_val) / std_val
 
+    candidates.to_csv("candidates_pre_objective.csv", index=False)
     # Use raw GL, z-scores for the other two
     candidates["Weighted_Objective_Score"] = (
         500 * candidates["GL"]
@@ -221,8 +223,16 @@ def run_lp(
     #     print(f"[DEBUG] Profile: {profile}")
 
     #### model starts
-    # Defensive preprocessing: ensure integer 0-based index and numeric objective column
+    # Defensive preprocessing: ensure integer 0-based index and numeric objective column.
+    # Use a deep copy for the model candidate table so all constraint generation
+    # works from the same frozen dataset as the decision variables.
+    candidates = candidates.copy(deep=True)
     candidates = candidates.reset_index(drop=True)
+    if "__candidate_id__" not in candidates.columns:
+        raise RuntimeError("Missing stable candidate id before model build")
+    if candidates["__candidate_id__"].duplicated().any():
+        raise RuntimeError("Duplicate stable candidate ids detected")
+
     # ensure objective metric exists and is numeric
     if objective_metric_col not in candidates.columns:
         candidates[objective_metric_col] = 0.0
@@ -305,10 +315,14 @@ def run_lp(
         print(f"[DEBUG] Candidates after applying per-recipe GL cap of {_per}: {len(candidates)}")
         print(candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True))
     
-    # Rebuild slot -> ids mapping now that indices are stable (0..N-1)
+    # Rebuild slot -> ids mapping now that stable candidate ids are attached.
     slot_to_ids = {}
-    for idx, row in candidates.iterrows():
-        slot_to_ids.setdefault((str(row["Meal_Time"]), str(row["Dish_Type"])), []).append(int(idx))
+    for _, row in candidates.iterrows():
+        cid = int(row["__candidate_id__"])
+        slot_to_ids.setdefault((str(row["Meal_Time"]), str(row["Dish_Type"])), []).append(cid)
+
+    candidates = candidates.set_index("__candidate_id__", drop=False)
+    candidate_ids = candidates.index.to_list()
 
     # print(f"[DEBUG] Rebuilt slot_to_ids after index reset: {slot_to_ids}")
 
@@ -318,11 +332,10 @@ def run_lp(
     y = {}
     x = {}
     for d in days:
-        for idx, _ in candidates.iterrows():
-            i = int(idx)
+        for i in candidate_ids:
             y[(d, i)] = LpVariable(f"y_d{d}_r{i}", lowBound=0, upBound=1, cat="Binary")
             x[(d, i)] = LpVariable(f"x_d{d}_r{i}", lowBound=0)
-    model += lpSum(float(candidates.loc[i, objective_metric_col]) * x[(d, int(i))] for d in days for i in candidates.index)
+    model += lpSum(float(candidates.loc[i, objective_metric_col]) * x[(d, i)] for d in days for i in candidate_ids)
 
     for d in days:
         for _, slot_row in required_slots.iterrows():
@@ -335,53 +348,106 @@ def run_lp(
             if dtype == "Snacks":
                 # Allow up to 2 snack selections per slot
                 model += lpSum(y[(d, i)] for i in ids) <= 2
-                model += lpSum(y[(d, i)] for i in ids) >= 1
-            elif dtype in ("Main 2", "Side", "Beverage"):
+                model += lpSum(y[(d, i)] for i in ids) >= 0
+            elif dtype in ("Main 2","Main 3", "Optional", "Beverage"):
                 # These remain optional but limited to 1
                 model += lpSum(y[(d, i)] for i in ids) <= 1
             else:
                 model += lpSum(y[(d, i)] for i in ids) == 1
 
+    # Ensure snacks on multiple days: at least 3 snack selections in the week
+    snack_ids = []
+    for _, slot_row in required_slots.iterrows():
+        if str(slot_row["Dish_Type"]).strip() == "Snacks":
+            slot = (str(slot_row["Meal_Time"]), str(slot_row["Dish_Type"]))
+            snack_ids.extend(slot_to_ids.get(slot, []))
+    if snack_ids:
+        model += lpSum(y[(d, i)] for d in days for i in snack_ids) >= 5
+
     # Enforce meal-specific allowed dish types:
     # - `Side` must NOT appear for Breakfast; allowed only for Lunch and Dinner.
     # - `Beverage` is allowed ONLY for Breakfast (disallow in other meals).
-    for d in days:
-        for i in candidates.index:
-            mt = str(candidates.loc[i, "Meal_Time"]).strip()
-            dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
-            # disallow Side in Breakfast
-            if dt == "side" and mt.lower() == "breakfast":
-                model += y[(d, int(i))] == 0
-            # Side only in Lunch/Dinner
-            if dt == "side" and mt.lower() not in ("lunch", "dinner"):
-                model += y[(d, int(i))] == 0
-            # Beverage only for Breakfast
-            if dt == "beverage" and mt.lower() != "breakfast":
-                model += y[(d, int(i))] == 0
+    # for d in days:
+    #     for i in candidates.index:
+    #         mt = str(candidates.loc[i, "Meal_Time"]).strip()
+    #         dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
+    #         # disallow Main 3 in Breakfast - only main 1 + 2 + Optional/ beverage
+    #         if dt.lower() == "Main 3" and mt.lower() == "breakfast":
+    #             model += y[(d, int(i))] == 0
+    #         # Optional only in Lunch/Dinner
+    #         if dt.lower() == "optional" and mt.lower() not in ("lunch", "dinner"):
+    #             model += y[(d, int(i))] == 0
+    #         # Beverage only for Breakfast
+    #         if dt == "beverage" and mt.lower() != "breakfast" and mt.lower() != "dinner":
+    #             model += y[(d, int(i))] == 0
         
+    #### Breakfast should have Main 2 and optional , No main 3
+    #### Lunch can have all
+    ### dinner is main , 2 and optional , no main 3
+    for d in days:
+            for i in candidates.index:
+                mt = str(candidates.loc[i, "Meal_Time"]).strip()
+                dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
+                if mt.lower() == "breakfast":
+                    if dt.lower() == "main 3":
+                        model += y[(d, int(i))] == 0
+                    if dt.lower() == "optional":
+                        model += y[(d, int(i))] <= 1
+                elif mt.lower() == "lunch": 
+                    # all dish types allowed in lunch, no additional constraints needed
+                    pass
+                elif mt.lower() == "dinner":
+                    if dt.lower() == "main 3":
+                        model += y[(d, int(i))] == 0
+                    if dt.lower() == "optional":
+                        model += y[(d, int(i))] <= 1
+                else:
+                    continue
+                    
+
+
     # Conditional pairing constraints: If a Preference row has both Main and Main 2,
-    # their selections must be identical. If only Main exists, it's free to be chosen.
+    # their selections must be identical. Main 3 requires Main 2 to be selected. If only Main exists, it's free to be chosen.
+    # Optional (Side) can be selected even if Main 3 is not.
     for d in days:
         for meal_time in candidates["Meal_Time"].dropna().unique():
             meal_mask = candidates["Meal_Time"] == meal_time
             for pref_id, group in candidates[meal_mask].groupby("Preference_Row_ID"):
                 mains = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
                 mains2 = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
+                mains3 = group[group["Dish_Type"].astype(str).str.strip() == "Main 3"].index.tolist()
+                sides = group[group["Dish_Type"].astype(str).str.strip().str.lower() == "Optional"].index.tolist()
 
                 if mains and mains2:
-                    # If this ID has both, their selection must be identical (1 and 1, or 0 and 0)
+                    # If this ID has both Main and Main 2, their selection must be identical (1 and 1, or 0 and 0)
                     model += lpSum(y[(d, i)] for i in mains) == lpSum(y[(d, j)] for j in mains2)
                     # Ensure servings for Main are at least servings for Main 2 (Main >= Main2)
                     model += lpSum(x[(d, i)] for i in mains) >= lpSum(x[(d, j)] for j in mains2)
                 else:
                     # If there is no Main available for this preference+meal, explicitly
-                    # disallow selecting Main 2 or Side items so they don't appear without Main.
+                    # disallow selecting Main 2, Main 3, or Side items so they don't appear without Main.
                     if not mains and mains2:
                         model += lpSum(y[(d, j)] for j in mains2) == 0
+                    if not mains and mains3:
+                        model += lpSum(y[(d, k)] for k in mains3) == 0
                     # also disallow sides for this pref+meal when no Main exists
-                    sides = group[group["Dish_Type"].astype(str).str.strip().str.lower() == "side"].index.tolist()
                     if not mains and sides:
                         model += lpSum(y[(d, s)] for s in sides) == 0
+
+                # Ensure at most one selection per dish type per preference per meal per day
+                if mains:
+                    model += lpSum(y[(d, i)] for i in mains) <= 1
+                if mains2:
+                    model += lpSum(y[(d, j)] for j in mains2) <= 1
+                if mains3:
+                    model += lpSum(y[(d, k)] for k in mains3) <= 1
+                if sides:
+                    model += lpSum(y[(d, s)] for s in sides) <= 1
+
+                # Main 3 can only be selected if Main 2 is selected
+                if mains2 and mains3:
+                    for main3 in mains3:
+                        model += y[(d, main3)] <= lpSum(y[(d, j)] for j in mains2)
 
     # Write pairing constraint debug info (which candidate indices were considered for each pref+meal)
     pairing_debug_rows = []
@@ -391,19 +457,19 @@ def run_lp(
             for pref_id, group in slot_candidates.groupby("Preference_Row_ID"):
                 main_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
                 main2_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
+                main3_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 3"].index.tolist()
                 pairing_debug_rows.append({
                     "Day": d,
                     "Meal_Time": meal_time,
                     "Preference_Row_ID": pref_id,
                     "main_ids": ";".join([str(x) for x in main_ids]),
                     "main2_ids": ";".join([str(x) for x in main2_ids]),
+                    "main3_ids": ";".join([str(x) for x in main3_ids]),
                     "has_main": bool(len(main_ids) > 0),
                     "has_main2": bool(len(main2_ids) > 0),
+                    "has_main3": bool(len(main3_ids) > 0),
                 })
-    out_dir = self.config.outputs_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(pairing_debug_rows).to_csv(out_dir / "pairing_constraints_debug.csv", index=False)
-
+    pd.DataFrame(pairing_debug_rows).to_csv("pairing_constraints_debug.csv", index=False)
 
     for d in days:
         for idx, row in candidates.iterrows():
@@ -442,7 +508,7 @@ def run_lp(
         category_df = candidates.dropna(subset=["Category_Key"]).copy()
         for _, group_df in category_df.groupby(["Dish_Type", "Category_Key"], dropna=False):
             dish_type_u = str(group_df["Dish_Type"].iloc[0]).strip().upper() if not group_df.empty else ""
-            if dish_type_u != "MAIN":
+            if dish_type_u not in ("MAIN", "MAIN 2"):
                 continue
             ids = [int(i) for i in group_df.index.tolist()]
             if ids:
@@ -594,14 +660,17 @@ def run_lp(
     status = str(LpStatus.get(model.status, model.status))
 
     selected_rows: List[Dict[str, object]] = []
-    for d in days:
-        for i in candidates.index:
-            if float(y[(d, int(i))].value() or 0) > 0.5:
-                row = candidates.loc[i].to_dict()
-                row["Day"] = d
-                row["Serving"] = float(x[(d, int(i))].value() or 0)
-                selected_rows.append(row)
+    if status == "Optimal":
+        for d in days:
+            for i in candidates.index:
+                if float(y[(d, int(i))].value() or 0) > 0.5:
+                    row = candidates.loc[i].to_dict()
+                    row.pop("__candidate_id__", None)
+                    row["Day"] = d
+                    row["Serving"] = float(x[(d, int(i))].value() or 0)
+                    selected_rows.append(row)
 
+    candidates.to_csv("candidates_with_metrics.csv", index=False)
     # Dump post-solve variable values for diagnostics (y and x)
     vars_rows = []
     for d in days:
@@ -616,10 +685,7 @@ def run_lp(
                 "x_var": f"x_d{d}_r{int(i)}",
                 "x_val": x_val,
             })
-    out_dir = self.config.outputs_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(vars_rows).to_csv(out_dir / "y_x_values_postsolve.csv", index=False)
-
+    pd.DataFrame(vars_rows).to_csv("final_y_x_values_postsolve.csv", index=False)
 
     weekly_menu = pd.DataFrame(selected_rows)
     if not weekly_menu.empty:
@@ -634,6 +700,7 @@ def run_lp(
                 if ids:
                     i = ids[0]
                     row = candidates.loc[i].to_dict()
+                    row.pop("__candidate_id__", None)
                     row["Day"] = d
                     row["Serving"] = 1.0
                     fallback_rows.append(row)
