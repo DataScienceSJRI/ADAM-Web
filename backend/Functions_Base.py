@@ -1593,6 +1593,8 @@ class ADAMPersonalizationModel:
 			prefs.to_csv("prefs_debug.csv", index=False)
 			### prefs df make the column dish_type as Optional if value is Beverage
 			prefs.loc[prefs["dish_type"] == "Beverage", "dish_type"] = "Optional"
+			prefs.loc[prefs["dish_type"] == "Side", "dish_type"] = "Main 3"
+
 			prefs.to_csv("prefs_debug_new.csv", index=False)
 			for _, pref in prefs.iterrows():
 				# Use sub_category_code for matching
