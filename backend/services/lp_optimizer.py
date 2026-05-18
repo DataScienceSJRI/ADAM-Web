@@ -320,26 +320,6 @@ def run_lp(
                 if dt.lower() == "optional":
                     model += y[(d, int(i))] <= 1
 
-    # =================================================================
-    # INTRA-MEAL SUBCATEGORY VARIETY CONSTRAINT (NO DUPLICATES IN A SLOT)
-    # =================================================================
-    # Ensures that for a given Day and Meal Time, the same subcategory
-    # code (e.g., Sandwiches, Parathas) cannot be chosen more than once.
-    if "Preferred_SubCategory_code" in candidates.columns:
-        # Filter out empty or missing subcategory rows to avoid matching nulls
-        subcat_df = candidates.dropna(subset=["Preferred_SubCategory_code"]).copy()
-        subcat_df["Preferred_SubCategory_code"] = subcat_df["Preferred_SubCategory_code"].astype(str).str.strip()
-        subcat_df = subcat_df[subcat_df["Preferred_SubCategory_code"] != ""]
-
-        for d in days:
-            # Group candidates by Meal Time and Subcategory Code
-            for (meal_time, subcat_code), group_df in subcat_df.groupby(["Meal_Time", "Preferred_SubCategory_code"]):
-                ids = [int(i) for i in group_df.index.tolist()]
-                
-                if len(ids) > 1:
-                    # The sum of binary activation variables 'y' for this subcategory 
-                    # in this specific meal time on this day cannot exceed 1
-                    model += lpSum(y[(d, i)] for i in ids) <= 1
 
     for d in days:
         for meal_time in candidates["Meal_Time"].dropna().unique():
@@ -426,47 +406,77 @@ def run_lp(
 
 
 
-    # ========================================================
-    # OPTIMIZED SOFT PENALTY FOR RECIPE & CATEGORY REPETITION
-    # ========================================================
+    # =================================================================
+    # OPTIMIZED SOFT PENALTY + MULTI-LAYER DYNAMIC VARIETY CONTROLS
+    # =================================================================
     recipe_penalty_weight = 2000.0   
     category_penalty_weight = 1000.0 
     variety_penalties = []
 
-    # 1) Fast Recipe Repetition Penalty
-    # We only create penalty variables for recipes that have enough entries to actually repeat
+    # Pre-calculate unique recipe availability per slot for the dynamic guardrails
+    slot_recipe_counts = candidates.groupby(["Meal_Time", "Dish_Type"])["Recipe_Code"].nunique().to_dict()
+
+    # 1) Recipe Repetition: Combined Soft Penalty + Dynamic Hard Ceiling
     for (meal_time, dish_type, recipe_code), group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
         ids = [int(i) for i in group_df.index.tolist()]
-        
-        # If there's only 1 candidate entry total, it physically cannot repeat past 1, so skip creating a variable!
-        if len(ids) <= 1:
+        if not ids:
             continue
             
-        safe_mt = str(meal_time).replace(" ", "_").replace("-", "_")
-        safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
-        safe_rc = str(recipe_code).replace(" ", "_").replace("-", "_")
-        
-        v_recipe = LpVariable(f"recipe_excess_{safe_mt}_{safe_dt}_{safe_rc}", lowBound=0)
-        model += lpSum(y[(d, i)] for d in days for i in ids) <= 1 + v_recipe
-        variety_penalties.append(recipe_penalty_weight * v_recipe)
+        # --- LAYER A: Dynamic Hard Guardrail ---
+        # Look up how many unique recipes are competing for this specific slot
+        unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
+        if unique_recipes <= 2:
+            max_recipe_rep = 7  # Scarce choices: allow repeating up to 7 times if forced by macros
+        elif unique_recipes <= 5:
+            max_recipe_rep = 3  # Medium variety: allow up to 3 times absolute maximum
+        else:
+            max_recipe_rep = 2  # Abundant choices: force high variety (strict cap of 2 times)
 
-    # 2) Fast Category Repetition Penalty 
+        # Apply the absolute upper ceiling
+        model += lpSum(y[(d, i)] for d in days for i in ids) <= max_recipe_rep
+
+        # --- LAYER B: Soft Repetition Penalty ---
+        # Only create penalty variables if the recipe has enough data entries to actually repeat
+        if len(ids) > 1:
+            safe_mt = str(meal_time).replace(" ", "_").replace("-", "_")
+            safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
+            safe_rc = str(recipe_code).replace(" ", "_").replace("-", "_")
+            
+            v_recipe = LpVariable(f"recipe_excess_{safe_mt}_{safe_dt}_{safe_rc}", lowBound=0)
+            # First appearance is free, subsequent appearances add to v_recipe penalty
+            model += lpSum(y[(d, i)] for d in days for i in ids) <= 1 + v_recipe
+            variety_penalties.append(recipe_penalty_weight * v_recipe)
+
+
+    # 2) Category Repetition: Fast Soft Penalty 
     category_df = candidates.dropna(subset=["Category_Key"]).copy()
     for (dish_type, category_key), group_df in category_df.groupby(["Dish_Type", "Category_Key"], dropna=False):
         dish_type_u = str(dish_type).strip().upper()
-        
-        # Only apply category variety penalties to core Mains (skipping sides/beverages saves massive solver time)
         if dish_type_u not in ("MAIN", "MAIN 2", "MAIN 3"):
             continue
             
         ids = [int(i) for i in group_df.index.tolist()]
-        if len(ids) > 2: # Only penalize if there are enough items to actually exceed the limit
+        if len(ids) > 2: 
             safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
             safe_ck = str(category_key).replace(" ", "_").replace("-", "_").replace("/", "_")
             
             v_category = LpVariable(f"category_excess_{safe_dt}_{safe_ck}", lowBound=0)
             model += lpSum(y[(d, i)] for d in days for i in ids) <= 2 + v_category
             variety_penalties.append(category_penalty_weight * v_category)
+
+
+    # 3) Intra-Meal Variety: Hard Subcategory Constraint (No duplicate types in a single slot)
+    if "Preferred_SubCategory_code" in candidates.columns:
+        subcat_df = candidates.dropna(subset=["Preferred_SubCategory_code"]).copy()
+        subcat_df["Preferred_SubCategory_code"] = subcat_df["Preferred_SubCategory_code"].astype(str).str.strip()
+        subcat_df = subcat_df[subcat_df["Preferred_SubCategory_code"] != ""]
+
+        for d in days:
+            for (meal_time, subcat_code), group_df in subcat_df.groupby(["Meal_Time", "Preferred_SubCategory_code"]):
+                ids = [int(i) for i in group_df.index.tolist()]
+                # If multiple items in this subcategory exist, ensure only 1 can be chosen on day 'd' at this 'meal_time'
+                if len(ids) > 1:
+                    model += lpSum(y[(d, i)] for i in ids) <= 1 
 
 
 
@@ -515,6 +525,27 @@ def run_lp(
     #             if ids:
     #                 model += lpSum(y[(d, i)] for d in days for i in ids) <= max_cat_rep
 
+    # ==========================================
+    # # DYNAMIC RECIPE REPETITION CONSTRAINT
+    # # ==========================================
+    # # Group by structural slot to see how many unique recipes are competing for it
+    # for (meal_time, dish_type), slot_group in candidates.groupby(["Meal_Time", "Dish_Type"]):
+    #     unique_recipes = slot_group["Recipe_Code"].nunique()
+        
+    #     # Dynamically calculate the safe maximum repetition cap based on total unique choices:
+    #     if unique_recipes <= 2:
+    #         max_recipe_rep = 7  # Critically low choices: allow it every single day if forced
+    #     elif unique_recipes <= 5:
+    #         max_recipe_rep = 3  # Low variety: allow a single recipe up to 3 times a week
+    #     else:
+    #         max_recipe_rep = 2  # Healthy variety pool: cap a single recipe at max 2 times a week
+
+    #     # Apply the dynamically calculated cap to each unique recipe inside this slot
+    #     for recipe_code, sub_group in slot_group.groupby("Recipe_Code"):
+    #         ids = [int(i) for i in sub_group.index.tolist()]
+    #         model += lpSum(y[(d, i)] for d in days for i in ids) <= max_recipe_rep
+
+
 
     # Step 3: Track Nutrient Penalties
     nutrient_slacks = {}
@@ -537,11 +568,15 @@ def run_lp(
         model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for d in days for i in candidates.index) + slack >= float(req)
         penalty_terms.append(penalty_weight * slack)
 
+
+
     # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
     if variety_penalties:
         model.objective += lpSum(variety_penalties)
     if penalty_terms:
         model.objective += lpSum(penalty_terms)
+
+
 
     if eff_daily is not None and "Energy_ENERC_Kcal" in candidates.columns:
         for d in days:
