@@ -1666,7 +1666,8 @@ class ADAMPersonalizationModel:
 									if col in scored.columns:
 										main3_mask = main3_mask | (scored[col].astype(str).str.upper().str.startswith(main3))
 								subset_main3 = scored[main3_mask.astype(bool)].copy()
-								if not subset_main3.empty:
+								prefs_codes = prefs[(prefs["meal_time"]==meal_time) & (prefs["dish_type"]=="Main 3")]["sub_category_code"].unique()
+								if not subset_main3.empty and main3 in prefs_codes:
 									subset_main3["Preferred_SubCategory_code"] = main3
 									subset_main3["Dish_Type"] = "Main 3"
 									subset_main3["Meal_Time"] = meal_time
@@ -1691,7 +1692,8 @@ class ADAMPersonalizationModel:
 									if col in scored.columns:
 										opt_mask = opt_mask | (scored[col].astype(str).str.upper().str.startswith(opt))
 								subset_opt = scored[opt_mask.astype(bool)].copy()
-								if not subset_opt.empty:
+								prefs_codes_opt = prefs[(prefs["meal_time"]==meal_time) & (prefs["dish_type"]=="Optional")]["sub_category_code"].unique()
+								if not subset_opt.empty and opt in prefs_codes_opt:
 									subset_opt["Preferred_SubCategory_code"] = opt
 									subset_opt["Dish_Type"] = "Optional"
 									subset_opt["Meal_Time"] = meal_time
@@ -1702,10 +1704,13 @@ class ADAMPersonalizationModel:
 					non_main = matched_recipes.copy()
 					non_main["Preferred_SubCategory_code"] = subcat_code
 					# non_main["Dish_Type"] = dish_type
-					if dish_type != "Beverage":
-						non_main["Dish_Type"] = dish_type
-					else:
+					if dish_type =="Main 3":
+						non_main["Dish_Type"] = "SIDE"
+					if dish_type == "Optional":
 						non_main["Dish_Type"] = "Optional"
+					if dish_type  == "Snacks":
+						non_main["Dish_Type"] = "Snacks"
+
 					non_main["Meal_Time"] = meal_time
 					non_main["Preference_Row_ID"] = pref_row_id
 					# Recalculate Personalization_Score if needed (already present from scored)
@@ -1715,6 +1720,7 @@ class ADAMPersonalizationModel:
 			if not top_choices.empty and (top_choices.columns[0] == 'Unnamed: 0' or str(top_choices.columns[0]).startswith('Unnamed')):
 				top_choices = top_choices.loc[:, top_choices.columns != top_choices.columns[0]]
 		
+		top_choices = top_choices[top_choices["Dish_Type"]!="SIDE"]
 		# Save intermediate outputs as soon as they are ready
 		pd.DataFrame(prefs).to_csv("preferences_used.csv", index=False)
 		pd.DataFrame(scored).to_csv("personalization_scored_recipes.csv", index=False)
