@@ -48,20 +48,12 @@ def run_lp(
     if meal_choices is None or (hasattr(meal_choices, "empty") and meal_choices.empty):
         return pd.DataFrame(), {"status": "no_candidates"}
 
-    # # Use set-based mapping for Main1→Main2. Prefer explicit mapping if provided.
-    # if main1_main2_mapping is not None:
-    #     ds = ds.copy()
-    #     ds["main1_main2_mapping"] = main1_main2_mapping
-    # main1_to_main2, main1_to_main3, main1_to_optional = self._get_main1_main2_main3_map(ds)
-
-    candidates = meal_choices.copy()#.sort_values("Personalization_Score", ascending=False)
-    # Preserve candidates per preference — include Preference_Row_ID in duplicate subset
+    candidates = meal_choices.copy()
     dedup_subset = ["Meal_Time", "Dish_Type", "Recipe_Code", "Preference_Row_ID"]
     candidates = candidates.drop_duplicates(subset=dedup_subset).reset_index(drop=True)
     if candidates.empty:
         return pd.DataFrame(), {"status": "no_candidates"}
 
-    # Keep only required columns: Recipe_Category, Code_cooccurence, Preference_Row_ID, Meal_Time, Dish_Type, and nutrient columns
     required_cols = [
         "Recipe_Code","Recipe_Name","Recipe_Category", "Code_cooccurence", "Preferred_SubCategory_code", "Preference_Row_ID", "Meal_Time", "Dish_Type",
         "GL", "Avg_TimeAbove160_pct", "Avg_Delta_Glucose", "Energy_ENERC_Kcal", "Energy_ENERC_KJ",
@@ -70,13 +62,12 @@ def run_lp(
         "ThiamineB1_THIA_mg", "RiboflavinB2_RIBF_mg", "NiacinB3_NIA_mg", "TotalB6A_VITB6A_mg", "TotalAscorbicAcid_VITC_mg",
         "Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg","PotassiumK_mg","Cholesterol_mg"
     ]
-    # Only keep columns that exist in candidates
+    
     keep_cols = [col for col in required_cols if col in candidates.columns]
     candidates = candidates[keep_cols].copy()
     candidates = candidates.drop_duplicates().reset_index(drop=True)
     candidates["__candidate_id__"] = np.arange(len(candidates), dtype=np.int64)
 
-    # Normalize dish type and identifiers to avoid grouping mismatches
     candidates["Dish_Type"] = candidates["Dish_Type"].astype(str).str.strip()
     candidates["Preference_Row_ID"] = candidates["Preference_Row_ID"].astype(str).str.strip()
     candidates["Meal_Time"] = candidates["Meal_Time"].astype(str).str.strip()
@@ -87,8 +78,6 @@ def run_lp(
         .str.strip()
         .str.upper()
     )
-    # Main2_Target_code assignment diagnostics
-    # Auto-fill missing Main2 and Side codes using mapping from Main1
     
     if "Recipe_Category" in candidates.columns:
         candidates["Category_Key"] = candidates["Recipe_Category"].astype(str).str.strip()
@@ -120,9 +109,7 @@ def run_lp(
         raise ValueError(f"Missing required objective columns: {missing_obj_cols}")
     for col in required_obj_cols:
         candidates[col] = pd.to_numeric(candidates[col], errors="coerce")
-    # Fill missing objective columns with sensible defaults instead of dropping rows.
-    # This ensures Main/Main2 candidate pairs aren't removed due to a missing metric.
-    # For GL, use the median if available otherwise a small default; for the model metrics use 0.0.
+
     if candidates["GL"].isna().any():
         gl_median = candidates["GL"].median()
         if pd.isna(gl_median):
@@ -132,7 +119,6 @@ def run_lp(
         if candidates[col].isna().any():
             candidates[col] = candidates[col].fillna(0.0)
 
-    # Compute z-scores for observed metrics only
     for col in ["Avg_TimeAbove160_pct", "Avg_Delta_Glucose"]:
         mean_val = float(candidates[col].mean())
         std_val = float(candidates[col].std(ddof=0))
@@ -142,7 +128,7 @@ def run_lp(
             candidates[f"{col}_z"] = (candidates[col] - mean_val) / std_val
 
     candidates.to_csv("candidates_pre_objective.csv", index=False)
-    # Use raw GL, z-scores for the other two
+    
     candidates["Weighted_Objective_Score"] = (
         500 * candidates["GL"]
         + 0.3 * candidates["Avg_TimeAbove160_pct_z"]
@@ -159,7 +145,6 @@ def run_lp(
     if required_slots.empty:
         return pd.DataFrame(), {"status": "no_slots"}
 
-    # Build a minimal dict for weekly requirement maps; prefer explicit ear/tul if provided
     req_ds = {}
     if ear_100 is not None:
         req_ds['ear_100'] = ear_100
@@ -169,63 +154,39 @@ def run_lp(
         req_ds['tul'] = tul
     else:
         req_ds['tul'] = ds.get('tul', pd.DataFrame())
+        
     weekly_min, weekly_max, daily_energy_kcal = self._get_weekly_requirement_maps(req_ds, age_group_col=age_group_col, n_days=n_days, profile=profile)
     weekly_min_100 = weekly_min.copy()
-    # Compute effective daily energy requirement (`eff_daily`) and the
-    # upper multiplier (`upper_mult`) once, based on the profile. This
-    # keeps the energy logic centralized and avoids recomputing later.
+    
     eff_daily = None
-    upper_mult = 1.2  # default maximum multiplier for daily energy
+    upper_mult = 1.2  
     
     if daily_energy_kcal is not None:
         eff_daily = float(daily_energy_kcal)
-        # Apply BMI reduction first
         if profile is not None:
             _bmi = profile.get("bmi")
             if _bmi is not None:
                 _bmi_val = float(_bmi)
                 if _bmi_val >= 23.0 and _bmi_val < 25.0:
-                    eff_daily = eff_daily * 0.8 ### 0.8 ####Jawa
-                    ##multiply all nutrients by 0.8
+                    eff_daily = eff_daily * 0.8 
                     weekly_min = {k: v * 0.8 for k, v in weekly_min.items()}
-
                 if _bmi_val >= 25.0:
-                    eff_daily = eff_daily * 0.7 ### 0.7 ####Jawa
-                    ##multiply all nutrients by 0.7
+                    eff_daily = eff_daily * 0.7 
                     weekly_min = {k: v * 0.7 for k, v in weekly_min.items()}
 
-
-        # Apply age-based reductions on top of BMI adjustment
         if profile is not None:
             _age = profile.get("age")
             if _age is not None:
                 _age_val = float(_age)
                 if _age_val > 60:
-                    eff_daily = eff_daily * 0.9 ### 0.9 ####Jawa
-                    ##multiply all nutrients by 0.9
+                    eff_daily = eff_daily * 0.9 
                     weekly_min = {k: v * 0.9 for k, v in weekly_min.items()}
-                    
                 elif _age_val > 50:
-                    eff_daily = eff_daily * 0.95 ### 0.95 ####Jawa
-                    ##multiply all nutrients by 0.95
+                    eff_daily = eff_daily * 0.95 
                     weekly_min = {k: v * 0.95 for k, v in weekly_min.items()}
 
-
-    # Slot -> candidate indices mapping will be (re)built after index normalization below
     slot_to_ids: Dict[Tuple[str, str], List[int]] = {}
 
-    # print(f"[DEBUG] Number of candidates: {len(candidates)}")
-    # print(f"[DEBUG] Required slots:\n{required_slots}")
-    # print(f"[DEBUG] Slot to IDs mapping:\n{slot_to_ids}")
-
-    # Profile (external) available for use in constraints/selection
-    # if profile is not None:
-    #     print(f"[DEBUG] Profile: {profile}")
-
-    #### model starts
-    # Defensive preprocessing: ensure integer 0-based index and numeric objective column.
-    # Use a deep copy for the model candidate table so all constraint generation
-    # works from the same frozen dataset as the decision variables.
     candidates = candidates.copy(deep=True)
     candidates = candidates.reset_index(drop=True)
     if "__candidate_id__" not in candidates.columns:
@@ -233,7 +194,6 @@ def run_lp(
     if candidates["__candidate_id__"].duplicated().any():
         raise RuntimeError("Duplicate stable candidate ids detected")
 
-    # ensure objective metric exists and is numeric
     if objective_metric_col not in candidates.columns:
         candidates[objective_metric_col] = 0.0
     else:
@@ -244,11 +204,6 @@ def run_lp(
             med = candidates[objective_metric_col].median()
             candidates[objective_metric_col] = candidates[objective_metric_col].fillna(med)
 
-    # candidates.to_csv("candidates_debug.csv", index=False)
-
-    # --- Sugar and salt aggregation: compute grams per standard serving per recipe
-    # Prefer explicit `recipe_ing_df` parameter; otherwise fall back to `ds` lookup.
-    # If ingredient data is unavailable, default sugar/salt per serving to 0.0.
     if recipe_ing_df is not None and isinstance(recipe_ing_df, pd.DataFrame) and not recipe_ing_df.empty:
         rig_df = recipe_ing_df.copy()
     else:
@@ -261,9 +216,8 @@ def run_lp(
     if not rig_df.empty:
         rig_df['Ing_raw_amounts_g'] = pd.to_numeric(rig_df.get('Ing_raw_amounts_g', 0), errors='coerce')
         rig_valid = rig_df.dropna(subset=['Ing_raw_amounts_g', 'Food Group']).copy()
-        # normalize food group labels
         rig_valid['Food Group'] = rig_valid['Food Group'].astype(str).str.strip().str.lower()
-        # Sugar per serving (grams)
+        
         sugars = (
             rig_valid.loc[rig_valid['Food Group'] == 'sugars']
             .groupby('Recipe_Code', dropna=False)['Ing_raw_amounts_g']
@@ -276,7 +230,6 @@ def run_lp(
         else:
             candidates['Sugar_per_serving_g'] = 0.0
 
-        # Salt per serving (grams) — prefer Ingredients text, otherwise detect Food Group
         if 'Ingredients' in rig_df.columns:
             mask_salt = rig_df['Ingredients'].astype(str).str.contains(r"\bSalt\b", case=False, na=False)
             salt_series = (
@@ -299,23 +252,13 @@ def run_lp(
         else:
             candidates['Salt_per_serving_g'] = 0.0
     else:
-        # no ingredient data available — default sugar and salt to zero
         candidates['Sugar_per_serving_g'] = 0.0
         candidates['Salt_per_serving_g'] = 0.0
 
-    print(per_recipe_max_gl)
-    print(per_meal_gl_cap)
-    print(per_day_gl_cap)
-    print(candidates[["Recipe_Code", "GL"]].head(10))
-
-    # Apply optional per-recipe GL filter (drop very high-GL recipes entirely)
     if per_recipe_max_gl is not None:
         _per = float(per_recipe_max_gl)
         candidates = candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True)
-        print(f"[DEBUG] Candidates after applying per-recipe GL cap of {_per}: {len(candidates)}")
-        print(candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True))
     
-    # Rebuild slot -> ids mapping now that stable candidate ids are attached.
     slot_to_ids = {}
     for _, row in candidates.iterrows():
         cid = int(row["__candidate_id__"])
@@ -323,8 +266,6 @@ def run_lp(
 
     candidates = candidates.set_index("__candidate_id__", drop=False)
     candidate_ids = candidates.index.to_list()
-
-    # print(f"[DEBUG] Rebuilt slot_to_ids after index reset: {slot_to_ids}")
 
     days = list(range(1, int(n_days) + 1))
     model = LpProblem("weekly_menu_min_weighted_gl_time_delta", LpMinimize)
@@ -335,6 +276,8 @@ def run_lp(
         for i in candidate_ids:
             y[(d, i)] = LpVariable(f"y_d{d}_r{i}", lowBound=0, upBound=1, cat="Binary")
             x[(d, i)] = LpVariable(f"x_d{d}_r{i}", lowBound=0)
+            
+    # Step 1: Initialize baseline objective function (GL minimization)
     model += lpSum(float(candidates.loc[i, objective_metric_col]) * x[(d, i)] for d in days for i in candidate_ids)
 
     for d in days:
@@ -344,18 +287,14 @@ def run_lp(
             if not ids:
                 continue
             dtype = str(slot_row["Dish_Type"]).strip()
-            # Make certain dish types optional with upper bounds; other required slots remain mandatory (==1).
             if dtype == "Snacks":
-                # Allow up to 2 snack selections per slot
                 model += lpSum(y[(d, i)] for i in ids) <= 2
                 model += lpSum(y[(d, i)] for i in ids) >= 0
             elif dtype in ("Main 2","Main 3", "Optional", "Beverage"):
-                # These remain optional but limited to 1
                 model += lpSum(y[(d, i)] for i in ids) <= 1
             else:
                 model += lpSum(y[(d, i)] for i in ids) == 1
 
-    # Ensure snacks on multiple days: at least 3 snack selections in the week
     snack_ids = []
     for _, slot_row in required_slots.iterrows():
         if str(slot_row["Dish_Type"]).strip() == "Snacks":
@@ -364,51 +303,44 @@ def run_lp(
     if snack_ids:
         model += lpSum(y[(d, i)] for d in days for i in snack_ids) >= 5
 
-    # Enforce meal-specific allowed dish types:
-    # - `Side` must NOT appear for Breakfast; allowed only for Lunch and Dinner.
-    # - `Beverage` is allowed ONLY for Breakfast (disallow in other meals).
-    # for d in days:
-    #     for i in candidates.index:
-    #         mt = str(candidates.loc[i, "Meal_Time"]).strip()
-    #         dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
-    #         # disallow Main 3 in Breakfast - only main 1 + 2 + Optional/ beverage
-    #         if dt.lower() == "Main 3" and mt.lower() == "breakfast":
-    #             model += y[(d, int(i))] == 0
-    #         # Optional only in Lunch/Dinner
-    #         if dt.lower() == "optional" and mt.lower() not in ("lunch", "dinner"):
-    #             model += y[(d, int(i))] == 0
-    #         # Beverage only for Breakfast
-    #         if dt == "beverage" and mt.lower() != "breakfast" and mt.lower() != "dinner":
-    #             model += y[(d, int(i))] == 0
-        
-    #### Breakfast should have Main 2 and optional , No main 3
-    #### Lunch can have all
-    ### dinner is main , 2 and optional , no main 3
     for d in days:
-            for i in candidates.index:
-                mt = str(candidates.loc[i, "Meal_Time"]).strip()
-                dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
-                if mt.lower() == "breakfast":
-                    if dt.lower() == "main 3":
-                        model += y[(d, int(i))] == 0
-                    if dt.lower() == "optional":
-                        model += y[(d, int(i))] <= 1
-                elif mt.lower() == "lunch": 
-                    # all dish types allowed in lunch, no additional constraints needed
-                    pass
-                elif mt.lower() == "dinner":
-                    if dt.lower() == "main 3":
-                        model += y[(d, int(i))] == 0
-                    if dt.lower() == "optional":
-                        model += y[(d, int(i))] <= 1
-                else:
-                    continue
-                    
+        for i in candidates.index:
+            mt = str(candidates.loc[i, "Meal_Time"]).strip()
+            dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
+            if mt.lower() == "breakfast":
+                if dt.lower() == "main 3":
+                    model += y[(d, int(i))] == 0
+                if dt.lower() == "optional":
+                    model += y[(d, int(i))] <= 1
+            elif mt.lower() == "lunch": 
+                pass
+            elif mt.lower() == "dinner":
+                if dt.lower() == "main 3":
+                    model += y[(d, int(i))] == 0
+                if dt.lower() == "optional":
+                    model += y[(d, int(i))] <= 1
 
+    # =================================================================
+    # INTRA-MEAL SUBCATEGORY VARIETY CONSTRAINT (NO DUPLICATES IN A SLOT)
+    # =================================================================
+    # Ensures that for a given Day and Meal Time, the same subcategory
+    # code (e.g., Sandwiches, Parathas) cannot be chosen more than once.
+    if "Preferred_SubCategory_code" in candidates.columns:
+        # Filter out empty or missing subcategory rows to avoid matching nulls
+        subcat_df = candidates.dropna(subset=["Preferred_SubCategory_code"]).copy()
+        subcat_df["Preferred_SubCategory_code"] = subcat_df["Preferred_SubCategory_code"].astype(str).str.strip()
+        subcat_df = subcat_df[subcat_df["Preferred_SubCategory_code"] != ""]
 
-    # Conditional pairing constraints: If a Preference row has both Main and Main 2,
-    # their selections must be identical. Main 3 requires Main 2 to be selected. If only Main exists, it's free to be chosen.
-    # Optional (Side) can be selected even if Main 3 is not.
+        for d in days:
+            # Group candidates by Meal Time and Subcategory Code
+            for (meal_time, subcat_code), group_df in subcat_df.groupby(["Meal_Time", "Preferred_SubCategory_code"]):
+                ids = [int(i) for i in group_df.index.tolist()]
+                
+                if len(ids) > 1:
+                    # The sum of binary activation variables 'y' for this subcategory 
+                    # in this specific meal time on this day cannot exceed 1
+                    model += lpSum(y[(d, i)] for i in ids) <= 1
+
     for d in days:
         for meal_time in candidates["Meal_Time"].dropna().unique():
             meal_mask = candidates["Meal_Time"] == meal_time
@@ -419,22 +351,16 @@ def run_lp(
                 sides = group[group["Dish_Type"].astype(str).str.strip().str.lower() == "Optional"].index.tolist()
 
                 if mains and mains2:
-                    # If this ID has both Main and Main 2, their selection must be identical (1 and 1, or 0 and 0)
                     model += lpSum(y[(d, i)] for i in mains) == lpSum(y[(d, j)] for j in mains2)
-                    # Ensure servings for Main are at least servings for Main 2 (Main >= Main2)
                     model += lpSum(x[(d, i)] for i in mains) >= lpSum(x[(d, j)] for j in mains2)
                 else:
-                    # If there is no Main available for this preference+meal, explicitly
-                    # disallow selecting Main 2, Main 3, or Side items so they don't appear without Main.
                     if not mains and mains2:
                         model += lpSum(y[(d, j)] for j in mains2) == 0
                     if not mains and mains3:
                         model += lpSum(y[(d, k)] for k in mains3) == 0
-                    # also disallow sides for this pref+meal when no Main exists
                     if not mains and sides:
                         model += lpSum(y[(d, s)] for s in sides) == 0
 
-                # Ensure at most one selection per dish type per preference per meal per day
                 if mains:
                     model += lpSum(y[(d, i)] for i in mains) <= 1
                 if mains2:
@@ -444,20 +370,15 @@ def run_lp(
                 if sides:
                     model += lpSum(y[(d, s)] for s in sides) <= 1
 
-                # If main is selected from this preference, optional must also come from this preference
-                # (or not be selected at all)
                 if mains and sides:
                     main_selected = lpSum(y[(d, i)] for i in mains)
                     sides_selected = lpSum(y[(d, s)] for s in sides)
-                    # Optional can only be selected if main from this pref is selected
                     model += sides_selected <= main_selected
 
-                # Main 3 can only be selected if Main 2 is selected
                 if mains2 and mains3:
                     for main3 in mains3:
                         model += y[(d, main3)] <= lpSum(y[(d, j)] for j in mains2)
 
-    # Write pairing constraint debug info (which candidate indices were considered for each pref+meal)
     pairing_debug_rows = []
     for d in days:
         for meal_time in sorted(candidates["Meal_Time"].dropna().astype(str).unique().tolist()):
@@ -487,7 +408,6 @@ def run_lp(
             model += x[(d, i)] <= float(ub) * y[(d, i)]
             model += x[(d, i)] >= float(lb) * y[(d, i)]
 
-    # GL-cap constraints: per-meal and per-day (if provided)
     if per_meal_gl_cap is not None:
         pmeal = float(per_meal_gl_cap)
         for d in days:
@@ -498,55 +418,105 @@ def run_lp(
                     continue
                 model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in ids) <= float(pmeal)
 
-
     if per_day_gl_cap is not None:
         pday = float(per_day_gl_cap)
         for d in days:
             model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in candidates.index) <= float(pday)
 
 
-    for _, group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
+
+
+    # ========================================================
+    # OPTIMIZED SOFT PENALTY FOR RECIPE & CATEGORY REPETITION
+    # ========================================================
+    recipe_penalty_weight = 2000.0   
+    category_penalty_weight = 1000.0 
+    variety_penalties = []
+
+    # 1) Fast Recipe Repetition Penalty
+    # We only create penalty variables for recipes that have enough entries to actually repeat
+    for (meal_time, dish_type, recipe_code), group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
         ids = [int(i) for i in group_df.index.tolist()]
-        model += lpSum(y[(d, i)] for d in days for i in ids) <= int(weekly_rep)
-
-    # Relax category weekly rep constraint if infeasible
-    if category_weekly_rep is None:
-        category_weekly_rep = 0
-    if category_weekly_rep > 0:
-        category_df = candidates.dropna(subset=["Category_Key"]).copy()
-        for _, group_df in category_df.groupby(["Dish_Type", "Category_Key"], dropna=False):
-            dish_type_u = str(group_df["Dish_Type"].iloc[0]).strip().upper() if not group_df.empty else ""
-            if dish_type_u not in ("MAIN", "MAIN 2"):
-                continue
-            ids = [int(i) for i in group_df.index.tolist()]
-            if ids:
-                # Use a relaxed upper bound (double the rep)
-                model += lpSum(y[(d, i)] for d in days for i in ids) <= int(category_weekly_rep)
-    #### old
-    # Elastic (goal) constraints for nutrients: add slack variables and penalize shortfall
-    # nutrient_slacks = {}
-    # penalty_weight = 100.0  # Lower penalty to allow more flexibility
-    # for col, req in weekly_min.items():
-    # 	if col not in candidates.columns or req <= 0:
-    # 		continue
-    # 	# Slack variable for shortfall (>=0)
-    # 	slack = LpVariable(f"nutrient_shortfall_{col}", lowBound=0)
-    # 	nutrient_slacks[col] = slack
         
-    # 	if profile and isinstance(profile, dict):
-    # 		dt = str(profile.get("diet_type", "")).strip().lower()
-    # 		# for all diets except explicit 'Non-veg', drop VB12 requirement
-    # 		if dt and dt != "non-veg" and "VB12_mcg" in col:
-    # 			continue
-    # 		else:
-    # 			# Allow shortfall, but penalize in objective
-    # 			model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for d in days for i in candidates.index) + slack >= float(req)
+        # If there's only 1 candidate entry total, it physically cannot repeat past 1, so skip creating a variable!
+        if len(ids) <= 1:
+            continue
+            
+        safe_mt = str(meal_time).replace(" ", "_").replace("-", "_")
+        safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
+        safe_rc = str(recipe_code).replace(" ", "_").replace("-", "_")
+        
+        v_recipe = LpVariable(f"recipe_excess_{safe_mt}_{safe_dt}_{safe_rc}", lowBound=0)
+        model += lpSum(y[(d, i)] for d in days for i in ids) <= 1 + v_recipe
+        variety_penalties.append(recipe_penalty_weight * v_recipe)
 
-    # # Add penalty for all nutrient shortfalls to the objective
-    # if nutrient_slacks:
-    # 	model += penalty_weight * lpSum(slack for slack in nutrient_slacks.values())
+    # 2) Fast Category Repetition Penalty 
+    category_df = candidates.dropna(subset=["Category_Key"]).copy()
+    for (dish_type, category_key), group_df in category_df.groupby(["Dish_Type", "Category_Key"], dropna=False):
+        dish_type_u = str(dish_type).strip().upper()
+        
+        # Only apply category variety penalties to core Mains (skipping sides/beverages saves massive solver time)
+        if dish_type_u not in ("MAIN", "MAIN 2", "MAIN 3"):
+            continue
+            
+        ids = [int(i) for i in group_df.index.tolist()]
+        if len(ids) > 2: # Only penalize if there are enough items to actually exceed the limit
+            safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
+            safe_ck = str(category_key).replace(" ", "_").replace("-", "_").replace("/", "_")
+            
+            v_category = LpVariable(f"category_excess_{safe_dt}_{safe_ck}", lowBound=0)
+            model += lpSum(y[(d, i)] for d in days for i in ids) <= 2 + v_category
+            variety_penalties.append(category_penalty_weight * v_category)
 
-    ###new
+
+
+
+    ##### faster with hard repetation constraints 
+    # ==========================================
+    # INSERT THIS NEW FAST DYNAMIC BOUNDS BLOCK:
+    # ==========================================
+    # # Step 2: Fast Dynamic Recipe Repetition Constraints
+    # variety_penalties = [] # Initialized empty so Step 4 doesn't break
+
+    # # Group by slot to see how many unique recipes are actually competing
+    # for (meal_time, dish_type), slot_group in candidates.groupby(["Meal_Time", "Dish_Type"]):
+    #     unique_recipes = slot_group["Recipe_Code"].nunique()
+        
+    #     # Dynamically set a safe hard cap based on availability
+    #     if unique_recipes <= 2:
+    #         max_rep = 7  # Scarce choices: allow repeating all week
+    #     elif unique_recipes <= 5:
+    #         max_rep = 3  # Medium choices: allow up to 3 times
+    #     else:
+    #         max_rep = 2  # Abundant choices: force high variety (max 2 times)
+
+    #     for recipe_code, sub_group in slot_group.groupby("Recipe_Code"):
+    #         ids = [int(i) for i in sub_group.index.tolist()]
+    #         model += lpSum(y[(d, i)] for d in days for i in ids) <= max_rep
+
+    # # Fast Dynamic Category Repetition Constraints
+    # if category_weekly_rep is not None and category_weekly_rep > 0:
+    #     category_df = candidates.dropna(subset=["Category_Key"]).copy()
+    #     for dish_type, dish_group in category_df.groupby("Dish_Type"):
+    #         dish_type_u = str(dish_type).strip().upper()
+    #         if dish_type_u not in ("MAIN", "MAIN 2", "MAIN 3"):
+    #             continue
+                
+    #         unique_categories = dish_group["Category_Key"].nunique()
+    #         if unique_categories == 1:
+    #             max_cat_rep = 7
+    #         elif unique_categories == 2:
+    #             max_cat_rep = 4
+    #         else:
+    #             max_cat_rep = 3  # Fallback safe variety threshold
+
+    #         for category_key, sub_group in dish_group.groupby("Category_Key"):
+    #             ids = [int(i) for i in sub_group.index.tolist()]
+    #             if ids:
+    #                 model += lpSum(y[(d, i)] for d in days for i in ids) <= max_cat_rep
+
+
+    # Step 3: Track Nutrient Penalties
     nutrient_slacks = {}
     penalty_terms = []
     penalty_weight = 100.0
@@ -555,65 +525,48 @@ def run_lp(
         if col not in candidates.columns or req <= 0:
             continue
 
-        # Skip VB12 for diets other than explicit 'Non-veg'
         if profile and isinstance(profile, dict):
             dt = str(profile.get("diet_type", "")).strip().lower()
             if dt and dt != "non-veg" and col == "VB12_mcg":
                 continue
 
-        # Slack variable for shortfall (>=0)
         safe_col = col.replace(" ", "_").replace("-", "_")
         slack = LpVariable(f"nutrient_shortfall_{safe_col}", lowBound=0)
         nutrient_slacks[col] = slack
 
         model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for d in days for i in candidates.index) + slack >= float(req)
-        print(f"Added constraint for {col} with requirement {req} and slack variable {slack.name}")
         penalty_terms.append(penalty_weight * slack)
 
-    # After building other objective parts, add penalties (merge with existing objective)
+    # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
+    if variety_penalties:
+        model.objective += lpSum(variety_penalties)
     if penalty_terms:
-        model += lpSum(penalty_terms)
+        model.objective += lpSum(penalty_terms)
 
-
-    # Enforce per-day kcal bounds using the previously computed `eff_daily` and `upper_mult`.
     if eff_daily is not None and "Energy_ENERC_Kcal" in candidates.columns:
         for d in days:
             daily_kcal = lpSum(float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in candidates.index)
             model += daily_kcal >= float(eff_daily)
             model += daily_kcal <= float(eff_daily) * float(upper_mult)
 
-    # Macronutrient percentage constraints (per-day):
-    # Carbohydrates 45–50% energy, Protein 15–20% energy, Fat 25–35% energy.
-    # Use energy conversions: carbs=4 kcal/g, protein=4 kcal/g, fat=9 kcal/g.
-    # Assume required macro columns exist in `candidates`.
     candidates["Carb_g"] = pd.to_numeric(candidates.get("Carbohydrate_g", 0), errors="coerce").fillna(0.0)
     candidates["Prot_g"] = pd.to_numeric(candidates.get("Protein_PROTCNT_g", 0), errors="coerce").fillna(0.0)
     candidates["Fat_g"] = pd.to_numeric(candidates.get("TotalFat_FATCE_g", 0), errors="coerce").fillna(0.0)
     candidates["Energy_kcal"] = pd.to_numeric(candidates.get("Energy_ENERC_Kcal", 0), errors="coerce").fillna(0.0)
     for d in days:
-        # Carbs: 45-50% of E_d
         model += lpSum((4.0 * candidates.loc[i, "Carb_g"] - 0.45 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
         model += lpSum((4.0 * candidates.loc[i, "Carb_g"] - 0.50 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
 
-        # Protein: 15-20% of E_d
         model += lpSum((4.0 * candidates.loc[i, "Prot_g"] - 0.15 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
         model += lpSum((4.0 * candidates.loc[i, "Prot_g"] - 0.20 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
 
-        # Fat: 25-35% of E_d
         model += lpSum((9.0 * candidates.loc[i, "Fat_g"] - 0.25 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
         model += lpSum((9.0 * candidates.loc[i, "Fat_g"] - 0.35 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
 
-        # Minimum carbohydrates per day (grams)
         min_carbs_per_day = 130.0
         model += lpSum(candidates.loc[i, "Carb_g"] * x[(d, int(i))] for i in candidates.index) >= float(min_carbs_per_day)
 
-
-    # --- Fiber constraints (separate block):
-    # 1) Energy-based: at least 14 g fiber per 1000 kcal per day
-    #    (i.e. 4 * sugar_energy example; here: 1000 * daily_fiber >= 14 * daily_energy)
-    # 2) Gender-based absolute minimum per day: male >=30 g, female >=25 g
     candidates["Fiber_g"] = pd.to_numeric(candidates.get("TotalDietaryFibre_FIBTG_g", 0), errors="coerce").fillna(0.0)
-    # determine gender-based minimum (None if unknown)
     _gender_min = None
     if profile is not None:
         _g = profile.get("gender")
@@ -627,43 +580,36 @@ def run_lp(
     for d in days:
         daily_fiber = lpSum(float(candidates.loc[i, "Fiber_g"]) * x[(d, int(i))] for i in candidates.index)
         daily_energy = lpSum(float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in candidates.index)
-        # energy-based requirement: 1000 * fiber_g >= 14 * energy_kcal  => daily_fiber >= 14/1000 * daily_energy
         model += daily_fiber * 1000.0 >= 14.0 * daily_energy
-        # enforce gender absolute minimum if known
         if _gender_min is not None:
             model += daily_fiber >= float(_gender_min)
 
     for col, max_req in weekly_max.items():
         if col not in candidates.columns or max_req <= 0:
             continue
-        # Relax max constraints by 20%
         model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for d in days for i in candidates.index) <= float(max_req) * 1.2
 
-    # Sugar constraint linked to energy: ensure sugar energy <= 5% of daily energy
-    # i.e., for each day d: 4 * sum(Sugar_per_serving_g * x[d,i]) <= 0.05 * sum(Energy_ENERC_Kcal * x[d,i])
     if 'Sugar_per_serving_g' in candidates.columns and 'Energy_ENERC_Kcal' in candidates.columns:
         for d in days:
             sugar_energy = lpSum(4.0 * float(candidates.loc[i, 'Sugar_per_serving_g']) * x[(d, int(i))] for i in candidates.index)
             daily_energy = lpSum(float(candidates.loc[i, 'Energy_ENERC_Kcal']) * x[(d, int(i))] for i in candidates.index)
             model += sugar_energy <= 0.05 * daily_energy
 
-    # Hard sodium constraint: enforce daily sodium <= 2000 mg (applied across the week)
     sodium_limit_per_day_mg = 1500.0
     if 'Sodium_mg' in candidates.columns:
         model += lpSum(float(candidates.loc[i, 'Sodium_mg']) * x[(d, int(i))] for d in days for i in candidates.index) <= float(sodium_limit_per_day_mg) * float(n_days)
 
-    # Hard cholesterol constraint: per-day cholesterol < 300 mg
     cholesterol_limit_per_day_mg = 300.0
     if 'Cholesterol_mg' in candidates.columns:
         for d in days:
             model += lpSum(float(candidates.loc[i, 'Cholesterol_mg']) * x[(d, int(i))] for i in candidates.index) <= float(cholesterol_limit_per_day_mg)
 
-    # Hard salt quantity constraint: total salt (grams) per day <= 5 g (applied across the week)
     salt_limit_per_day_g = 5
     if 'Salt_per_serving_g' in candidates.columns:
         model += lpSum(float(candidates.loc[i, 'Salt_per_serving_g']) * x[(d, int(i))] for d in days for i in candidates.index) <= float(salt_limit_per_day_g) * float(n_days)
 
-    solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec))
+    # solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec))
+    solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec), gapRel=0.1, threads=4)
     _ = model.solve(solver)
     status = str(LpStatus.get(model.status, model.status))
 
@@ -679,7 +625,6 @@ def run_lp(
                     selected_rows.append(row)
 
     candidates.to_csv("candidates_with_metrics.csv", index=False)
-    # Dump post-solve variable values for diagnostics (y and x)
     vars_rows = []
     for d in days:
         for i in candidates.index:
@@ -699,7 +644,6 @@ def run_lp(
     if not weekly_menu.empty:
         weekly_menu = weekly_menu.sort_values(["Day", "Meal_Time", "Dish_Type"]).reset_index(drop=True)
     else:
-        # Fallback: select top candidates for each slot
         fallback_rows = []
         for d in days:
             for _, slot_row in required_slots.iterrows():
@@ -724,7 +668,4 @@ def run_lp(
         "days": int(n_days),
         "required_slots": int(len(required_slots)),
     }
-    # print(weekly_menu)
-    # weekly_menu.to_csv("weekly_menu_lp_output.csv", index=False)
-    # print(summary)
     return weekly_menu, summary, weekly_min_100
