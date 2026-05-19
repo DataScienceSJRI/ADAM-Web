@@ -4,7 +4,7 @@ import os
 import tempfile
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
@@ -95,6 +95,8 @@ def generate_plan(
     finall_summary = None
     final_nut_summary = None
     opt_summary: dict = {}
+    test = find_closest_recipe_standalone("A000002",0.5,"Cup") 
+    print("Test closest recipe standalone at class level:", test)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -502,3 +504,125 @@ def build_weekly_nutrient_summary(weekly_menu,weekly_min):
 
     return pd.DataFrame(rows).reset_index(drop=True)
 
+
+
+import numpy as np
+import pandas as pd
+from typing import Optional, Dict, Tuple
+from services.data_loader import _fetch  # Adjust import based on where your _fetch sits
+
+def find_closest_recipe_standalone(
+    input_recipe_code: str,
+    target_portion: float,  # e.g., 1.0 for a full portion, 0.5 for half
+    input_description: str
+) -> Tuple[Optional[Dict], Dict[str, float]]:
+    """
+    Finds the closest alternative recipe from the same subcategory as the input recipe.
+    Dynamically computes Glycemic Load (GL) by joining the Recipe dataframe with 
+    the SubCategory_foods_GI_GL metadata table, matching the pipeline's calculation flow.
+    """
+    # 1. Access the global Supabase client instance
+    clean_target_code = str(input_recipe_code).strip()
+    
+    # 2. Query the 'Recipe' table for the target input item
+    Recipedf_full = _fetch("Recipe")
+
+    # Safety select to ensure only necessary columns are loaded into workspace memory
+    needed_cols = ["Recipe_Code", "Recipe_Category", "Energy_ENERC_Kcal", "Carbohydrate_g", "Recipe_Name","Energy_ENERC_KJ"]
+    Recipedf = Recipedf_full[[col for col in needed_cols if col in Recipedf_full.columns]].copy()
+    
+    # Isolate our incoming target row
+    target_df = Recipedf[Recipedf["Recipe_Code"] == clean_target_code]
+    subcat = str(target_df["Recipe_Category"].values[0])
+    if len(target_df) == 0:
+        print(f"[WARN] Input recipe code {clean_target_code}s not found in 'Recipe' table.")
+        return None, {"error": "input_recipe_not_found"}
+    
+    target_item = target_df.iloc[0]
+    # Safeguard if the recipe has no valid subcategory code assigned
+    if not subcat or subcat.lower() in ("none", "nan", ""):
+        return None, {"error": "Recipe_Category_missing"}
+        
+    # 3. Pull Glycemic Index matrix and calculate the target item's dynamic baseline GL
+    gi_gl_df_full = _fetch("SubCategory_foods_GI_GL")
+    gi_gl_df_full["Code"] = gi_gl_df_full["Code"].astype(str).str.strip()
+    print(subcat)
+    ### subcat came like  Recipe_Category    E1B
+    ### need only the value 
+    print(subcat)
+    print(gi_gl_df_full)
+    gi_gl_df_full.to_csv("gi_gl_df_full.csv", index=False)
+    gi_match = gi_gl_df_full[gi_gl_df_full["Code"] == subcat]
+    print(gi_match)
+
+    if len(gi_match) == 0:
+        print(f"[WARN] No GI/GL mapping data found for subcategory code {subcat}.")
+        return None, {"error": "gi_gl_mapping_missing"}
+        
+    gi_row = gi_match.iloc[0]
+    gi_val = float(gi_row.get("GI_AVG") or gi_row.get("Glycemic_Index") or 50.0)
+
+
+    # Calculate dynamic target values scaled to the serving size
+    target_carbs = float(target_item.get("Carbohydrate_g", 0) or 0)
+    target_gl = ((target_carbs * gi_val) / 100.0) * target_portion
+    target_energy = float(target_item.get("Energy_ENERC_Kcal", 0) or 0) * target_portion
+
+    # 4. Isolate candidate pool sharing the same subcategory, excluding the input item
+    pool_df = Recipedf[
+        (Recipedf["Recipe_Category"] == subcat) & 
+        (Recipedf["Recipe_Code"] != clean_target_code)
+    ].copy()
+    
+    if len(pool_df) == 0:
+        # Fallback if it is the only recipe inside its structural cluster
+        pool_df = Recipedf[Recipedf["Recipe_Category"] == subcat].copy()
+
+    # 5. Continuous metric calculations across our comparison choices
+    pool_df['Carbohydrate_g'] = pd.to_numeric(pool_df['Carbohydrate_g'], errors="coerce").fillna(0)
+    pool_df['Energy_ENERC_Kcal'] = pool_df['Energy_ENERC_KJ'] / 4.184
+    pool_df['Energy_ENERC_Kcal'] = pd.to_numeric(pool_df['Energy_ENERC_Kcal'], errors="coerce").fillna(0)
+    pool_df['Scaled_GL'] = ((pool_df['Carbohydrate_g'] * gi_val) / 100.0) * target_portion
+    pool_df['Scaled_Energy'] = pool_df['Energy_ENERC_Kcal'] * target_portion
+
+    # 6. Apply Space Vector Z-Score Normalization
+    all_gls = np.append(pool_df['Scaled_GL'].values, target_gl)
+    all_energies = np.append(pool_df['Scaled_Energy'].values, target_energy)
+    
+    gl_mean, gl_std = all_gls.mean(), all_gls.std()
+    en_mean, en_std = all_energies.mean(), all_energies.std()
+    
+    gl_std = gl_std if gl_std > 1e-6 else 1.0
+    en_std = en_std if en_std > 1e-6 else 1.0
+
+    target_gl_z = (target_gl - gl_mean) / gl_std
+    target_en_z = (target_energy - en_mean) / en_std
+
+    pool_df['GL_z'] = (pool_df['Scaled_GL'] - gl_mean) / gl_std
+    pool_df['Energy_z'] = (pool_df['Scaled_Energy'] - en_mean) / en_std
+
+    # 7. Compute Euclidean Distance vector matrix: √((ΔGL_z)² + (ΔEnergy_z)²)
+    pool_df['Distance'] = np.sqrt(
+        (pool_df['GL_z'] - target_gl_z) ** 2 + 
+        (pool_df['Energy_z'] - target_en_z) ** 2
+    )
+
+
+
+
+    # 1. Sort the pool by distance once
+    # (Smallest distance = most similar)
+    pool_df = pool_df.sort_values(by='Distance', ascending=True)
+    # 2. Extract the top 5 rows (or fewer if the pool is small)
+    closest_matches = pool_df.head(5)
+    
+    # 3. (Optional) If you specifically need the indices for other logic
+    closest_indices = closest_matches.index.tolist()
+    # DEBUG: Print the results
+    print(f"Found {len(closest_matches)} similar recipes.")
+    print(closest_matches[['Recipe_Code', 'Recipe_Name', 'Distance']])
+
+    # Now use 'closest_matches' for your final output
+    # No need to do: closest_match = pool_df.loc[closest_indices] 
+    # Because closest_matches IS pool_df.loc[closest_indices]
+    return closest_matches
