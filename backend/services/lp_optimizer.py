@@ -255,9 +255,9 @@ def run_lp(
         candidates['Sugar_per_serving_g'] = 0.0
         candidates['Salt_per_serving_g'] = 0.0
 
-    if per_recipe_max_gl is not None:
-        _per = float(per_recipe_max_gl)
-        candidates = candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True)
+    # if per_recipe_max_gl is not None:
+    #     _per = float(per_recipe_max_gl)
+    #     candidates = candidates[pd.to_numeric(candidates.get("GL", 0), errors="coerce") <= _per].reset_index(drop=True)
     
     slot_to_ids = {}
     for _, row in candidates.iterrows():
@@ -355,9 +355,12 @@ def run_lp(
                     sides_selected = lpSum(y[(d, s)] for s in sides)
                     model += sides_selected <= main_selected
 
-                if mains2 and mains3:
-                    for main3 in mains3:
-                        model += y[(d, main3)] <= lpSum(y[(d, j)] for j in mains2)
+                if mains3:
+                    if mains2:
+                        for main3 in mains3:
+                            model += y[(d, main3)] <= lpSum(y[(d, j)] for j in mains2)
+                    else:
+                        model += lpSum(y[(d, k)] for k in mains3) == 0
 
     pairing_debug_rows = []
     for d in days:
@@ -403,6 +406,23 @@ def run_lp(
         for d in days:
             model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in candidates.index) <= float(pday)
 
+    # Breakfast minimum GL: each day's breakfast must contribute at least 15 GL units
+    bf_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "breakfast"]
+    if bf_ids:
+        for d in days:
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in bf_ids) >= 15.0
+
+    # Dinner minimum GL: each day's dinner must contribute at least 15 GL units
+    d_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "dinner"]
+    if d_ids:
+        for d in days:
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in d_ids) >= 15.0
+
+    # Dinner minimum GL: each day's dinner must contribute at least 15 GL units
+    s_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "snacks"]
+    if s_ids:
+        for d in days:
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in s_ids) <= 20.0
 
 
 
@@ -426,7 +446,7 @@ def run_lp(
         # Look up how many unique recipes are competing for this specific slot
         unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
         if unique_recipes <= 2:
-            max_recipe_rep = 7  # Scarce choices: allow repeating up to 7 times if forced by macros
+            max_recipe_rep = 4  # Scarce choices: allow repeating up to 4 times if forced by macros
         elif unique_recipes <= 5:
             max_recipe_rep = 3  # Medium variety: allow up to 3 times absolute maximum
         else:
@@ -448,7 +468,31 @@ def run_lp(
             variety_penalties.append(recipe_penalty_weight * v_recipe)
 
 
-    # 2) Category Repetition: Fast Soft Penalty 
+    # Global per-recipe hard cap — scales with Main subcategory pool size (Snacks excluded)
+    main_df = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"].copy()
+    main_subcats = main_df["Preferred_SubCategory_code"].dropna().nunique()
+    global_recipe_cap = 3 if main_subcats <= 5 else 2
+    for recipe_code, recipe_df in candidates.groupby("Recipe_Code", dropna=False):
+        non_snack_ids = [int(i) for i in recipe_df.index.tolist()
+                         if str(candidates.loc[i, "Dish_Type"]).strip().lower() != "snacks"]
+        if non_snack_ids:
+            model += lpSum(y[(d, i)] for d in days for i in non_snack_ids) <= global_recipe_cap
+
+    # When pool is small (≤5 subcategories), ensure any selected subcategory appears at most 14 times
+    if main_subcats <= 5 and main_subcats > 1:
+        for subcat, subcat_df in main_df.groupby("Preferred_SubCategory_code", dropna=False):
+            subcat_ids = [int(i) for i in subcat_df.index.tolist()]
+            if subcat_ids:
+                model += lpSum(y[(d, i)] for d in days for i in subcat_ids) <= 14
+
+    # Snacks must appear every day when snack candidates exist
+    snack_candidate_ids = [i for i in candidates.index
+                           if str(candidates.loc[i, "Dish_Type"]).strip().lower() == "snacks"]
+    if snack_candidate_ids:
+        for d in days:
+            model += lpSum(y[(d, int(i))] for i in snack_candidate_ids) >= 1
+
+    # 2) Category Repetition: Fast Soft Penalty
     category_df = candidates.dropna(subset=["Category_Key"]).copy()
     for (dish_type, category_key), group_df in category_df.groupby(["Dish_Type", "Category_Key"], dropna=False):
         dish_type_u = str(dish_type).strip().upper()
@@ -548,6 +592,8 @@ def run_lp(
 
 
     # Step 3: Track Nutrient Penalties
+    # Energy is handled separately as a per-day hard constraint — exclude it here
+    weekly_min.pop("Energy_ENERC_Kcal", None)
     nutrient_slacks = {}
     penalty_terms = []
     penalty_weight = 100.0
@@ -578,11 +624,12 @@ def run_lp(
 
 
 
+    # Energy: per-day constraint with ±10% flexibility
     if eff_daily is not None and "Energy_ENERC_Kcal" in candidates.columns:
         for d in days:
             daily_kcal = lpSum(float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in candidates.index)
-            model += daily_kcal >= float(eff_daily)
-            model += daily_kcal <= float(eff_daily) * float(upper_mult)
+            model += daily_kcal >= float(eff_daily) * 0.9
+            model += daily_kcal <= float(eff_daily) * 1.1
 
     candidates["Carb_g"] = pd.to_numeric(candidates.get("Carbohydrate_g", 0), errors="coerce").fillna(0.0)
     candidates["Prot_g"] = pd.to_numeric(candidates.get("Protein_PROTCNT_g", 0), errors="coerce").fillna(0.0)
@@ -644,9 +691,12 @@ def run_lp(
         model += lpSum(float(candidates.loc[i, 'Salt_per_serving_g']) * x[(d, int(i))] for d in days for i in candidates.index) <= float(salt_limit_per_day_g) * float(n_days)
 
     # solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec))
-    solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec), gapRel=0.1, threads=4)
+    solver = PULP_CBC_CMD(timeLimit=int(500), gapRel=0.3, threads=6)
     _ = model.solve(solver)
     status = str(LpStatus.get(model.status, model.status))
+    print(f"Solver Status: {status}")
+    print(f"Solver Status: {status}")
+    print(f"Solver Status: {status}")
 
     selected_rows: List[Dict[str, object]] = []
     if status == "Optimal":
