@@ -4,12 +4,21 @@ from functools import lru_cache
 
 import jwt
 from jwt import PyJWKClient
-from fastapi import Header, HTTPException
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 
 load_dotenv()
 
 logger = logging.getLogger("backend.auth")
+
+_CREDENTIALS_EXCEPTION = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 
 
 @lru_cache(maxsize=1)
@@ -20,15 +29,8 @@ def _jwks_client() -> PyJWKClient:
     return PyJWKClient(f"{supabase_url}/auth/v1/.well-known/jwks.json")
 
 
-async def get_current_user(authorization: str = Header(...)) -> str:
-    """Verify Supabase JWT locally via JWKS and return the authenticated user's email.
-
-    Supabase now signs tokens with ES256 (asymmetric). The public key is fetched
-    once from the JWKS endpoint and cached — no network call on subsequent requests.
-    """
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization[7:]
+def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
+    """Verify Supabase JWT locally via JWKS and return the authenticated user's email."""
     try:
         signing_key = _jwks_client().get_signing_key_from_jwt(token)
         payload = jwt.decode(
@@ -38,14 +40,22 @@ async def get_current_user(authorization: str = Header(...)) -> str:
             audience="authenticated",
         )
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {exc}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except Exception:
         logger.exception("JWT verification failed")
-        raise HTTPException(status_code=401, detail="Could not verify token")
+        raise _CREDENTIALS_EXCEPTION
 
     email: str | None = payload.get("email")
     if not email:
-        raise HTTPException(status_code=401, detail="Token has no associated email")
+        raise _CREDENTIALS_EXCEPTION
     return email
