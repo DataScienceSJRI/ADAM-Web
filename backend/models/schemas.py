@@ -111,24 +111,7 @@ class DietRecallLogRequest(BaseModel):
     recipe_code: Optional[str] = None
     actual_quantity: Optional[str] = None
 
-    model_config = {
-        "json_schema_extra": {
-            "examples": {
-                "ate_as_planned": {
-                    "summary": "Yes – ate as planned",
-                    "value": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": True},
-                },
-                "changed": {
-                    "summary": "No – ate something different",
-                    "value": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False, "recipe_code": "A001745"},
-                },
-                "skipped": {
-                    "summary": "Skipped",
-                    "value": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False},
-                },
-            }
-        }
-    }
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": True}}}
 
 
 class DietRecallImageRequest(BaseModel):
