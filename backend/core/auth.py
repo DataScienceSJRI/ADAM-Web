@@ -18,7 +18,8 @@ _CREDENTIALS_EXCEPTION = HTTPException(
     headers={"WWW-Authenticate": "Bearer"},
 )
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
+_root_path = os.environ.get("ROOT_PATH", "")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{_root_path}/api/v1/auth/token")
 
 
 @lru_cache(maxsize=1)
