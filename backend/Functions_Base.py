@@ -1591,8 +1591,6 @@ class ADAMPersonalizationModel:
 			print(main1_to_optional)
 			scored.to_csv("scored_debug.csv", index=False)
 			prefs.to_csv("prefs_debug.csv", index=False)
-			### prefs df make the column dish_type as Optional if value is Beverage
-			prefs.loc[prefs["dish_type"] == "Beverage", "dish_type"] = "Optional"
 			prefs.loc[prefs["dish_type"] == "Side", "dish_type"] = "Main 3"
 
 			prefs.to_csv("prefs_debug_new.csv", index=False)
@@ -1692,7 +1690,7 @@ class ADAMPersonalizationModel:
 									if col in scored.columns:
 										opt_mask = opt_mask | (scored[col].astype(str).str.upper().str.startswith(opt))
 								subset_opt = scored[opt_mask.astype(bool)].copy()
-								prefs_codes_opt = prefs[(prefs["meal_time"]==meal_time) & (prefs["dish_type"]=="Optional")]["sub_category_code"].unique()
+								prefs_codes_opt = prefs[(prefs["meal_time"]==meal_time) & (prefs["dish_type"].isin(["Optional", "Beverage"]))]["sub_category_code"].unique()
 								if not subset_opt.empty and opt in prefs_codes_opt:
 									subset_opt["Preferred_SubCategory_code"] = opt
 									subset_opt["Dish_Type"] = "Optional"
@@ -1700,27 +1698,32 @@ class ADAMPersonalizationModel:
 									subset_opt["Preference_Row_ID"] = pref_row_id
 									all_rows.append(subset_opt.sort_values("Personalization_Score", ascending=False))
 				else:
-					# For non-Main, apply scoring and select top_n
+					# For non-Main dish types:
+					# - Main 3 / Optional: must come from combinations only (gated in the Main loop), drop here
+					# - Beverage: added directly, tied to the exact meal_time it was selected in
+					# - Snacks: added directly
 					non_main = matched_recipes.copy()
 					non_main["Preferred_SubCategory_code"] = subcat_code
-					# non_main["Dish_Type"] = dish_type
-					if dish_type =="Main 3":
+					if dish_type == "Main 3":
 						non_main["Dish_Type"] = "SIDE"
-					if dish_type == "Optional":
-						non_main["Dish_Type"] = "Optional"
-					if dish_type  == "Snacks":
+					elif dish_type == "Optional":
+						non_main["Dish_Type"] = "SIDE"
+					elif dish_type == "Beverage":
+						non_main["Dish_Type"] = "Beverages"
+					elif dish_type == "Snacks":
 						non_main["Dish_Type"] = "Snacks"
+					else:
+						non_main["Dish_Type"] = "SIDE"
 
 					non_main["Meal_Time"] = meal_time
 					non_main["Preference_Row_ID"] = pref_row_id
-					# Recalculate Personalization_Score if needed (already present from scored)
 					all_rows.append(non_main.sort_values("Personalization_Score", ascending=False))
 			top_choices = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
 			# Remove any accidental index columns
 			if not top_choices.empty and (top_choices.columns[0] == 'Unnamed: 0' or str(top_choices.columns[0]).startswith('Unnamed')):
 				top_choices = top_choices.loc[:, top_choices.columns != top_choices.columns[0]]
 		
-		top_choices = top_choices[top_choices["Dish_Type"]!="SIDE"]
+		top_choices = top_choices[(top_choices["Dish_Type"]!="SIDE") & (top_choices["Dish_Type"]!="Beverages")  ].copy()
 		# Save intermediate outputs as soon as they are ready
 		pd.DataFrame(prefs).to_csv("preferences_used.csv", index=False)
 		pd.DataFrame(scored).to_csv("personalization_scored_recipes.csv", index=False)

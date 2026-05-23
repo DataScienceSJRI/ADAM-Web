@@ -172,6 +172,12 @@ def generate_plan(
                 .drop_duplicates()
                 .values.tolist()
             )
+
+
+            weekly_menu["Optimal proportion"] = weekly_menu.get("Serving", 0.0)
+            weekly_menu["Energy_ENERC_Kcal"] = weekly_menu["Energy_ENERC_Kcal"] * weekly_menu["Optimal proportion"]
+
+
             days = sorted(weekly_menu["Day"].dropna().unique()) if "Day" in weekly_menu.columns else list(range(1, 8))
             extra_rows = []
             for meal_time, dish_type in all_slots:
