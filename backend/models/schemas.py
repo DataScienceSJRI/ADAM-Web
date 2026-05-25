@@ -153,7 +153,7 @@ class UserProfileResponse(BaseModel):
     age: Optional[int] = None
     gender: Optional[str] = None
     weight: Optional[float] = None
-    height: Optional[float] = None
+    height: Optional[int] = None
     hba1c: Optional[float] = None
     activity_level: Optional[str] = None
     diet_restrictions: Optional[str] = None
@@ -166,7 +166,7 @@ class UserProfileUpdateRequest(BaseModel):
     age: Optional[int] = None
     gender: Optional[str] = None
     weight: Optional[float] = None
-    height: Optional[float] = None
+    height: Optional[int] = None
     hba1c: Optional[float] = None
     activity_level: Optional[str] = None
     diet_restrictions: Optional[str] = None
