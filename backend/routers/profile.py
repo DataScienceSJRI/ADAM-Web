@@ -43,7 +43,7 @@ def update_profile(body: UserProfileUpdateRequest, user_id: str = Depends(get_cu
     basic_fields = {
         "Age": int(body.age) if body.age is not None else None,
         "Gender": body.gender,
-        "Weight": body.weight,
+        "Weight": int(body.weight) if body.weight is not None else None,
         "Height": int(body.height) if body.height is not None else None,
         "Hba1c": body.hba1c,
         "Activity_levels": body.activity_level,
