@@ -95,9 +95,6 @@ def generate_plan(
     finall_summary = None
     final_nut_summary = None
     opt_summary: dict = {}
-    test = find_closest_recipe_standalone("A000002",0.5,"Cup") 
-    print("Test closest recipe standalone at class level:", test)
-
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
