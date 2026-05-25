@@ -101,7 +101,7 @@ export default function OnboardingPage() {
     }
 
     void fetch(
-      `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/api/v1/plan`,
+      `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/plan`,
       {
         method: "POST",
         headers: {
