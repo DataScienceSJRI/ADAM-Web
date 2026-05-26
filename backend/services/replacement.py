@@ -142,13 +142,15 @@ def request_on_demand_replacement(
         timings = SLOT_TO_TIMINGS[meal_slot]
         existing = (
             sb.table("Recommendation")
-            .select("Pkey")
+            .select("Pkey, plan_id")
             .eq("user_id", user_id)
             .eq("Date", date)
             .eq("Timings", timings)
             .execute()
         )
+        existing_plan_id: str | None = None
         if existing.data:
+            existing_plan_id = existing.data[0].get("plan_id")
             pkeys = [r["Pkey"] for r in existing.data]
             sb.table("Recommendation").delete().in_("Pkey", pkeys).execute()
 
@@ -156,6 +158,7 @@ def request_on_demand_replacement(
             [
                 {
                     "user_id": user_id,
+                    "plan_id": existing_plan_id,
                     "Date": date,
                     "Timings": timings,
                     "Food_Name": item.recipe_name,

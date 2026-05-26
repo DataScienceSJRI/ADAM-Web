@@ -86,7 +86,7 @@ def log_recall(
                 row["Food_Name_desc"] = recipe_code
                 kj = r.get("Energy_ENERC_KJ")
                 if kj:
-                    row["Energy_Kcal"] = round(float(kj) / 4.184, 1)
+                    row["Energy_Kcal"] = int(round(float(kj) / 4.184))
             else:
                 row["Food_Name"] = recipe_code
             if actual_quantity:
