@@ -127,8 +127,7 @@ def run_lp(
         else:
             candidates[f"{col}_z"] = (candidates[col] - mean_val) / std_val
 
-    candidates.to_csv("candidates_pre_objective.csv", index=False)
-    
+    # candidates.to_csv("candidates_pre_objective.csv", index=False)
     candidates["Weighted_Objective_Score"] = (
         500 * candidates["GL"]
         + 0.3 * candidates["Avg_TimeAbove160_pct_z"]
@@ -709,7 +708,7 @@ def run_lp(
                     row["Serving"] = float(x[(d, int(i))].value() or 0)
                     selected_rows.append(row)
 
-    candidates.to_csv("candidates_with_metrics.csv", index=False)
+    # candidates.to_csv("candidates_with_metrics.csv", index=False)
     vars_rows = []
     for d in days:
         for i in candidates.index:

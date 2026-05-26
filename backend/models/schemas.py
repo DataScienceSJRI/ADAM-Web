@@ -288,3 +288,42 @@ class ReactionItem(BaseModel):
 class ReactionsListResponse(BaseModel):
     items: List[ReactionItem]
     total: int
+
+
+class WebReactionType(str, Enum):
+    LIKED = "liked"
+    DISLIKED = "disliked"
+
+
+class WebMealReactionRequest(BaseModel):
+    plan_id: str
+    recommendation_pkey: Optional[int] = None
+    date: Optional[str] = None
+    timings: Optional[str] = None
+    reaction: WebReactionType
+
+    model_config = {"json_schema_extra": {"example": {
+        "plan_id": "abc-123",
+        "recommendation_pkey": None,
+        "date": "2026-05-22",
+        "timings": "Breakfast",
+        "reaction": "liked",
+    }}}
+
+
+class WebReactionItem(BaseModel):
+    id: Optional[int] = None
+    plan_id: Optional[str] = None
+    recommendation_pkey: Optional[int] = None
+    date: Optional[str] = None
+    timings: Optional[str] = None
+    user_id: Optional[str] = None
+    reaction: Optional[str] = None
+    created_at: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class WebReactionsListResponse(BaseModel):
+    items: List[WebReactionItem]
+    total: int

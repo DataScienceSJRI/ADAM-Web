@@ -3,17 +3,22 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
 from core.supabase import get_supabase
-from models.schemas import MealReactionRequest, MealSlot, ReactionResponse, ReactionItem, ReactionsListResponse
+from models.schemas import (
+    MealReactionRequest, MealSlot, ReactionResponse, ReactionItem, ReactionsListResponse, SLOT_TO_TIMINGS,
+    WebMealReactionRequest, WebReactionItem, WebReactionsListResponse,
+)
 from services.reaction import save_reaction
 
 logger = logging.getLogger("backend.routers.reaction")
 
-router = APIRouter(prefix="/plan", tags=["reaction"])
+router = APIRouter(prefix="/plan")
 
 
-@router.post("/reaction", response_model=ReactionResponse)
+# ── Mobile endpoints (Recommendation table) ──────────────────────────────────
+
+@router.post("/reaction", response_model=ReactionResponse, tags=["Reactions - Mobile"])
 def log_reaction(body: MealReactionRequest, user_id: str = Depends(get_current_user)):
-    """Log a like/dislike for a meal combination (list of recipe codes)."""
+    """Log a like/dislike for a meal combination. Writes to Recommendation.Reaction / Combo_Reaction."""
     save_reaction(
         user_id=user_id,
         plan_id=body.plan_id,
@@ -25,52 +30,156 @@ def log_reaction(body: MealReactionRequest, user_id: str = Depends(get_current_u
     return ReactionResponse(status="ok")
 
 
-@router.get("/reaction", response_model=ReactionsListResponse)
+@router.get("/reaction", response_model=ReactionsListResponse, tags=["Reactions - Mobile"])
 def get_reactions(
     plan_id: str = Query(...),
     date: Optional[str] = Query(None, description="Filter by date YYYY-MM-DD"),
     meal_slot: Optional[MealSlot] = Query(None),
     user_id: str = Depends(get_current_user),
 ):
-    """Return the user's meal reactions for a plan, optionally filtered by date and slot."""
+    """Return meal reactions for a plan, grouped by date and meal slot. Reads from Recommendation table."""
     sb = get_supabase()
-    query = sb.table("MealReactions").select("*", count="exact").eq("user_id", user_id).eq("plan_id", plan_id)
+    query = (
+        sb.table("Recommendation")
+        .select("Date, Timings, Food_Name_desc, Reaction, Combo_Reaction")
+        .eq("user_id", user_id)
+        .eq("plan_id", plan_id)
+        .not_.is_("Combo_Reaction", "null")
+    )
     if date:
-        query = query.eq("date", date)
+        query = query.eq("Date", date)
     if meal_slot:
-        query = query.eq("timings", meal_slot.value)
-    resp = query.order("date", desc=True).execute()
+        query = query.eq("Timings", SLOT_TO_TIMINGS[meal_slot])
+
+    resp = query.execute()
+    rows = resp.data or []
+
+    grouped: dict = {}
+    for r in rows:
+        key = (r.get("Date"), r.get("Timings"))
+        if key not in grouped:
+            grouped[key] = {
+                "date": r.get("Date"),
+                "meal_slot": r.get("Timings"),
+                "reaction": r.get("Combo_Reaction"),
+                "recipe_codes": [],
+            }
+        if r.get("Food_Name_desc"):
+            grouped[key]["recipe_codes"].append(r["Food_Name_desc"])
+
     items = [
         ReactionItem(
-            id=r.get("id"),
-            date=r.get("date"),
-            meal_slot=r.get("timings"),
-            recipe_codes=r.get("recipe_codes"),
-            reaction=r.get("reaction"),
+            date=g["date"],
+            meal_slot=g["meal_slot"],
+            recipe_codes=g["recipe_codes"],
+            reaction=g["reaction"],
         )
-        for r in (resp.data or [])
+        for g in grouped.values()
     ]
-    return ReactionsListResponse(items=items, total=resp.count or len(items))
+    return ReactionsListResponse(items=items, total=len(items))
 
 
-@router.delete("/reaction")
+@router.delete("/reaction", tags=["Reactions - Mobile"])
 def delete_reaction(
     plan_id: str = Query(...),
     date: str = Query(..., description="YYYY-MM-DD"),
     meal_slot: MealSlot = Query(...),
     user_id: str = Depends(get_current_user),
 ):
-    """Remove a reaction for a specific plan, date and meal slot."""
+    """Clear the reaction for a specific plan, date and meal slot. Clears Recommendation.Reaction / Combo_Reaction."""
     sb = get_supabase()
+    timings = SLOT_TO_TIMINGS[meal_slot]
     resp = (
-        sb.table("MealReactions")
-        .delete()
+        sb.table("Recommendation")
+        .update({"Reaction": None, "Combo_Reaction": None})
         .eq("user_id", user_id)
         .eq("plan_id", plan_id)
-        .eq("date", date)
-        .eq("timings", meal_slot.value)
+        .eq("Date", date)
+        .eq("Timings", timings)
         .execute()
     )
     if not resp.data:
-        raise HTTPException(status_code=404, detail="Reaction not found")
+        raise HTTPException(status_code=404, detail="No reactions found for that slot")
+    return {"status": "deleted"}
+
+
+# ── Web endpoints (MealReactions table) ──────────────────────────────────────
+
+@router.get("/reaction/web", response_model=WebReactionsListResponse, tags=["Reactions - Web"])
+def get_reactions_web(
+    plan_id: str = Query(...),
+    date: Optional[str] = Query(None, description="Filter by date YYYY-MM-DD"),
+    timings: Optional[str] = Query(None, description="Filter by timing e.g. Breakfast"),
+    user_id: str = Depends(get_current_user),
+):
+    """Return reactions from MealReactions table (web dashboard)."""
+    sb = get_supabase()
+    query = (
+        sb.table("MealReactions")
+        .select("*")
+        .eq("plan_id", plan_id)
+        .eq("user_id", user_id)
+    )
+    if date:
+        query = query.eq("date", date)
+    if timings:
+        query = query.eq("timings", timings)
+    resp = query.execute()
+    items = [WebReactionItem(**r) for r in (resp.data or [])]
+    return WebReactionsListResponse(items=items, total=len(items))
+
+
+@router.post("/reaction/web", response_model=ReactionResponse, tags=["Reactions - Web"])
+def log_reaction_web(body: WebMealReactionRequest, user_id: str = Depends(get_current_user)):
+    """Save a like/dislike to MealReactions (web dashboard). Upserts — existing reaction for the same slot is replaced.
+
+    - Per-recipe reaction: set recommendation_pkey, leave date/timings null.
+    - Combo reaction: set date + timings, leave recommendation_pkey null.
+    """
+    sb = get_supabase()
+
+    del_q = sb.table("MealReactions").delete().eq("plan_id", body.plan_id).eq("user_id", user_id)
+    if body.recommendation_pkey is not None:
+        del_q = del_q.eq("recommendation_pkey", body.recommendation_pkey)
+    else:
+        del_q = del_q.is_("recommendation_pkey", "null")
+        if body.date:
+            del_q = del_q.eq("date", body.date)
+        if body.timings:
+            del_q = del_q.eq("timings", body.timings)
+    del_q.execute()
+
+    row: dict = {"plan_id": body.plan_id, "user_id": user_id, "reaction": body.reaction.value}
+    if body.recommendation_pkey is not None:
+        row["recommendation_pkey"] = body.recommendation_pkey
+    if body.date:
+        row["date"] = body.date
+    if body.timings:
+        row["timings"] = body.timings
+    sb.table("MealReactions").insert(row).execute()
+    return ReactionResponse(status="ok")
+
+
+@router.delete("/reaction/web", tags=["Reactions - Web"])
+def delete_reaction_web(
+    plan_id: str = Query(...),
+    recommendation_pkey: Optional[int] = Query(None, description="Per-recipe: the Recommendation.Pkey"),
+    date: Optional[str] = Query(None, description="Combo reactions: YYYY-MM-DD"),
+    timings: Optional[str] = Query(None, description="Combo reactions: e.g. Breakfast"),
+    user_id: str = Depends(get_current_user),
+):
+    """Delete a reaction from MealReactions (web dashboard).
+    Provide recommendation_pkey for per-recipe reactions, or date + timings for combo reactions.
+    """
+    if recommendation_pkey is None and not (date and timings):
+        raise HTTPException(status_code=400, detail="Provide recommendation_pkey OR both date and timings")
+    sb = get_supabase()
+    del_q = sb.table("MealReactions").delete().eq("plan_id", plan_id).eq("user_id", user_id)
+    if recommendation_pkey is not None:
+        del_q = del_q.eq("recommendation_pkey", recommendation_pkey)
+    else:
+        del_q = del_q.is_("recommendation_pkey", "null").eq("date", date).eq("timings", timings)
+    resp = del_q.execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="No reaction found")
     return {"status": "deleted"}
