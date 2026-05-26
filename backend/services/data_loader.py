@@ -27,7 +27,7 @@ _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
 
 def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
-    """Fetch all rows using pagination."""
+    """Fetch all rows using pagination. Returns partial results if a mid-pagination batch fails."""
     try:
         supabase = get_supabase()
         all_rows = []
@@ -41,8 +41,15 @@ def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
                 for col, val in filters.items():
                     query = query.eq(col, val)
 
-            response = query.execute()
-            data = response.data
+            try:
+                response = query.execute()
+                data = response.data
+            except Exception as batch_err:
+                if all_rows:
+                    # Return whatever was fetched before the disconnection
+                    logger.warning("Partial fetch for %s at offset %d (%s) — returning %d rows", table, start, batch_err, len(all_rows))
+                    break
+                raise
 
             if not data:
                 break
@@ -62,18 +69,23 @@ def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
 
 
 def _fetch_cached(table: str) -> pd.DataFrame:
-    """Fetch a static table, returning a cached copy if still fresh."""
+    """Fetch a static table, returning a cached copy if still fresh.
+    Empty DataFrames (failed fetches) are never cached so the next call retries.
+    """
     if table not in _STATIC_TABLES:
         return _fetch(table)
     now = time.monotonic()
     entry = _cache.get(table)
     if entry is not None:
         df, ts = entry
-        if now - ts < _CACHE_TTL:
+        if now - ts < _CACHE_TTL and not df.empty:
             return df.copy()
     df = _fetch(table)
-    _cache[table] = (df, now)
-    logger.info("Cached %s (%d rows)", table, len(df))
+    if not df.empty:
+        _cache[table] = (df, now)
+        logger.info("Cached %s (%d rows)", table, len(df))
+    else:
+        logger.warning("Empty result for %s — not caching, will retry next call", table)
     return df.copy()
 
 
@@ -81,7 +93,7 @@ def _prefetch_static() -> dict[str, pd.DataFrame]:
     """Fetch all static tables in parallel, using cache where available."""
     results: dict[str, pd.DataFrame] = {}
     to_fetch = [t for t in _STATIC_TABLES]
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_fetch_cached, t): t for t in to_fetch}
         for future in as_completed(futures):
             results[futures[future]] = future.result()
