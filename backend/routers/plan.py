@@ -92,6 +92,7 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
+            _write_plan_status(body.onboarding_id, "optimizing")
             output_paths = model.run(
                 uid=user_id,
                 top_n=20,
@@ -183,6 +184,7 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
             "Writing %d rows to Recommendation for user_id=%s | days: %s",
             len(weekly_menu), user_id, unique_days,
         )
+        _write_plan_status(body.onboarding_id, "saving")
         rows_written, plan_id = write_recommendations(
             user_id=user_id,
             weekly_menu=weekly_menu,

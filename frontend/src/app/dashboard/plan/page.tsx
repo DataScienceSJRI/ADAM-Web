@@ -6,12 +6,15 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
 const STAGES = [
-  { at: 0,   label: "Loading your preferences…" },
-  { at: 30,  label: "Scoring recipes for your profile…" },
-  { at: 60,  label: "Running optimisation…" },
-  { at: 90,  label: "Building your 7-day plan…" },
-  { at: 110, label: "Almost there…" },
+  { at: 0,   label: "Loading your preferences…",      status: "generating" },
+  { at: 30,  label: "Scoring recipes for your profile…", status: null },
+  { at: 60,  label: "Running optimisation…",           status: "optimizing" },
+  { at: 300, label: "Finalising your 7-day plan…",    status: "saving" },
+  { at: 420, label: "Almost there…",                  status: null },
 ];
+
+// Statuses that mean the task is still in progress — keep polling
+const IN_PROGRESS_STATUSES = new Set(["generating", "optimizing", "saving"]);
 
 type PlanCard = {
   plan_id: string;
@@ -24,7 +27,7 @@ type PlanCard = {
 };
 
 const POLL_INTERVAL_MS = 5000;
-const POLL_TIMEOUT_MS = 120_000;
+const POLL_TIMEOUT_MS = 660_000; // 11 minutes — LP solver can take up to ~8 min
 
 async function fetchPlanCards(email: string): Promise<PlanCard[]> {
   const supabase = createClient();
@@ -88,6 +91,7 @@ export default function PlanPage() {
   const [plans, setPlans] = useState<PlanCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [elapsed, setElapsed] = useState(0);
+  const [backendStatus, setBackendStatus] = useState<string | null>(null);
 
   const initialCountRef = useRef<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -135,7 +139,8 @@ export default function PlanPage() {
             .single();
           if (!mounted) return;
           const status: string | null = sess?.plan_status ?? null;
-          if (status) {
+          if (status && IN_PROGRESS_STATUSES.has(status)) setBackendStatus(status);
+          if (status && !IN_PROGRESS_STATUSES.has(status)) {
             stopPolling();
             if (status.startsWith("ok:")) {
               const updated = await fetchPlanCards(user.email!);
@@ -175,8 +180,10 @@ export default function PlanPage() {
   }, []);
 
   if (generating) {
-    const stage = [...STAGES].reverse().find(s => elapsed >= s.at) ?? STAGES[0];
-    const progressPct = Math.min(95, (elapsed / 300) * 100);
+    const stageByStatus = backendStatus ? STAGES.find(s => s.status === backendStatus) : null;
+    const stageByTime = [...STAGES].reverse().find(s => elapsed >= s.at) ?? STAGES[0];
+    const stage = stageByStatus ?? stageByTime;
+    const progressPct = Math.min(95, (elapsed / 480) * 100);
     const mins = Math.floor(elapsed / 60);
     const secs = elapsed % 60;
     const elapsedLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
