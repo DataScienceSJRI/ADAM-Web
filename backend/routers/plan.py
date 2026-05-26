@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from rq import Queue
+from core.redis_client import get_redis
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
 from services.data_loader import _fetch, _fetch_cached, load_data_from_supabase
@@ -219,7 +221,6 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
 
 @router.post("", response_model=GeneratePlanResponse)
 def generate_plan(
-    background_tasks: BackgroundTasks,
     body: GeneratePlanRequest = GeneratePlanRequest(),
     user_id: str = Depends(get_current_user),
 ):
@@ -232,7 +233,8 @@ def generate_plan(
         )
 
     _write_plan_status(body.onboarding_id, "generating")
-    background_tasks.add_task(_run_plan_background, user_id, body, profile)
+    q = Queue(connection=get_redis(), default_timeout=900)  # 15 min — LP solver can take ~8 min
+    q.enqueue("routers.plan._run_plan_background", user_id, body, profile)
 
     return GeneratePlanResponse(
         status="queued",
