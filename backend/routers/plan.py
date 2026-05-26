@@ -73,6 +73,23 @@ class ModelOptimiser(ADAMPersonalizationModel):
             prefs = prefs.drop(columns=["sub_category_code"])
         return prefs
 
+    def build_recipe_master(self, ds):
+        recipe_master = super().build_recipe_master(ds)
+        # Functions_Base sets GL, Avg_Delta_Glucose, Avg_TimeAbove160_pct to NaN when
+        # the source tables (SubCategory_foods_GI_GL, DataModelling) are empty.
+        # score_personalization returns a bare string for any all-NaN column, and
+        # Functions_Base then calls scored.shape → AttributeError. Fill with neutral
+        # defaults so scoring can always proceed; lp_optimizer normalises these anyway.
+        for col, default in [
+            ("GL", 10.0),
+            ("GI", 50.0),
+            ("Avg_Delta_Glucose", 0.0),
+            ("Avg_TimeAbove160_pct", 0.0),
+        ]:
+            if col not in recipe_master.columns or recipe_master[col].isna().all():
+                recipe_master[col] = default
+        return recipe_master
+
     def optimize_weekly_menu_with_constraints(self, meal_choices, ds, age_group_col, **kwargs):
         kwargs.setdefault("per_recipe_max_gl", 20)
         kwargs.setdefault("per_meal_gl_cap", 30)
