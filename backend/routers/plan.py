@@ -203,6 +203,17 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
 
+    try:
+        from services.push import send_push
+        send_push(
+            user_id=user_id,
+            title="Your meal plan is ready!",
+            body="Your personalised 7-day meal plan has been generated. Tap to view it.",
+            data={"plan_id": plan_id, "type": "plan_ready"},
+        )
+    except Exception:
+        logger.warning("Push notification failed for plan_id=%s", plan_id, exc_info=True)
+
 
 @router.post("", response_model=GeneratePlanResponse)
 def generate_plan(
