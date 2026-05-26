@@ -7,6 +7,8 @@ class GeneratePlanRequest(BaseModel):
     week_no: int = 1
     onboarding_id: Optional[str] = None
 
+    model_config = {"json_schema_extra": {"example": {"week_no": 1, "onboarding_id": "a1b2c3d4-0000-0000-0000-000000000000"}}}
+
 
 class GeneratePlanResponse(BaseModel):
     status: str
@@ -83,6 +85,8 @@ class LoginResponse(BaseModel):
 class RefreshRequest(BaseModel):
     refresh_token: str
 
+    model_config = {"json_schema_extra": {"example": {"refresh_token": "your-refresh-token-here"}}}
+
 
 class ActivityLogRequest(BaseModel):
     pa_name: str
@@ -111,7 +115,7 @@ class DietRecallLogRequest(BaseModel):
     recipe_code: Optional[str] = None
     actual_quantity: Optional[str] = None
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": True}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False, "recipe_code": "A000002", "actual_quantity": "2 cups"}}}
 
 
 class DietRecallImageRequest(BaseModel):
@@ -147,6 +151,8 @@ class RegisterTokenRequest(BaseModel):
     device_token: str
     platform: str
 
+    model_config = {"json_schema_extra": {"example": {"device_token": "onesignal-player-id-here", "platform": "android"}}}
+
 
 class UserProfileResponse(BaseModel):
     user_id: str
@@ -173,6 +179,19 @@ class UserProfileUpdateRequest(BaseModel):
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {
+        "age": 35,
+        "gender": "Female",
+        "weight": 65,
+        "height": 160,
+        "hba1c": 6.5,
+        "activity_level": "Sedentary",
+        "diet_restrictions": "Gluten Free",
+        "breakfast_time": "08:30:00",
+        "lunch_time": "13:00:00",
+        "dinner_time": "19:30:00",
+    }}}
 
 
 class DailyMealItem(BaseModel):
