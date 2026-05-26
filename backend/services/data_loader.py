@@ -62,18 +62,23 @@ def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
 
 
 def _fetch_cached(table: str) -> pd.DataFrame:
-    """Fetch a static table, returning a cached copy if still fresh."""
+    """Fetch a static table, returning a cached copy if still fresh.
+    Empty DataFrames (failed fetches) are never cached so the next call retries.
+    """
     if table not in _STATIC_TABLES:
         return _fetch(table)
     now = time.monotonic()
     entry = _cache.get(table)
     if entry is not None:
         df, ts = entry
-        if now - ts < _CACHE_TTL:
+        if now - ts < _CACHE_TTL and not df.empty:
             return df.copy()
     df = _fetch(table)
-    _cache[table] = (df, now)
-    logger.info("Cached %s (%d rows)", table, len(df))
+    if not df.empty:
+        _cache[table] = (df, now)
+        logger.info("Cached %s (%d rows)", table, len(df))
+    else:
+        logger.warning("Empty result for table %s — not caching, will retry next call", table)
     return df.copy()
 
 
@@ -128,7 +133,14 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["sub_category"] = ds["subcategories"]
 
     _subcat_onboarding = static.get("SubCategory_Onboarding", pd.DataFrame())
-    ds["recipe_tag"] = static.get("RecipeTagging", pd.DataFrame())
+    _rt = static.get("RecipeTagging", pd.DataFrame())
+    if not _rt.empty and "Recipe_Code" not in _rt.columns:
+        for _alt in ["Recipe code", "RecipeCode", "recipe_code"]:
+            if _alt in _rt.columns:
+                _rt = _rt.rename(columns={_alt: "Recipe_Code"})
+                logger.info("RecipeTagging: renamed column '%s' → 'Recipe_Code'", _alt)
+                break
+    ds["recipe_tag"] = _rt
     ds["main1_main2_mapping"] = static.get("Main1_Main2_Mapping Subcategory", pd.DataFrame())
     ds["ear_100"] = static.get("BaseEar", pd.DataFrame())
     ds["tul"] = static.get("BaseTul", pd.DataFrame())
