@@ -6,7 +6,6 @@ structure that Functions_Base.load_data() would produce from local CSVs.
 import logging
 import time
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 from core.supabase import get_supabase
 
@@ -26,46 +25,66 @@ _STATIC_TABLES = {
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
 
+_CONNECTION_ERR_TAGS = ("Server disconnected", "ConnectionTerminated", "RemoteProtocolError", "StreamReset")
+
+
+def _is_connection_err(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(tag in msg for tag in _CONNECTION_ERR_TAGS)
+
+
 def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
-    """Fetch all rows using pagination. Returns partial results if a mid-pagination batch fails."""
-    try:
-        supabase = get_supabase()
-        all_rows = []
-        batch_size = 1000
-        start = 0
+    """Fetch all rows using pagination. Retries up to 2 times on HTTP/2 connection errors,
+    resetting the Supabase client before each retry so a fresh connection is used."""
+    for attempt in range(3):
+        try:
+            supabase = get_supabase()
+            all_rows: list = []
+            batch_size = 1000
+            start = 0
 
-        while True:
-            query = supabase.table(table).select("*").range(start, start + batch_size - 1)
+            while True:
+                query = supabase.table(table).select("*").range(start, start + batch_size - 1)
+                if filters:
+                    for col, val in filters.items():
+                        query = query.eq(col, val)
 
-            if filters:
-                for col, val in filters.items():
-                    query = query.eq(col, val)
+                try:
+                    response = query.execute()
+                    data = response.data
+                except Exception as batch_err:
+                    if all_rows:
+                        logger.warning(
+                            "Partial fetch for %s at offset %d (%s) — returning %d rows",
+                            table, start, batch_err, len(all_rows),
+                        )
+                        break
+                    raise
 
-            try:
-                response = query.execute()
-                data = response.data
-            except Exception as batch_err:
-                if all_rows:
-                    # Return whatever was fetched before the disconnection
-                    logger.warning("Partial fetch for %s at offset %d (%s) — returning %d rows", table, start, batch_err, len(all_rows))
+                if not data:
                     break
-                raise
+                all_rows.extend(data)
+                if len(data) < batch_size:
+                    break
+                start += batch_size
 
-            if not data:
-                break
+            return pd.DataFrame(all_rows)
 
-            all_rows.extend(data)
+        except Exception as e:
+            if attempt < 2 and _is_connection_err(e):
+                from core.supabase import reset_supabase_client
+                reset_supabase_client()
+                wait = 1.5 * (attempt + 1)
+                logger.warning(
+                    "Connection error fetching %s (attempt %d): %s — resetting client, retrying in %.1fs",
+                    table, attempt + 1, e, wait,
+                )
+                time.sleep(wait)
+            else:
+                logger.warning("[WARN] Failed to fetch %s: %s", table, e)
+                return pd.DataFrame()
 
-            if len(data) < batch_size:
-                break
-
-            start += batch_size
-
-        return pd.DataFrame(all_rows)
-
-    except Exception as e:
-        print(f"[WARN] Failed to fetch {table}: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def _fetch_cached(table: str) -> pd.DataFrame:
@@ -90,14 +109,10 @@ def _fetch_cached(table: str) -> pd.DataFrame:
 
 
 def _prefetch_static() -> dict[str, pd.DataFrame]:
-    """Fetch all static tables in parallel, using cache where available."""
-    results: dict[str, pd.DataFrame] = {}
-    to_fetch = [t for t in _STATIC_TABLES]
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_fetch_cached, t): t for t in to_fetch}
-        for future in as_completed(futures):
-            results[futures[future]] = future.result()
-    return results
+    """Fetch all static tables sequentially, using cache where available.
+    Sequential (not parallel) to avoid cascading HTTP/2 stream failures when
+    multiple concurrent requests share the same connection and it drops."""
+    return {t: _fetch_cached(t) for t in _STATIC_TABLES}
 
 
 _RECIPE_NUMERIC_COLS = [

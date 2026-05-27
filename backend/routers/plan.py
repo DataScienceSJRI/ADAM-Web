@@ -74,6 +74,19 @@ class ModelOptimiser(ADAMPersonalizationModel):
         return prefs
 
     def build_recipe_master(self, ds):
+        recipes = ds.get("recipes", pd.DataFrame())
+        if recipes.empty:
+            raise RuntimeError(
+                "Recipe table could not be loaded from the database — "
+                "Supabase connection failed during data load. Please try again."
+            )
+
+        # If RecipeTagging is empty or has no Recipe_Code column, give it a minimal
+        # schema so Functions_Base's left-merge on Recipe_Code doesn't raise KeyError.
+        recipe_tag = ds.get("recipe_tag", pd.DataFrame())
+        if recipe_tag.empty or "Recipe_Code" not in recipe_tag.columns:
+            ds["recipe_tag"] = pd.DataFrame(columns=["Recipe_Code"])
+
         recipe_master = super().build_recipe_master(ds)
         # Functions_Base sets GL, Avg_Delta_Glucose, Avg_TimeAbove160_pct to NaN when
         # the source tables (SubCategory_foods_GI_GL, DataModelling) are empty.
