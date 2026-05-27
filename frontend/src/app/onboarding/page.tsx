@@ -100,17 +100,27 @@ export default function OnboardingPage() {
       }
     }
 
-    void fetch(
-      `${process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000"}/api/v1/plan`,
-      {
+    try {
+      const genRes = await fetch("/api/plan", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${session?.access_token ?? ""}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ onboarding_id: onboardingId }),
+      });
+      if (!genRes.ok) {
+        const payload = await genRes.json().catch(() => ({}));
+        const msg = payload?.detail ?? `Server returned ${genRes.status}`;
+        setError(`Could not start plan generation: ${msg}`);
+        setSubmitting(false);
+        return;
       }
-    ).catch(() => {/* non-fatal */});
+    } catch {
+      setError("Could not reach the plan generation server. Please check your connection and try again.");
+      setSubmitting(false);
+      return;
+    }
 
     router.push(`/dashboard/plan?generating=true&onboarding_id=${encodeURIComponent(onboardingId)}`);
   }
