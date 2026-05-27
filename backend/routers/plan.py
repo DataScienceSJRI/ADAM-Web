@@ -216,11 +216,16 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
         _write_plan_status(body.onboarding_id, f"error writing plan: {str(e)[:200]}")
         return
 
-    try:
-        write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
-        write_final_nutrient_summary(user_id=user_id, plan_id=plan_id, nutrient_summary_df=final_nut_summary)
-    except Exception as e:
-        logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
+    for _attempt in range(3):
+        try:
+            write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
+            write_final_nutrient_summary(user_id=user_id, plan_id=plan_id, nutrient_summary_df=final_nut_summary)
+            break
+        except Exception as e:
+            if _attempt < 2:
+                import time as _time; _time.sleep(2 ** _attempt)
+            else:
+                logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
 
