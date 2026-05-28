@@ -4,7 +4,6 @@ structure that Functions_Base.load_data() would produce from local CSVs.
 """
 
 import logging
-import time
 import pandas as pd
 from typing import Optional
 from core.supabase import get_supabase
@@ -14,106 +13,41 @@ logger = logging.getLogger("backend.data_loader")
 
 _FETCH_LIMIT = 5000  # Supabase PostgREST default max is 1000; raise to cover full datasets
 
-# Tables that never change during a session — cached for 1 hour per worker process
-_CACHE_TTL = 3600
-_STATIC_TABLES = {
-    "Recipe", "RecipeTagging", "SubCategory", "SubCategory_Onboarding",
-    "DataModelling", "BaseEar", "BaseTul", "Main1_Main2_Mapping Subcategory",
-    "Rec_ADAM_yes_no", "SubCategory_foods_GI_GL", "RecipeINGDBFormat",
-    "USER_Recipes_name_changed",
-}
-_cache: dict[str, tuple[pd.DataFrame, float]] = {}
-
-
-_CONNECTION_ERR_TAGS = ("Server disconnected", "ConnectionTerminated", "RemoteProtocolError", "StreamReset")
-
-
-def _is_connection_err(exc: Exception) -> bool:
-    msg = str(exc)
-    return any(tag in msg for tag in _CONNECTION_ERR_TAGS)
-
 
 def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
-    """Fetch all rows using pagination. Retries up to 2 times on HTTP/2 connection errors,
-    resetting the Supabase client before each retry so a fresh connection is used."""
-    for attempt in range(3):
-        try:
-            supabase = get_supabase()
-            all_rows: list = []
-            batch_size = 1000
-            start = 0
+    """Fetch all rows using pagination."""
+    try:
+        supabase = get_supabase()
+        all_rows = []
+        batch_size = 1000
+        start = 0
 
-            while True:
-                query = supabase.table(table).select("*").range(start, start + batch_size - 1)
-                if filters:
-                    for col, val in filters.items():
-                        query = query.eq(col, val)
+        while True:
+            query = supabase.table(table).select("*").range(start, start + batch_size - 1)
 
-                try:
-                    response = query.execute()
-                    data = response.data
-                except Exception as batch_err:
-                    if all_rows:
-                        logger.warning(
-                            "Partial fetch for %s at offset %d (%s) — returning %d rows",
-                            table, start, batch_err, len(all_rows),
-                        )
-                        break
-                    raise
+            if filters:
+                for col, val in filters.items():
+                    query = query.eq(col, val)
 
-                if not data:
-                    break
-                all_rows.extend(data)
-                if len(data) < batch_size:
-                    break
-                start += batch_size
+            response = query.execute()
+            data = response.data
 
-            return pd.DataFrame(all_rows)
+            if not data:
+                break
 
-        except Exception as e:
-            if attempt < 2 and _is_connection_err(e):
-                from core.supabase import reset_supabase_client
-                reset_supabase_client()
-                wait = 1.5 * (attempt + 1)
-                logger.warning(
-                    "Connection error fetching %s (attempt %d): %s — resetting client, retrying in %.1fs",
-                    table, attempt + 1, e, wait,
-                )
-                time.sleep(wait)
-            else:
-                logger.warning("[WARN] Failed to fetch %s: %s", table, e)
-                return pd.DataFrame()
+            all_rows.extend(data)
 
-    return pd.DataFrame()
+            if len(data) < batch_size:
+                break
 
+            start += batch_size
 
-def _fetch_cached(table: str) -> pd.DataFrame:
-    """Fetch a static table, returning a cached copy if still fresh.
-    Empty DataFrames (failed fetches) are never cached so the next call retries.
-    """
-    if table not in _STATIC_TABLES:
-        return _fetch(table)
-    now = time.monotonic()
-    entry = _cache.get(table)
-    if entry is not None:
-        df, ts = entry
-        if now - ts < _CACHE_TTL and not df.empty:
-            return df.copy()
-    df = _fetch(table)
-    if not df.empty:
-        _cache[table] = (df, now)
-        logger.info("Cached %s (%d rows)", table, len(df))
-    else:
-        logger.warning("Empty result for %s — not caching, will retry next call", table)
-    return df.copy()
+        return pd.DataFrame(all_rows)
 
-
-def _prefetch_static() -> dict[str, pd.DataFrame]:
-    """Fetch all static tables sequentially, using cache where available.
-    Sequential (not parallel) to avoid cascading HTTP/2 stream failures when
-    multiple concurrent requests share the same connection and it drops."""
-    return {t: _fetch_cached(t) for t in _STATIC_TABLES}
-
+    except Exception as e:
+        print(f"[WARN] Failed to fetch {table}: {e}")
+        return pd.DataFrame()
+    
 
 _RECIPE_NUMERIC_COLS = [
     "Energy_ENERC_Kcal", "Energy_ENERC_KJ",
@@ -131,38 +65,31 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     """
     Builds the same `ds` dict that Functions_Base.load_data() returns,
     but sourced from Supabase instead of local CSV files.
-    Static tables are fetched in parallel and cached for 1 hour.
     """
     ds = {}
 
-    # Fetch all static tables in parallel (cache hit = near-instant on second load_data() call)
-    static = _prefetch_static()
-
-    _recipes_raw = static.get("Recipe", pd.DataFrame())
+    _recipes_raw = _fetch("Recipe")
     for _col in _RECIPE_NUMERIC_COLS:
         if _col in _recipes_raw.columns:
             _recipes_raw[_col] = pd.to_numeric(_recipes_raw[_col], errors="coerce")
-    # NaN fiber → NaN GL series → stray return in Functions_Base line 476 → AttributeError on .shape
-    if "TotalDietaryFibre_FIBTG_g" in _recipes_raw.columns:
-        _recipes_raw["TotalDietaryFibre_FIBTG_g"] = _recipes_raw["TotalDietaryFibre_FIBTG_g"].fillna(0)
     ds["recipes"] = _recipes_raw
 
-    _subcat = static.get("SubCategory", pd.DataFrame())
+    _subcat = _fetch("SubCategory")
     # drop sub_category_code — Functions_Base re-derives it; having it pre-set causes duplicate columns
     if "sub_category_code" in _subcat.columns:
         _subcat = _subcat.drop(columns=["sub_category_code"])
     ds["subcategories"] = _subcat
     ds["sub_category"] = ds["subcategories"]
 
-    _subcat_onboarding = static.get("SubCategory_Onboarding", pd.DataFrame())
-    ds["recipe_tag"] = static.get("RecipeTagging", pd.DataFrame())
-    ds["main1_main2_mapping"] = static.get("Main1_Main2_Mapping Subcategory", pd.DataFrame())
-    ds["ear_100"] = static.get("BaseEar", pd.DataFrame())
-    ds["tul"] = static.get("BaseTul", pd.DataFrame())
-    ds["model"] = static.get("DataModelling", pd.DataFrame())
-    ds["recipe_ingredients"] = static.get("RecipeINGDBFormat", pd.DataFrame())
-    ds["sub_category_gi_gl"] = static.get("SubCategory_foods_GI_GL", pd.DataFrame())
-    ds["recipe_name_changed"] = static.get("USER_Recipes_name_changed", pd.DataFrame())
+    _subcat_onboarding = _fetch("SubCategory_Onboarding")
+    ds["recipe_tag"] = _fetch_recipe_tag()
+    ds["main1_main2_mapping"] = _fetch_main_code()
+    ds["ear_100"] = _fetch_ear()
+    ds["tul"] = _fetch_tul()
+    ds["model"] = _fetch("DataModelling")
+    ds["recipe_ingredients"] = _fetch("RecipeINGDBFormat")
+    ds["sub_category_gi_gl"] = _fetch_gi_gl()
+    ds["recipe_name_changed"] = _fetch("USER_Recipes_name_changed")
 
     _pref_filters: dict = {"user_id": user_id}
     if onboarding_id:
@@ -176,6 +103,12 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
         prefs = prefs.drop(columns=[c for c in ["sub_category_code", "sub_category_norm",
                                                  "SubCategory_merge", "codeoccurance",
                                                  "MainCategoryCode"] if c in prefs.columns])
+        # "Main2" (frontend) → "Main 2" (Functions_Base internal label) so side dishes share the LP slot
+        # if "dish_type" in prefs.columns:
+        #     prefs["dish_type"] = prefs["dish_type"].apply(
+        #         lambda x: "Main 2" if x == "Main2" else (x if x == "Main" else "Main")
+        #     )
+        # map SubCategory codes (e.g. "A1A") → names (e.g. "Dosa") so the model's merge resolves correctly
         if "sub_category" in prefs.columns:
             _code_to_name: dict = {}
             for _src in [_subcat, _subcat_onboarding]:
@@ -184,6 +117,8 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                         _src["Code"].astype(str).str.strip().str.upper(),
                         _src["SubCategory"].astype(str).str.strip()
                     )))
+            # Also build an uppercase-name → canonical-name map to normalise case
+            # when names (rather than codes) are already stored in sub_category.
             _name_to_canonical: dict = {}
             for _src in [_subcat, _subcat_onboarding]:
                 if not _src.empty and "SubCategory" in _src.columns:
@@ -205,15 +140,17 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["preferences"] = prefs
 
     # Fetch Rec_ADAM_yes_no and subset recipes/recipe_tag to only "ADAM_Recipes"
-    user_df = static.get("Rec_ADAM_yes_no", pd.DataFrame())
+    user_df = _fetch("Rec_ADAM_yes_no")
     ds["Rec_ADAM_yes_no"] = user_df
     if not user_df.empty and "ADAM_Recipes" in user_df.columns:
+        # it can be "0" or int(0)    
         user_df = user_df[(user_df["ADAM_Recipes"] == "1") | (user_df["ADAM_Recipes"] == 1)].copy()
         if not user_df.empty:
             code_col = next((c for c in ["Recipe_Code"] if c in user_df.columns), None)
             if code_col:
                 user_codes = set(user_df[code_col].astype(str).str.strip().str.upper())
                 if user_codes:
+                    # subset recipes
                     if "Recipe_Code" in ds.get("recipes", pd.DataFrame()).columns:
                         ds["recipes"] = ds["recipes"][
                             ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(user_codes)
@@ -225,6 +162,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                                     ds["recipes"][rc].astype(str).str.strip().str.upper().isin(user_codes)
                                 ].copy()
                                 break
+                    # subset recipe_tag
                     if "Recipe_Code" in ds.get("recipe_tag", pd.DataFrame()).columns:
                         ds["recipe_tag"] = ds["recipe_tag"][
                             ds["recipe_tag"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(user_codes)
@@ -234,14 +172,15 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                             ds["recipe_tag"]["Recipe code"].astype(str).str.strip().str.upper().isin(user_codes)
                         ].copy()
 
-    print("Diet type", str(profile.get("diet_type", "")).strip().lower())
-    print("No of recipes - BEFORE", len(ds["recipes"]))
+    print("Diet type",str(profile.get("diet_type", "")).strip().lower())
+    print("No of recipes - BEFORE",len(ds["recipes"]))
 
     try:
         if profile:
             diet = str(profile.get("diet_type", "")).strip().lower()
             rt = ds.get("recipe_tag", pd.DataFrame()).copy()
             if not rt.empty and "Recipe_Code" in rt.columns:
+                # One-to-one mapping
                 diet_column_map = {
                     "veg": "Vegetarian",
                     "vegan": "Vegetarian",
@@ -249,6 +188,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                     "egg": "Ovo-vegetarian",
                     "ovo-veg": "Ovo-vegetarian",
                 }
+
                 col = diet_column_map.get(diet)
                 if col and col in rt.columns:
                     if col == "Ovo-vegetarian":
@@ -267,15 +207,20 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                             if "Recipe_Code" in ds["recipes"].columns:
                                 valid_codes = (
                                     rt_sub["Recipe_Code"]
-                                    .astype(str).str.strip().str.upper()
-                                    .dropna().unique()
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    .dropna()
+                                    .unique()
                                 )
                                 ds["recipes"] = ds["recipes"][
                                     ds["recipes"]["Recipe_Code"]
-                                    .astype(str).str.strip().str.upper()
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
                                     .isin(valid_codes)
                                 ].copy()
-        print("No of recipes - AFTER", len(ds["recipes"]))
+        print("No of recipes - AFTER",len(ds["recipes"]))
     except Exception:
         logger.exception("Vegetarian recipe filtering failed for user_id=%s — serving unfiltered recipes", user_id)
 
@@ -303,20 +248,20 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
 
 
 def _fetch_recipe_tag() -> pd.DataFrame:
-    return _fetch_cached("RecipeTagging")
+    return _fetch("RecipeTagging")
 
 
 def _fetch_main_code() -> pd.DataFrame:
-    return _fetch_cached("Main1_Main2_Mapping Subcategory")
+    return _fetch("Main1_Main2_Mapping Subcategory")
 
 
 def _fetch_ear() -> pd.DataFrame:
-    return _fetch_cached("BaseEar")
+    return _fetch("BaseEar")
 
 
 def _fetch_tul() -> pd.DataFrame:
-    return _fetch_cached("BaseTul")
+    return _fetch("BaseTul")
 
 
 def _fetch_gi_gl() -> pd.DataFrame:
-    return _fetch_cached("SubCategory_foods_GI_GL")
+    return _fetch("SubCategory_foods_GI_GL")

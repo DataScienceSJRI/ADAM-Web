@@ -8,11 +8,9 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
-from rq import Queue
-from core.redis_client import get_redis
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
-from services.data_loader import _fetch, _fetch_cached, load_data_from_supabase
+from services.data_loader import _fetch, load_data_from_supabase
 from services.profile_builder import build_profile
 from services.recommendation_writer import (
     write_recommendations,
@@ -73,36 +71,6 @@ class ModelOptimiser(ADAMPersonalizationModel):
             prefs = prefs.drop(columns=["sub_category_code"])
         return prefs
 
-    def build_recipe_master(self, ds):
-        recipes = ds.get("recipes", pd.DataFrame())
-        if recipes.empty:
-            raise RuntimeError(
-                "Recipe table could not be loaded from the database — "
-                "Supabase connection failed during data load. Please try again."
-            )
-
-        # If RecipeTagging is empty or has no Recipe_Code column, give it a minimal
-        # schema so Functions_Base's left-merge on Recipe_Code doesn't raise KeyError.
-        recipe_tag = ds.get("recipe_tag", pd.DataFrame())
-        if recipe_tag.empty or "Recipe_Code" not in recipe_tag.columns:
-            ds["recipe_tag"] = pd.DataFrame(columns=["Recipe_Code"])
-
-        recipe_master = super().build_recipe_master(ds)
-        # Functions_Base sets GL, Avg_Delta_Glucose, Avg_TimeAbove160_pct to NaN when
-        # the source tables (SubCategory_foods_GI_GL, DataModelling) are empty.
-        # score_personalization returns a bare string for any all-NaN column, and
-        # Functions_Base then calls scored.shape → AttributeError. Fill with neutral
-        # defaults so scoring can always proceed; lp_optimizer normalises these anyway.
-        for col, default in [
-            ("GL", 10.0),
-            ("GI", 50.0),
-            ("Avg_Delta_Glucose", 0.0),
-            ("Avg_TimeAbove160_pct", 0.0),
-        ]:
-            if col not in recipe_master.columns or recipe_master[col].isna().all():
-                recipe_master[col] = default
-        return recipe_master
-
     def optimize_weekly_menu_with_constraints(self, meal_choices, ds, age_group_col, **kwargs):
         kwargs.setdefault("per_recipe_max_gl", 20)
         kwargs.setdefault("per_meal_gl_cap", 30)
@@ -110,21 +78,29 @@ class ModelOptimiser(ADAMPersonalizationModel):
         return run_lp(self, meal_choices, ds, age_group_col, **kwargs)
 
 
-def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict) -> None:
-    """Runs the model and writes results. Invoked as a BackgroundTask."""
-    _write_plan_status(body.onboarding_id, "generating")
+@router.post("", response_model=GeneratePlanResponse)
+def generate_plan(
+    body: GeneratePlanRequest = GeneratePlanRequest(),
+    user_id: str = Depends(get_current_user),
+):
+    """Generate a 7-day personalised meal plan for the authenticated user."""
+    profile = build_profile(user_id, onboarding_id=body.onboarding_id)
+
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No basic details found for user {user_id}. Complete onboarding first.",
+        )
 
     finall_summary = None
     final_nut_summary = None
     opt_summary: dict = {}
-    weekly_menu = None
-    top_choices = None
-    weekly_min = None
+    test = find_closest_recipe_standalone("A000002",0.5,"Cup") 
+    print("Test closest recipe standalone at class level:", test)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
-            _write_plan_status(body.onboarding_id, "optimizing")
             output_paths = model.run(
                 uid=user_id,
                 top_n=20,
@@ -134,39 +110,58 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
                 profile=profile,
             )
 
+            # weekly_menu and top_personalized_choices are DataFrames in the returned dict.
+            # weekly_optimization_summary is a JSON file path — read it while tmpdir exists.
             weekly_menu = output_paths.get("weekly_menu")
-            recipe_name_changed = _fetch_cached("USER_Recipes_name_changed")
-            name_map = dict(zip(recipe_name_changed["Recipe_Code"], recipe_name_changed["Recipe_Name"]))
+            recipe_name_changed = _fetch("USER_Recipes_name_changed")
+
+            # Create mapping (Recipe_Code → New Recipe_Name)
+            name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
+            # Update ONLY matched rows
             weekly_menu.loc[
-                weekly_menu["Recipe_Code"].isin(name_map.keys()), "Recipe_Name"
-            ] = weekly_menu["Recipe_Code"].map(name_map)
+                weekly_menu['Recipe_Code'].isin(name_map.keys()),
+                'Recipe_Name'
+            ] = weekly_menu['Recipe_Code'].map(name_map)
 
             top_choices = output_paths.get("top_personalized_choices")
             weekly_min = output_paths.get("weekly_min")
             summary = output_paths.get("weekly_optimization_summary")
-
             if summary.get("status") == "Optimal":
                 if len(weekly_menu) > 0:
                     finall_summary = Recomendation_formatting(weekly_menu)
                     final_nut_summary = build_weekly_nutrient_summary(weekly_menu, weekly_min)
+
+
                 os_path = output_paths.get("weekly_optimization_summary")
+                opt_summary: dict = {}
                 if isinstance(os_path, str) and Path(os_path).exists():
                     with open(os_path) as f:
                         opt_summary = json.load(f)
                 elif isinstance(os_path, dict):
-                    opt_summary = os_path
+                    opt_summary = os_path   
             else:
                 _write_plan_status(body.onboarding_id, "No solution please try again")
-                return
-
+                return GeneratePlanResponse(
+                    status="No solution found please try again with different preferences or check dataset coverage.",
+                    rows_written=0,
+                    plan_id=None,
+                    optimization_status="No solution please try again",
+                    message="Model ran but produced no menu. Check preferences and dataset coverage.",
+                )
+            
     except Exception as e:
         traceback.print_exc()
-        _write_plan_status(body.onboarding_id, f"error: {str(e)[:200]}")
-        return
+        raise HTTPException(status_code=500, detail=f"Model error: {str(e)}")
 
     if weekly_menu is None or weekly_menu.empty:
-        _write_plan_status(body.onboarding_id, "Model ran but produced no menu")
-        return
+        _write_plan_status(body.onboarding_id, "Model ran but produced no menu. Check preferences and dataset coverage.")
+        return GeneratePlanResponse(
+            status="no_output",
+            rows_written=0,
+            plan_id=None,
+            optimization_status=opt_summary.get("status"),
+            message="Model ran but produced no menu. Check preferences and dataset coverage.",
+        )
 
     try:
         if top_choices is not None and not top_choices.empty and "Meal_Time" in top_choices.columns:
@@ -177,8 +172,12 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
                 .drop_duplicates()
                 .values.tolist()
             )
+
+
             weekly_menu["Optimal proportion"] = weekly_menu.get("Serving", 0.0)
             weekly_menu["Energy_ENERC_Kcal"] = weekly_menu["Energy_ENERC_Kcal"] * weekly_menu["Optimal proportion"]
+
+
             days = sorted(weekly_menu["Day"].dropna().unique()) if "Day" in weekly_menu.columns else list(range(1, 8))
             extra_rows = []
             for meal_time, dish_type in all_slots:
@@ -199,85 +198,39 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
                 weekly_menu = pd.concat(
                     [weekly_menu, pd.DataFrame(extra_rows)], ignore_index=True
                 ).sort_values(["Day", "Meal_Time", "Dish_Type"]).reset_index(drop=True)
-                logger.info(
-                    "Supplemented weekly_menu with %d rows for missing meal times: %s",
-                    len(extra_rows),
-                    [m for m, _ in all_slots if str(m).strip() not in present_times],
-                )
+                logger.info("Supplemented weekly_menu with %d rows for missing meal times: %s",
+                            len(extra_rows), [m for m, _ in all_slots if str(m).strip() not in present_times])
     except Exception as _supp_err:
         logger.warning("Could not supplement missing meal times: %s", _supp_err)
 
     try:
-        unique_days = (
-            sorted(weekly_menu["Day"].dropna().unique().tolist())
-            if "Day" in weekly_menu.columns else []
-        )
-        logger.info(
-            "Writing %d rows to Recommendation for user_id=%s | days: %s",
-            len(weekly_menu), user_id, unique_days,
-        )
-        _write_plan_status(body.onboarding_id, "saving")
+        unique_days = sorted(weekly_menu["Day"].dropna().unique().tolist()) if weekly_menu is not None and "Day" in weekly_menu.columns else []
+        logger.info("Writing %d rows to recommendations for user_id=%s | unique days: %s", len(weekly_menu) if weekly_menu is not None else 0, user_id, unique_days)
         rows_written, plan_id = write_recommendations(
             user_id=user_id,
             weekly_menu=weekly_menu,
             week_no=body.week_no,
             onboarding_id=body.onboarding_id,
         )
-        logger.info("Write completed: rows_written=%d plan_id=%s", rows_written, plan_id)
+        logger.info("Write completed: rows_written=%d, plan_id=%s, user_id=%s", rows_written, plan_id, user_id)
     except Exception as e:
         logger.exception("Failed to write recommendations for user_id=%s: %s", user_id, e)
-        _write_plan_status(body.onboarding_id, f"error writing plan: {str(e)[:200]}")
-        return
-
-    for _attempt in range(3):
-        try:
-            write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
-            write_final_nutrient_summary(user_id=user_id, plan_id=plan_id, nutrient_summary_df=final_nut_summary)
-            break
-        except Exception as e:
-            if _attempt < 2:
-                import time as _time; _time.sleep(2 ** _attempt)
-            else:
-                logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
-
-    _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
+        raise HTTPException(status_code=500, detail=f"Failed to write recommendations: {str(e)}")
 
     try:
-        from services.push import send_push
-        send_push(
-            user_id=user_id,
-            title="Your meal plan is ready!",
-            body="Your personalised 7-day meal plan has been generated. Tap to view it.",
-            data={"plan_id": plan_id, "type": "plan_ready"},
-        )
-    except Exception:
-        logger.warning("Push notification failed for plan_id=%s", plan_id, exc_info=True)
+        write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
+        write_final_nutrient_summary(user_id=user_id, plan_id=plan_id, nutrient_summary_df=final_nut_summary)
+    except Exception as e:
+        logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
-
-@router.post("", response_model=GeneratePlanResponse)
-def generate_plan(
-    body: GeneratePlanRequest = GeneratePlanRequest(),
-    user_id: str = Depends(get_current_user),
-):
-    """Queue a 7-day personalised meal plan generation. Poll /plan/status for completion."""
-    profile = build_profile(user_id, onboarding_id=body.onboarding_id)
-    if profile is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No basic details found for user {user_id}. Complete onboarding first.",
-        )
-
-    _write_plan_status(body.onboarding_id, "generating")
-    q = Queue(connection=get_redis(), default_timeout=900)  # 15 min — LP solver can take ~8 min
-    q.enqueue("routers.plan._run_plan_background", user_id, body, profile)
-
+    _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
     return GeneratePlanResponse(
-        status="queued",
-        rows_written=0,
-        plan_id=None,
+        status="ok",
+        rows_written=rows_written,
+        plan_id=plan_id,
         onboarding_id=body.onboarding_id,
-        optimization_status=None,
-        message="Plan generation started. Poll /plan/status to check progress.",
+        optimization_status=opt_summary.get("status"),
+        message=None,
     )
 
 
@@ -296,7 +249,7 @@ async def delete_plan(user_id: str = Depends(get_current_user)):
 
 def Recomendation_formatting(weekly_menu_df):
     if not weekly_menu_df.empty:
-        tag_df = _fetch_cached("RecipeTagging")
+        tag_df = _fetch("RecipeTagging")
         tag_df = tag_df.rename(
 			columns={
 				"Recipe code": "Recipe_Code",
@@ -353,7 +306,7 @@ def Recomendation_formatting(weekly_menu_df):
 
         # Merge SubCategory GI averages from Excel (Code, GI_Avg) if available
         try:
-            sub_gi = _fetch_cached("SubCategory_foods_GI_GL")
+            sub_gi = _fetch("SubCategory_foods_GI_GL")
             if len(sub_gi)>0:
                 if "Code" in sub_gi.columns and "GI_Avg" in sub_gi.columns:
                     sg = sub_gi[["Code", "GI_Avg"]].copy()
@@ -367,7 +320,7 @@ def Recomendation_formatting(weekly_menu_df):
                     final_df = final_df.drop(columns=[c for c in ["Subcategories_norm"] if c in final_df.columns])
                     # Attach human-readable subcategory name from SubCategory.csv (if available)
                     try:
-                        sub_ref = _fetch_cached("SubCategory")
+                        sub_ref = _fetch("SubCategory")
                         if len(sub_ref) > 0:
                             if "Code" in sub_ref.columns and "SubCategory" in sub_ref.columns:
                                 # Normalize codes for matching
@@ -384,7 +337,7 @@ def Recomendation_formatting(weekly_menu_df):
 
             # Enrich final_df with nutrition from Recipes and compute GL at optimal serving
             try:
-                rec_df = _fetch_cached("Recipe")
+                rec_df = _fetch("Recipe")
                 if len(rec_df)>0:
                     # find recipe code column in recipes
                     code_col = None

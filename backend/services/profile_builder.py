@@ -15,9 +15,9 @@ _ACTIVITY_MAP = {
 
 
 def _get_age_group_col(gender: str, activity: str) -> str:
-    gender_prefix = "Women" if (gender or "").strip().lower().startswith("f") else "Men"
-    activity_key = (activity or "").strip().lower()
-    level = _ACTIVITY_MAP.get(activity_key, "moderate")
+    gender_prefix = "Women" if gender.strip().lower().startswith("f") else "Men"
+    activity_key = activity.strip().lower()
+    level = _ACTIVITY_MAP.get(activity_key)
     return f"{gender_prefix}_{level}"
 
 
