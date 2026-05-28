@@ -1,6 +1,7 @@
 import traceback
 import sys
 import os
+import time
 import tempfile
 import json
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
+from rq import Queue
+from core.redis_client import get_redis
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
 from services.data_loader import _fetch, load_data_from_supabase
@@ -78,29 +81,25 @@ class ModelOptimiser(ADAMPersonalizationModel):
         return run_lp(self, meal_choices, ds, age_group_col, **kwargs)
 
 
-@router.post("", response_model=GeneratePlanResponse)
-def generate_plan(
-    body: GeneratePlanRequest = GeneratePlanRequest(),
-    user_id: str = Depends(get_current_user),
-):
-    """Generate a 7-day personalised meal plan for the authenticated user."""
-    profile = build_profile(user_id, onboarding_id=body.onboarding_id)
-
-    if profile is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No basic details found for user {user_id}. Complete onboarding first.",
-        )
+def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict) -> None:
+    """Runs the model in the RQ worker and writes results."""
+    t0 = time.time()
+    _write_plan_status(body.onboarding_id, "generating")
 
     finall_summary = None
     final_nut_summary = None
     opt_summary: dict = {}
-    test = find_closest_recipe_standalone("A000002",0.5,"Cup") 
+    weekly_menu = None
+    top_choices = None
+    weekly_min = None
+
+    test = find_closest_recipe_standalone("A000002", 0.5, "Cup")
     print("Test closest recipe standalone at class level:", test)
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
+            _write_plan_status(body.onboarding_id, "optimizing")
             output_paths = model.run(
                 uid=user_id,
                 top_n=20,
@@ -109,15 +108,12 @@ def generate_plan(
                 user_preference="yes",
                 profile=profile,
             )
+            logger.info("model.run completed for user_id=%s [%.1fs]", user_id, time.time() - t0)
 
-            # weekly_menu and top_personalized_choices are DataFrames in the returned dict.
-            # weekly_optimization_summary is a JSON file path — read it while tmpdir exists.
             weekly_menu = output_paths.get("weekly_menu")
             recipe_name_changed = _fetch("USER_Recipes_name_changed")
 
-            # Create mapping (Recipe_Code → New Recipe_Name)
             name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
-            # Update ONLY matched rows
             weekly_menu.loc[
                 weekly_menu['Recipe_Code'].isin(name_map.keys()),
                 'Recipe_Name'
@@ -131,37 +127,25 @@ def generate_plan(
                     finall_summary = Recomendation_formatting(weekly_menu)
                     final_nut_summary = build_weekly_nutrient_summary(weekly_menu, weekly_min)
 
-
                 os_path = output_paths.get("weekly_optimization_summary")
                 opt_summary: dict = {}
                 if isinstance(os_path, str) and Path(os_path).exists():
                     with open(os_path) as f:
                         opt_summary = json.load(f)
                 elif isinstance(os_path, dict):
-                    opt_summary = os_path   
+                    opt_summary = os_path
             else:
                 _write_plan_status(body.onboarding_id, "No solution please try again")
-                return GeneratePlanResponse(
-                    status="No solution found please try again with different preferences or check dataset coverage.",
-                    rows_written=0,
-                    plan_id=None,
-                    optimization_status="No solution please try again",
-                    message="Model ran but produced no menu. Check preferences and dataset coverage.",
-                )
-            
+                return
+
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Model error: {str(e)}")
+        _write_plan_status(body.onboarding_id, f"error: {str(e)[:200]}")
+        return
 
     if weekly_menu is None or weekly_menu.empty:
         _write_plan_status(body.onboarding_id, "Model ran but produced no menu. Check preferences and dataset coverage.")
-        return GeneratePlanResponse(
-            status="no_output",
-            rows_written=0,
-            plan_id=None,
-            optimization_status=opt_summary.get("status"),
-            message="Model ran but produced no menu. Check preferences and dataset coverage.",
-        )
+        return
 
     try:
         if top_choices is not None and not top_choices.empty and "Meal_Time" in top_choices.columns:
@@ -173,10 +157,8 @@ def generate_plan(
                 .values.tolist()
             )
 
-
             weekly_menu["Optimal proportion"] = weekly_menu.get("Serving", 0.0)
             weekly_menu["Energy_ENERC_Kcal"] = weekly_menu["Energy_ENERC_Kcal"] * weekly_menu["Optimal proportion"]
-
 
             days = sorted(weekly_menu["Day"].dropna().unique()) if "Day" in weekly_menu.columns else list(range(1, 8))
             extra_rows = []
@@ -204,8 +186,9 @@ def generate_plan(
         logger.warning("Could not supplement missing meal times: %s", _supp_err)
 
     try:
-        unique_days = sorted(weekly_menu["Day"].dropna().unique().tolist()) if weekly_menu is not None and "Day" in weekly_menu.columns else []
-        logger.info("Writing %d rows to recommendations for user_id=%s | unique days: %s", len(weekly_menu) if weekly_menu is not None else 0, user_id, unique_days)
+        unique_days = sorted(weekly_menu["Day"].dropna().unique().tolist()) if "Day" in weekly_menu.columns else []
+        logger.info("Writing %d rows to recommendations for user_id=%s | unique days: %s", len(weekly_menu), user_id, unique_days)
+        _write_plan_status(body.onboarding_id, "saving")
         rows_written, plan_id = write_recommendations(
             user_id=user_id,
             weekly_menu=weekly_menu,
@@ -215,7 +198,8 @@ def generate_plan(
         logger.info("Write completed: rows_written=%d, plan_id=%s, user_id=%s", rows_written, plan_id, user_id)
     except Exception as e:
         logger.exception("Failed to write recommendations for user_id=%s: %s", user_id, e)
-        raise HTTPException(status_code=500, detail=f"Failed to write recommendations: {str(e)}")
+        _write_plan_status(body.onboarding_id, f"error writing plan: {str(e)[:200]}")
+        return
 
     try:
         write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
@@ -224,13 +208,33 @@ def generate_plan(
         logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
+    logger.info("Plan generation complete for user_id=%s [total %.1fs]", user_id, time.time() - t0)
+
+
+@router.post("", response_model=GeneratePlanResponse)
+def generate_plan(
+    body: GeneratePlanRequest = GeneratePlanRequest(),
+    user_id: str = Depends(get_current_user),
+):
+    """Queue a 7-day personalised meal plan generation. Poll /plan/status for completion."""
+    profile = build_profile(user_id, onboarding_id=body.onboarding_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No basic details found for user {user_id}. Complete onboarding first.",
+        )
+
+    _write_plan_status(body.onboarding_id, "generating")
+    q = Queue(connection=get_redis(), default_timeout=900)
+    q.enqueue("routers.plan._run_plan_background", user_id, body, profile)
+
     return GeneratePlanResponse(
-        status="ok",
-        rows_written=rows_written,
-        plan_id=plan_id,
+        status="queued",
+        rows_written=0,
+        plan_id=None,
         onboarding_id=body.onboarding_id,
-        optimization_status=opt_summary.get("status"),
-        message=None,
+        optimization_status=None,
+        message="Plan generation started. Poll /plan/status to check progress.",
     )
 
 

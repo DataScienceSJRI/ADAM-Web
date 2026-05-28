@@ -11,10 +11,14 @@ recipe/category repetition limits, nutrient soft goals, sodium/cholesterol caps.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("backend.services.lp_optimizer")
 
 
 def run_lp(
@@ -692,8 +696,10 @@ def run_lp(
 
     # solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec))
     solver = PULP_CBC_CMD(timeLimit=int(500), gapRel=0.3, threads=6)
+    t_lp = time.time()
     _ = model.solve(solver)
     status = str(LpStatus.get(model.status, model.status))
+    logger.info("LP solver finished: status=%s [%.1fs]", status, time.time() - t_lp)
     print(f"Solver Status: {status}")
     print(f"Solver Status: {status}")
     print(f"Solver Status: {status}")

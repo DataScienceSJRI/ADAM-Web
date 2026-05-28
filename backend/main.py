@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from dotenv import load_dotenv
 load_dotenv(override=True)
@@ -9,10 +10,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications
 
-# Configure simple logging for the backend
 logging.basicConfig(
     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("backend.log"),
+    ],
 )
 logger = logging.getLogger("backend")
 
@@ -104,7 +108,15 @@ class PrivateNetworkAccessMiddleware(BaseHTTPMiddleware):
             response.headers["Access-Control-Allow-Private-Network"] = "true"
         return response
 
+class RequestTimingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        t0 = time.time()
+        response = await call_next(request)
+        logger.info("%s %s %s [%.2fs]", request.method, request.url.path, response.status_code, time.time() - t0)
+        return response
+
 app.add_middleware(PrivateNetworkAccessMiddleware)
+app.add_middleware(RequestTimingMiddleware)
 
 V1 = "/api/v1"
 
