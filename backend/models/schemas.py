@@ -295,6 +295,15 @@ class WebReactionType(str, Enum):
     DISLIKED = "disliked"
 
 
+class RecipeReactionRequest(BaseModel):
+    plan_id: str
+    recipe_code: str
+    reaction: ReactionType
+    date: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "recipe_code": "A001745", "reaction": "like", "date": "2026-05-29"}}}
+
+
 class WebMealReactionRequest(BaseModel):
     plan_id: str
     recommendation_pkey: Optional[int] = None
