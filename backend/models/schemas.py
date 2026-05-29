@@ -166,6 +166,7 @@ class UserProfileResponse(BaseModel):
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+    profile_url: Optional[str] = None
 
 
 class UserProfileUpdateRequest(BaseModel):
@@ -179,6 +180,7 @@ class UserProfileUpdateRequest(BaseModel):
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+    profile_url: Optional[str] = None
 
     model_config = {"json_schema_extra": {"example": {
         "age": 35,
