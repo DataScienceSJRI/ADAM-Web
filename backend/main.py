@@ -10,13 +10,15 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications
 
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+_log_file = os.getenv("BACKEND_LOG_FILE")
+if _log_file:
+    _log_handlers.append(logging.FileHandler(_log_file))
+
 logging.basicConfig(
     format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("backend.log"),
-    ],
+    handlers=_log_handlers,
 )
 logger = logging.getLogger("backend")
 
