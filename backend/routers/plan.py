@@ -93,9 +93,6 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
     top_choices = None
     weekly_min = None
 
-    test = find_closest_recipe_standalone("A000002", 0.5, "Cup")
-    print("Test closest recipe standalone at class level:", test)
-
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
