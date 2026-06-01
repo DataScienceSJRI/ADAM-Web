@@ -1,59 +1,31 @@
 services:
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
 
   backend:
     build:
       context: ./backend
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
+    env_file:
+      - .env
     environment:
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
-      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
-      ALLOWED_ORIGINS: http://localhost:3000
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/1
       PLAN_QUEUE_NAME: meal-plans
       PYTHONUNBUFFERED: "1"
     depends_on:
       - redis
+    expose:
+      - "8000"
 
   plan-worker:
     build:
       context: ./backend
     command: python -m services.plan_worker
-    volumes:
-      - ./backend:/app
+    env_file:
+      - .env
     environment:
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
-      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/1
       PLAN_QUEUE_NAME: meal-plans
       PLAN_JOB_TIMEOUT_SECONDS: "1200"
       PYTHONUNBUFFERED: "1"
     depends_on:
       - redis
-
-  frontend:
-    build:
-      context: ./frontend
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
-    environment:
-      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
-      BACKEND_URL: http://backend:8000
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    depends_on:
-      - backend
