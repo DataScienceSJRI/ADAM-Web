@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   backend:
     build:
       context: ./backend
@@ -11,7 +16,28 @@ services:
       SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
       SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       ALLOWED_ORIGINS: http://localhost:3000
+      REDIS_URL: redis://redis:6379/0
+      PLAN_QUEUE_NAME: meal-plans
       PYTHONUNBUFFERED: "1"
+    depends_on:
+      - redis
+
+  plan-worker:
+    build:
+      context: ./backend
+    command: python -m services.plan_worker
+    volumes:
+      - ./backend:/app
+    environment:
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      REDIS_URL: redis://redis:6379/0
+      PLAN_QUEUE_NAME: meal-plans
+      PLAN_JOB_TIMEOUT_SECONDS: "1200"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      - redis
 
   frontend:
     build:

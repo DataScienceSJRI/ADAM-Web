@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from rq import Queue
-from core.redis_client import get_redis
+from core.redis_client import PLAN_JOB_TIMEOUT_SECONDS, PLAN_QUEUE_NAME, get_redis
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
 from services.data_loader import _fetch, load_data_from_supabase
@@ -225,8 +225,34 @@ def generate_plan(
         )
 
     _write_plan_status(body.onboarding_id, "generating")
-    q = Queue(connection=get_redis(), default_timeout=900)
-    q.enqueue("routers.plan._run_plan_background", user_id, body, profile)
+    try:
+        queue = Queue(
+            PLAN_QUEUE_NAME,
+            connection=get_redis(),
+            default_timeout=PLAN_JOB_TIMEOUT_SECONDS,
+        )
+        job = queue.enqueue(
+            "services.plan_worker.run_plan_job",
+            user_id,
+            body.model_dump(),
+            profile,
+            job_timeout=PLAN_JOB_TIMEOUT_SECONDS,
+            result_ttl=86400,
+            failure_ttl=604800,
+        )
+        logger.info(
+            "Queued plan job id=%s user_id=%s onboarding_id=%s",
+            job.id,
+            user_id,
+            body.onboarding_id,
+        )
+    except Exception as exc:
+        logger.exception("Could not queue plan generation for user_id=%s", user_id)
+        _write_plan_status(body.onboarding_id, f"error queueing plan: {str(exc)[:200]}")
+        raise HTTPException(
+            status_code=503,
+            detail="Plan queue is unavailable. Please try again shortly.",
+        )
 
     return GeneratePlanResponse(
         status="queued",
