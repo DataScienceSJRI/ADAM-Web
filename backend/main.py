@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications
+from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications, kpi
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler()]
 _log_file = os.getenv("BACKEND_LOG_FILE")
@@ -131,6 +131,7 @@ app.include_router(recall.router,        prefix=V1)
 app.include_router(activity.router,      prefix=V1)
 app.include_router(recipes.router,       prefix=V1)
 app.include_router(notifications.router, prefix=V1)
+app.include_router(kpi.router,           prefix=V1)
 
 
 @app.get("/health")

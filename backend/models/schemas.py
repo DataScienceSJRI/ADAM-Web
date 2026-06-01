@@ -166,6 +166,7 @@ class UserProfileResponse(BaseModel):
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+    profile_url: Optional[str] = None
 
 
 class UserProfileUpdateRequest(BaseModel):
@@ -179,6 +180,7 @@ class UserProfileUpdateRequest(BaseModel):
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+    profile_url: Optional[str] = None
 
     model_config = {"json_schema_extra": {"example": {
         "age": 35,
@@ -293,6 +295,15 @@ class ReactionsListResponse(BaseModel):
 class WebReactionType(str, Enum):
     LIKED = "liked"
     DISLIKED = "disliked"
+
+
+class RecipeReactionRequest(BaseModel):
+    plan_id: str
+    recipe_code: str
+    reaction: ReactionType
+    date: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "recipe_code": "A001745", "reaction": "like", "date": "2026-05-29"}}}
 
 
 class WebMealReactionRequest(BaseModel):

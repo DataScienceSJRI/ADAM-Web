@@ -32,6 +32,7 @@ def get_profile(user_id: str = Depends(get_current_user)):
         breakfast_time=d.get("breakfast_time"),
         lunch_time=d.get("lunch_time"),
         dinner_time=d.get("dinner_time"),
+        profile_url=b.get("profile_url"),
     )
 
 
@@ -47,6 +48,7 @@ def update_profile(body: UserProfileUpdateRequest, user_id: str = Depends(get_cu
         "Height": int(body.height) if body.height is not None else None,
         "Hba1c": body.hba1c,
         "Activity_levels": body.activity_level,
+        "profile_url": body.profile_url,
     }
     basic_update = {k: v for k, v in basic_fields.items() if v is not None}
 
