@@ -39,10 +39,15 @@ export default function OnboardingPage() {
 
     const onboardingId = crypto.randomUUID();
 
-    // Creating session record for traceability
-    await supabase
+    // Creating session record for traceability and loader polling.
+    const { error: sessionError } = await supabase
       .from("BE_Onboarding_Sessions")
-      .insert({ onboarding_id: onboardingId, user_id: user.email });
+      .insert({ onboarding_id: onboardingId, user_id: user.email, plan_status: "generating" });
+    if (sessionError) {
+      setError(sessionError.message);
+      setSubmitting(false);
+      return;
+    }
 
     const {
       dietary_type,
@@ -100,29 +105,34 @@ export default function OnboardingPage() {
       }
     }
 
-    try {
-      const genRes = await fetch("/api/plan", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${session?.access_token ?? ""}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ onboarding_id: onboardingId }),
-      });
-      if (!genRes.ok) {
-        const payload = await genRes.json().catch(() => ({}));
-        const msg = payload?.detail ?? `Server returned ${genRes.status}`;
-        setError(`Could not start plan generation: ${msg}`);
-        setSubmitting(false);
-        return;
-      }
-    } catch {
-      setError("Could not reach the plan generation server. Please check your connection and try again.");
-      setSubmitting(false);
-      return;
-    }
+    const planUrl = `/dashboard/plan?generating=true&onboarding_id=${encodeURIComponent(onboardingId)}`;
+    const markPlanStatus = async (status: string) => {
+      await supabase
+        .from("BE_Onboarding_Sessions")
+        .update({ plan_status: status })
+        .eq("onboarding_id", onboardingId);
+    };
 
-    router.push(`/dashboard/plan?generating=true&onboarding_id=${encodeURIComponent(onboardingId)}`);
+    router.push(planUrl);
+
+    void fetch("/api/plan", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session?.access_token ?? ""}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ onboarding_id: onboardingId }),
+    })
+      .then(async (genRes) => {
+        if (!genRes.ok) {
+          const payload = await genRes.json().catch(() => ({}));
+          const msg = payload?.detail ?? `Server returned ${genRes.status}`;
+          await markPlanStatus(`error queueing plan: ${String(msg).slice(0, 200)}`);
+        }
+      })
+      .catch(async () => {
+        await markPlanStatus("error queueing plan: Could not reach the plan generation server");
+      });
   }
 
   return (
