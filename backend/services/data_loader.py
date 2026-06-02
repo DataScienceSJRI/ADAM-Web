@@ -27,39 +27,43 @@ _STATIC_TABLES = {
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
 
-def _fetch(table: str, filters: Optional[dict] = None) -> pd.DataFrame:
-    """Fetch all rows using pagination."""
-    try:
-        supabase = get_supabase()
-        all_rows = []
-        batch_size = 1000
-        start = 0
+def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.DataFrame:
+    """Fetch all rows using pagination, with retries on transient connection errors."""
+    for attempt in range(1, _retries + 1):
+        try:
+            supabase = get_supabase()
+            all_rows = []
+            batch_size = 1000
+            start = 0
 
-        while True:
-            query = supabase.table(table).select("*").range(start, start + batch_size - 1)
+            while True:
+                query = supabase.table(table).select("*").range(start, start + batch_size - 1)
 
-            if filters:
-                for col, val in filters.items():
-                    query = query.eq(col, val)
+                if filters:
+                    for col, val in filters.items():
+                        query = query.eq(col, val)
 
-            response = query.execute()
-            data = response.data
+                response = query.execute()
+                data = response.data
 
-            if not data:
-                break
+                if not data:
+                    break
 
-            all_rows.extend(data)
+                all_rows.extend(data)
 
-            if len(data) < batch_size:
-                break
+                if len(data) < batch_size:
+                    break
 
-            start += batch_size
+                start += batch_size
 
-        return pd.DataFrame(all_rows)
+            return pd.DataFrame(all_rows)
 
-    except Exception as e:
-        print(f"[WARN] Failed to fetch {table}: {e}")
-        return pd.DataFrame()
+        except Exception as e:
+            print(f"[WARN] Failed to fetch {table} (attempt {attempt}/{_retries}): {e}")
+            if attempt < _retries:
+                time.sleep(2 ** attempt)  # 2s, 4s backoff
+            else:
+                return pd.DataFrame()
 
 
 def _fetch_cached(table: str) -> pd.DataFrame:
