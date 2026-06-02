@@ -12,6 +12,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 def _supabase_login(email: str, password: str) -> LoginResponse:
     sb = get_supabase()
+    if "@" not in email:
+        email = f"{email}@adam.participant"
     try:
         resp = sb.auth.sign_in_with_password({"email": email, "password": password})
     except Exception as exc:
