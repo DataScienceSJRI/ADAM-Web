@@ -128,7 +128,13 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["sub_category"] = ds["subcategories"]
 
     _subcat_onboarding = static.get("SubCategory_Onboarding", pd.DataFrame())
-    ds["recipe_tag"] = static.get("RecipeTagging", pd.DataFrame())
+    _recipe_tag = static.get("RecipeTagging", pd.DataFrame())
+    if not _recipe_tag.empty:
+        _recipe_tag = _recipe_tag.rename(columns={
+            "Recipe code": "Recipe_Code",
+            "Recipe Name": "Recipe_Name",
+        })
+    ds["recipe_tag"] = _recipe_tag
     ds["main1_main2_mapping"] = static.get("Main1_Main2_Mapping Subcategory", pd.DataFrame())
     ds["ear_100"] = static.get("BaseEar", pd.DataFrame())
     ds["tul"] = static.get("BaseTul", pd.DataFrame())
