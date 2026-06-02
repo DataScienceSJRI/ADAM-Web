@@ -125,9 +125,7 @@ export default function PlanPage() {
         setElapsed(e => e + 1);
       }, 1000);
 
-      // Poll plan_status on BE_Onboarding_Sessions if we have onboarding_id
-      // AND poll Recommendation row count — whichever resolves first wins
-      pollRef.current = setInterval(async () => {
+      const pollGeneration = async () => {
         if (!mounted) { stopPolling(); return; }
 
         // Check session plan_status if onboarding_id is known
@@ -136,7 +134,7 @@ export default function PlanPage() {
             .from("BE_Onboarding_Sessions")
             .select("plan_status")
             .eq("onboarding_id", onboardingIdParam)
-            .single();
+            .maybeSingle();
           if (!mounted) return;
           const status: string | null = sess?.plan_status ?? null;
           if (status && IN_PROGRESS_STATUSES.has(status)) setBackendStatus(status);
@@ -163,7 +161,13 @@ export default function PlanPage() {
           stopPolling();
           router.replace("/dashboard/plan");
         }
-      }, POLL_INTERVAL_MS);
+      };
+
+      // Poll plan_status on BE_Onboarding_Sessions if we have onboarding_id
+      // AND poll Recommendation row count — whichever resolves first wins
+      await pollGeneration();
+      if (!mounted) return;
+      pollRef.current = setInterval(pollGeneration, POLL_INTERVAL_MS);
 
       // Hard timeout fallback
       timeoutRef.current = setTimeout(() => {

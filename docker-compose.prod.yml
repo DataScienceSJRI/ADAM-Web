@@ -1,0 +1,17 @@
+services:
+  redis:
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  backend:
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  plan-worker:
+    restart: unless-stopped
+
+volumes:
+  redis_data:

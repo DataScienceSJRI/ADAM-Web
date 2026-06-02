@@ -16,7 +16,17 @@ export async function POST(req: NextRequest) {
       body,
     });
 
-    const json = await upstream.json().catch(() => ({ detail: "Empty response from backend" }));
+    const text = await upstream.text();
+    let json: unknown;
+    try {
+      json = text ? JSON.parse(text) : { detail: "Empty response from backend" };
+    } catch {
+      json = {
+        detail: text
+          ? `Backend returned a non-JSON response: ${text.slice(0, 300)}`
+          : "Empty response from backend",
+      };
+    }
     return NextResponse.json(json, { status: upstream.status });
   } catch {
     return NextResponse.json(

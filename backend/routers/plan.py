@@ -10,10 +10,10 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from rq import Queue
-from core.redis_client import get_redis
+from core.redis_client import PLAN_JOB_TIMEOUT_SECONDS, PLAN_QUEUE_NAME, get_redis
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
-from services.data_loader import _fetch, load_data_from_supabase
+from services.data_loader import _fetch, _fetch_cached, load_data_from_supabase
 from services.profile_builder import build_profile
 from services.recommendation_writer import (
     write_recommendations,
@@ -108,7 +108,7 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
             logger.info("model.run completed for user_id=%s [%.1fs]", user_id, time.time() - t0)
 
             weekly_menu = output_paths.get("weekly_menu")
-            recipe_name_changed = _fetch("USER_Recipes_name_changed")
+            recipe_name_changed = _fetch_cached("USER_Recipes_name_changed")
 
             name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
             weekly_menu.loc[
@@ -205,6 +205,19 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
         logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
+
+    try:
+        from services.push import send_push
+
+        send_push(
+            user_id=user_id,
+            title="Your meal plan is ready!",
+            body="Your personalised 7-day meal plan has been generated. Tap to view it.",
+            data={"plan_id": plan_id, "type": "plan_ready"},
+        )
+    except Exception:
+        logger.warning("Push notification failed for plan_id=%s", plan_id, exc_info=True)
+
     logger.info("Plan generation complete for user_id=%s [total %.1fs]", user_id, time.time() - t0)
 
 
@@ -222,8 +235,34 @@ def generate_plan(
         )
 
     _write_plan_status(body.onboarding_id, "generating")
-    q = Queue(connection=get_redis(), default_timeout=900)
-    q.enqueue("routers.plan._run_plan_background", user_id, body, profile)
+    try:
+        queue = Queue(
+            PLAN_QUEUE_NAME,
+            connection=get_redis(),
+            default_timeout=PLAN_JOB_TIMEOUT_SECONDS,
+        )
+        job = queue.enqueue(
+            "services.plan_worker.run_plan_job",
+            user_id,
+            body.model_dump(),
+            profile,
+            job_timeout=PLAN_JOB_TIMEOUT_SECONDS,
+            result_ttl=86400,
+            failure_ttl=604800,
+        )
+        logger.info(
+            "Queued plan job id=%s user_id=%s onboarding_id=%s",
+            job.id,
+            user_id,
+            body.onboarding_id,
+        )
+    except Exception as exc:
+        logger.exception("Could not queue plan generation for user_id=%s", user_id)
+        _write_plan_status(body.onboarding_id, f"error queueing plan: {str(exc)[:200]}")
+        raise HTTPException(
+            status_code=503,
+            detail="Plan queue is unavailable. Please try again shortly.",
+        )
 
     return GeneratePlanResponse(
         status="queued",
@@ -250,7 +289,7 @@ async def delete_plan(user_id: str = Depends(get_current_user)):
 
 def Recomendation_formatting(weekly_menu_df):
     if not weekly_menu_df.empty:
-        tag_df = _fetch("RecipeTagging")
+        tag_df = _fetch_cached("RecipeTagging")
         tag_df = tag_df.rename(
 			columns={
 				"Recipe code": "Recipe_Code",
@@ -307,7 +346,7 @@ def Recomendation_formatting(weekly_menu_df):
 
         # Merge SubCategory GI averages from Excel (Code, GI_Avg) if available
         try:
-            sub_gi = _fetch("SubCategory_foods_GI_GL")
+            sub_gi = _fetch_cached("SubCategory_foods_GI_GL")
             if len(sub_gi)>0:
                 if "Code" in sub_gi.columns and "GI_Avg" in sub_gi.columns:
                     sg = sub_gi[["Code", "GI_Avg"]].copy()
@@ -321,7 +360,7 @@ def Recomendation_formatting(weekly_menu_df):
                     final_df = final_df.drop(columns=[c for c in ["Subcategories_norm"] if c in final_df.columns])
                     # Attach human-readable subcategory name from SubCategory.csv (if available)
                     try:
-                        sub_ref = _fetch("SubCategory")
+                        sub_ref = _fetch_cached("SubCategory")
                         if len(sub_ref) > 0:
                             if "Code" in sub_ref.columns and "SubCategory" in sub_ref.columns:
                                 # Normalize codes for matching
@@ -338,7 +377,7 @@ def Recomendation_formatting(weekly_menu_df):
 
             # Enrich final_df with nutrition from Recipes and compute GL at optimal serving
             try:
-                rec_df = _fetch("Recipe")
+                rec_df = _fetch_cached("Recipe")
                 if len(rec_df)>0:
                     # find recipe code column in recipes
                     code_col = None
@@ -532,7 +571,7 @@ def find_closest_recipe_standalone(
     clean_target_code = str(input_recipe_code).strip()
     
     # 2. Query the 'Recipe' table for the target input item
-    Recipedf_full = _fetch("Recipe")
+    Recipedf_full = _fetch_cached("Recipe")
 
     # Safety select to ensure only necessary columns are loaded into workspace memory
     needed_cols = ["Recipe_Code", "Recipe_Category", "Energy_ENERC_Kcal", "Carbohydrate_g", "Recipe_Name","Energy_ENERC_KJ"]
@@ -551,7 +590,7 @@ def find_closest_recipe_standalone(
         return None, {"error": "Recipe_Category_missing"}
         
     # 3. Pull Glycemic Index matrix and calculate the target item's dynamic baseline GL
-    gi_gl_df_full = _fetch("SubCategory_foods_GI_GL")
+    gi_gl_df_full = _fetch_cached("SubCategory_foods_GI_GL")
     gi_gl_df_full["Code"] = gi_gl_df_full["Code"].astype(str).str.strip()
     print(subcat)
     ### subcat came like  Recipe_Category    E1B

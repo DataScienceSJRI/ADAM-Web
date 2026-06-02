@@ -12,7 +12,11 @@ recipe/category repetition limits, nutrient soft goals, sodium/cholesterol caps.
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import time
+import uuid
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -41,6 +45,19 @@ def run_lp(
     tul: Optional[pd.DataFrame] = None,
     profile: Optional[Dict] = None,
 ) -> Tuple[pd.DataFrame, Dict]:
+    debug_dir: Path | None = None
+
+    def _write_debug_csv(df: pd.DataFrame, filename: str) -> None:
+        nonlocal debug_dir
+        if os.getenv("DEBUG_OPTIMIZER") != "1":
+            return
+        if debug_dir is None:
+            root = Path(os.getenv("OPTIMIZER_DEBUG_DIR", tempfile.gettempdir()))
+            debug_dir = root / "adam_optimizer_debug" / f"lp_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            logger.info("Writing optimizer debug CSVs to %s", debug_dir)
+        df.to_csv(debug_dir / filename, index=False)
+
     try:
         from pulp import (
             LpProblem, LpMinimize, LpVariable, lpSum,
@@ -131,7 +148,7 @@ def run_lp(
         else:
             candidates[f"{col}_z"] = (candidates[col] - mean_val) / std_val
 
-    candidates.to_csv("candidates_pre_objective.csv", index=False)
+    _write_debug_csv(candidates, "candidates_pre_objective.csv")
     
     candidates["Weighted_Objective_Score"] = (
         500 * candidates["GL"]
@@ -366,26 +383,27 @@ def run_lp(
                     else:
                         model += lpSum(y[(d, k)] for k in mains3) == 0
 
-    pairing_debug_rows = []
-    for d in days:
-        for meal_time in sorted(candidates["Meal_Time"].dropna().astype(str).unique().tolist()):
-            slot_candidates = candidates[candidates["Meal_Time"].astype(str) == str(meal_time)]
-            for pref_id, group in slot_candidates.groupby("Preference_Row_ID"):
-                main_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
-                main2_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
-                main3_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 3"].index.tolist()
-                pairing_debug_rows.append({
-                    "Day": d,
-                    "Meal_Time": meal_time,
-                    "Preference_Row_ID": pref_id,
-                    "main_ids": ";".join([str(x) for x in main_ids]),
-                    "main2_ids": ";".join([str(x) for x in main2_ids]),
-                    "main3_ids": ";".join([str(x) for x in main3_ids]),
-                    "has_main": bool(len(main_ids) > 0),
-                    "has_main2": bool(len(main2_ids) > 0),
-                    "has_main3": bool(len(main3_ids) > 0),
-                })
-    pd.DataFrame(pairing_debug_rows).to_csv("pairing_constraints_debug.csv", index=False)
+    if os.getenv("DEBUG_OPTIMIZER") == "1":
+        pairing_debug_rows = []
+        for d in days:
+            for meal_time in sorted(candidates["Meal_Time"].dropna().astype(str).unique().tolist()):
+                slot_candidates = candidates[candidates["Meal_Time"].astype(str) == str(meal_time)]
+                for pref_id, group in slot_candidates.groupby("Preference_Row_ID"):
+                    main_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
+                    main2_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
+                    main3_ids = group[group["Dish_Type"].astype(str).str.strip() == "Main 3"].index.tolist()
+                    pairing_debug_rows.append({
+                        "Day": d,
+                        "Meal_Time": meal_time,
+                        "Preference_Row_ID": pref_id,
+                        "main_ids": ";".join([str(x) for x in main_ids]),
+                        "main2_ids": ";".join([str(x) for x in main2_ids]),
+                        "main3_ids": ";".join([str(x) for x in main3_ids]),
+                        "has_main": bool(len(main_ids) > 0),
+                        "has_main2": bool(len(main2_ids) > 0),
+                        "has_main3": bool(len(main3_ids) > 0),
+                    })
+        _write_debug_csv(pd.DataFrame(pairing_debug_rows), "pairing_constraints_debug.csv")
 
     for d in days:
         for idx, row in candidates.iterrows():
@@ -715,21 +733,22 @@ def run_lp(
                     row["Serving"] = float(x[(d, int(i))].value() or 0)
                     selected_rows.append(row)
 
-    candidates.to_csv("candidates_with_metrics.csv", index=False)
-    vars_rows = []
-    for d in days:
-        for i in candidates.index:
-            y_val = float(y[(d, int(i))].value() or 0)
-            x_val = float(x[(d, int(i))].value() or 0)
-            vars_rows.append({
-                "Day": d,
-                "Candidate_Index": int(i),
-                "y_var": f"y_d{d}_r{int(i)}",
-                "y_val": y_val,
-                "x_var": f"x_d{d}_r{int(i)}",
-                "x_val": x_val,
-            })
-    pd.DataFrame(vars_rows).to_csv("final_y_x_values_postsolve.csv", index=False)
+    _write_debug_csv(candidates, "candidates_with_metrics.csv")
+    if os.getenv("DEBUG_OPTIMIZER") == "1":
+        vars_rows = []
+        for d in days:
+            for i in candidates.index:
+                y_val = float(y[(d, int(i))].value() or 0)
+                x_val = float(x[(d, int(i))].value() or 0)
+                vars_rows.append({
+                    "Day": d,
+                    "Candidate_Index": int(i),
+                    "y_var": f"y_d{d}_r{int(i)}",
+                    "y_val": y_val,
+                    "x_var": f"x_d{d}_r{int(i)}",
+                    "x_val": x_val,
+                })
+        _write_debug_csv(pd.DataFrame(vars_rows), "final_y_x_values_postsolve.csv")
 
     weekly_menu = pd.DataFrame(selected_rows)
     if not weekly_menu.empty:

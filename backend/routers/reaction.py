@@ -6,6 +6,7 @@ from core.supabase import get_supabase
 from models.schemas import (
     MealReactionRequest, MealSlot, ReactionResponse, ReactionItem, ReactionsListResponse, SLOT_TO_TIMINGS,
     WebMealReactionRequest, WebReactionItem, WebReactionsListResponse,
+    RecipeReactionRequest,
 )
 from services.reaction import save_reaction
 
@@ -101,6 +102,26 @@ def delete_reaction(
     if not resp.data:
         raise HTTPException(status_code=404, detail="No reactions found for that slot")
     return {"status": "deleted"}
+
+
+@router.post("/reaction/recipe", response_model=ReactionResponse, tags=["Reactions - Mobile"])
+def log_recipe_reaction(body: RecipeReactionRequest, user_id: str = Depends(get_current_user)):
+    """Like/dislike an individual recipe. Updates Recommendation.Reaction only (not Combo_Reaction)."""
+    sb = get_supabase()
+    query = (
+        sb.table("Recommendation")
+        .update({"Reaction": body.reaction.value})
+        .eq("user_id", user_id)
+        .eq("plan_id", body.plan_id)
+        .eq("Food_Name_desc", body.recipe_code)
+    )
+    if body.date:
+        query = query.eq("Date", body.date)
+    resp = query.execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="No matching recipe found in plan")
+    logger.info("Recipe reaction saved: user=%s recipe=%s reaction=%s", user_id, body.recipe_code, body.reaction.value)
+    return ReactionResponse(status="ok")
 
 
 # ── Web endpoints (MealReactions table) ──────────────────────────────────────
