@@ -227,12 +227,14 @@ def generate_plan(
     user_id: str = Depends(get_current_user),
 ):
     """Queue a 7-day personalised meal plan generation. Poll /plan/status for completion."""
-    profile = build_profile(user_id, onboarding_id=body.onboarding_id)
+    effective_user_id = body.target_user_id if body.target_user_id else user_id
+    profile = build_profile(effective_user_id, onboarding_id=body.onboarding_id)
     if profile is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No basic details found for user {user_id}. Complete onboarding first.",
+            detail=f"No basic details found for user {effective_user_id}. Complete onboarding first.",
         )
+    user_id = effective_user_id
 
     _write_plan_status(body.onboarding_id, "generating")
     try:

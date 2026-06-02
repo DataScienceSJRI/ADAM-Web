@@ -18,17 +18,29 @@ export default async function DashboardLayout({
     try {
       const { data } = await supabase.auth.getSession();
       user = data.session?.user ?? null;
-    } catch {
-    }
+    } catch {}
   }
 
   if (!user) {
     redirect("/login");
   }
 
+  const { data: roleData } = await supabase
+    .from("UserRoles")
+    .select("role")
+    .eq("user_id", user.email!)
+    .limit(1)
+    .maybeSingle();
+
+  const role = roleData?.role ?? "participant";
+
+  if (role === "participant") {
+    redirect("/unauthorized");
+  }
+
   return (
     <SidebarProvider className="h-screen overflow-hidden">
-      <AppSidebar />
+      <AppSidebar role={role} />
       <SidebarInset className="flex flex-col min-h-0">
         <DashboardHeader />
         <main className="flex-1 overflow-y-auto p-6">{children}</main>

@@ -6,6 +6,7 @@ from typing import Optional, List
 class GeneratePlanRequest(BaseModel):
     week_no: int = 1
     onboarding_id: Optional[str] = None
+    target_user_id: Optional[str] = None
 
     model_config = {"json_schema_extra": {"example": {"week_no": 1, "onboarding_id": "a1b2c3d4-0000-0000-0000-000000000000"}}}
 
