@@ -39,7 +39,7 @@ def _run_worker() -> None:
         default_timeout=PLAN_JOB_TIMEOUT_SECONDS,
     )
     worker = Worker([queue], connection=redis)
-    worker.work(with_scheduler=True)
+    worker.work(with_scheduler=False)
 
 
 def main() -> None:
@@ -64,7 +64,7 @@ def main() -> None:
         logger.info("Starting %d plan workers", args.workers)
         processes: list[multiprocessing.Process] = []
         for i in range(args.workers):
-            p = multiprocessing.Process(target=_run_worker, name=f"plan-worker-{i + 1}", daemon=True)
+            p = multiprocessing.Process(target=_run_worker, name=f"plan-worker-{i + 1}")
             p.start()
             logger.info("Started worker process %d (pid=%d)", i + 1, p.pid)
             processes.append(p)
