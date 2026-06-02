@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { BasicDetailsForm, type BasicDetails } from "@/components/basic-details-form";
@@ -10,6 +10,14 @@ import { ReviewStep } from "@/components/review-step";
 const STEPS = ["Basic Details", "Meal Preferences", "Review & Confirm"];
 
 export default function OnboardingPage() {
+  return (
+    <Suspense>
+      <OnboardingFlow />
+    </Suspense>
+  );
+}
+
+function OnboardingFlow() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const participantUserId = searchParams.get("participant_id") ?? null;
