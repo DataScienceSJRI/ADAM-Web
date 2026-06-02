@@ -15,7 +15,6 @@ type Participant = {
   created_at: string | null;
 };
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "";
 
 function statusBadge(status: string | null) {
   if (!status) return <span className="text-xs text-muted-foreground">No plan</span>;
@@ -40,7 +39,7 @@ export default function UsersPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) { router.push("/login"); return; }
 
-      const res = await fetch(`${BACKEND}/api/v1/users`, {
+      const res = await fetch(`/api/users`, {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (!res.ok) { setError("Failed to load participants"); setLoading(false); return; }

@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? "";
 
 export default function AddNewUserPage() {
   const router = useRouter();
@@ -24,7 +23,7 @@ export default function AddNewUserPage() {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) { router.push("/login"); return; }
 
-    const res = await fetch(`${BACKEND}/api/v1/users`, {
+    const res = await fetch(`/api/users`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
