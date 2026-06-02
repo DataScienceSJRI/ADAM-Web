@@ -203,7 +203,7 @@ export default function PlanPage() {
           <div className="h-10 w-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
           <div className="space-y-1">
             <p className="text-base font-medium">{stage.label}</p>
-            <p className="text-xs text-muted-foreground">Elapsed: {elapsedLabel} · usually takes ~5 minutes</p>
+            <p className="text-xs text-muted-foreground">Elapsed: {elapsedLabel} · usually takes 5–10 minutes</p>
           </div>
           <div className="w-full max-w-sm space-y-1.5">
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
