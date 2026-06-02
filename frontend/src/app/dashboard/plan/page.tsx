@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { requestPushPermission } from "@/components/onesignal-provider";
 
 const STAGES = [
   { at: 0,   label: "Loading your preferences…",      status: "generating" },
@@ -92,6 +93,7 @@ export default function PlanPage() {
   const [loading, setLoading] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const [backendStatus, setBackendStatus] = useState<string | null>(null);
+  const [notifRequested, setNotifRequested] = useState(false);
 
   const initialCountRef = useRef<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -216,7 +218,20 @@ export default function PlanPage() {
               ))}
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">Please keep this page open</p>
+          {!notifRequested ? (
+            <button
+              onClick={async () => {
+                await requestPushPermission();
+                setNotifRequested(true);
+              }}
+              className="text-xs text-primary underline underline-offset-2 hover:text-primary/80"
+            >
+              Notify me when ready
+            </button>
+          ) : (
+            <p className="text-xs text-muted-foreground">You&apos;ll be notified when your plan is ready.</p>
+          )}
+          <p className="text-xs text-muted-foreground">You can close this page — we&apos;ll notify you.</p>
         </div>
       </div>
     );
