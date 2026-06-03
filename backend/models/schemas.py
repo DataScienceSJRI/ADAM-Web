@@ -39,7 +39,7 @@ class MealSlot(str, Enum):
     BREAKFAST = "breakfast"
     LUNCH = "lunch"
     DINNER = "dinner"
-    SNACK = "snack"
+    SNACK = "snacks"
 
 
 # DB Recommendation.Timings stores "Snacks" (plural) for snack slot

@@ -122,6 +122,20 @@ export default function PlanPage() {
 
       if (!startedGenerating) return;
 
+      // Seeding elapsed time from when the session was created so that navigating
+      // away and back doesn't reset the counter to zero.
+      if (onboardingIdParam) {
+        const { data: sess } = await supabase
+          .from("BE_Onboarding_Sessions")
+          .select("created_at")
+          .eq("onboarding_id", onboardingIdParam)
+          .maybeSingle();
+        if (sess?.created_at) {
+          const secondsSinceStart = Math.floor((Date.now() - new Date(sess.created_at).getTime()) / 1000);
+          setElapsed(Math.max(0, secondsSinceStart));
+        }
+      }
+
       // Elapsed time ticker
       tickRef.current = setInterval(() => {
         setElapsed(e => e + 1);
