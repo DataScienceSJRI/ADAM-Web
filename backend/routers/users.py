@@ -1,4 +1,5 @@
 import logging
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core.auth import get_current_user
@@ -7,6 +8,8 @@ from core.supabase import get_supabase
 
 logger = logging.getLogger("backend.routers.users")
 router = APIRouter(prefix="/users", tags=["users"])
+
+_PARTICIPANT_PASSWORD = os.getenv("PARTICIPANT_DEFAULT_PASSWORD", "")
 
 
 class CreateParticipantRequest(BaseModel):
@@ -21,6 +24,7 @@ class ParticipantResponse(BaseModel):
     plan_status: str | None = None
     last_plan_at: str | None = None
     created_at: str | None = None
+    password: str | None = None
 
 
 @router.post("", response_model=ParticipantResponse)
@@ -41,7 +45,24 @@ def create_participant(
             max_num = max(max_num, int(pid[1:]))
     participant_id = f"P{max_num + 1:03d}"
 
-    # participant_id is the user_id — no auth account needed
+    email = f"{participant_id}@adam.participant"
+
+    # Create Supabase auth account — non-fatal so the UserRoles entry is always created
+    # even if auth account creation fails (coordinator can create it manually later).
+    auth_ok = False
+    if _PARTICIPANT_PASSWORD:
+        try:
+            sb.auth.admin.create_user({
+                "email": email,
+                "password": _PARTICIPANT_PASSWORD,
+                "email_confirm": True,
+            })
+            auth_ok = True
+        except Exception as exc:
+            logger.warning("Could not create auth account for %s: %s", participant_id, exc)
+    else:
+        logger.warning("PARTICIPANT_DEFAULT_PASSWORD not set — skipping auth account creation for %s", participant_id)
+
     sb.table("UserRoles").insert({
         "user_id": participant_id,
         "role": "participant",
@@ -50,12 +71,13 @@ def create_participant(
         "participant_id": participant_id,
     }).execute()
 
-    logger.info("Created participant %s by coordinator %s", participant_id, coordinator_id)
+    logger.info("Created participant %s by coordinator %s (auth_account=%s)", participant_id, coordinator_id, auth_ok)
     return ParticipantResponse(
         user_id=participant_id,
         participant_id=participant_id,
         display_name=body.display_name.strip(),
         coordinator_id=coordinator_id,
+        password=_PARTICIPANT_PASSWORD if auth_ok else None,
     )
 
 
@@ -77,6 +99,7 @@ def list_participants(
         return []
 
     # Enrich with latest plan status
+
     p_ids = [p["user_id"] for p in participants]
     sessions = (
         sb.table("BE_Onboarding_Sessions")
@@ -112,4 +135,12 @@ def get_my_role(
     user_id: str = Depends(get_current_user),
     role: str = Depends(get_current_role),
 ):
-    return {"user_id": user_id, "role": role}
+    sb = get_supabase()
+    row = sb.table("UserRoles").select("display_name, participant_id").eq("user_id", user_id).limit(1).execute()
+    info = row.data[0] if row.data else {}
+    return {
+        "user_id": user_id,
+        "role": role,
+        "display_name": info.get("display_name"),
+        "participant_id": info.get("participant_id"),
+    }

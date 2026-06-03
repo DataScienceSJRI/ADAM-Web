@@ -11,7 +11,7 @@ export default function AddNewUserPage() {
   const [displayName, setDisplayName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ participant_id: string; display_name: string; user_id: string } | null>(null);
+  const [created, setCreated] = useState<{ participant_id: string; display_name: string; user_id: string; password?: string } | null>(null);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -56,7 +56,7 @@ export default function AddNewUserPage() {
             {[
               { label: "Participant ID", value: <span className="font-mono font-semibold">{created.participant_id}</span> },
               { label: "Name", value: created.display_name },
-              { label: "Password", value: <span className="text-muted-foreground italic text-xs">Common study password</span> },
+              { label: "Password", value: <span className="font-mono font-semibold">{created.password ?? "—"}</span> },
             ].map(({ label, value }) => (
               <div key={label} className="flex justify-between items-center gap-4">
                 <span className="text-muted-foreground shrink-0">{label}</span>

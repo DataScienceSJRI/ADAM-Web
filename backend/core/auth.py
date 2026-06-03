@@ -59,4 +59,8 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     email: str | None = payload.get("email")
     if not email:
         raise _CREDENTIALS_EXCEPTION
+    # Participant accounts use P001@adam.participant — strip the domain so that
+    # data lookups (which store user_id as the plain participant ID) always match.
+    if email.endswith("@adam.participant"):
+        return email.split("@")[0]
     return email
