@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from services.push import ONESIGNAL_APP_ID, ONESIGNAL_REST_KEY, _get_player_ids
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
@@ -75,6 +76,19 @@ def test_push(user_id: str = Depends(get_current_user)):
     """Send a test push notification to all devices registered for the current user.
     Use this to verify OneSignal credentials and device token registration.
     """
+    
+    if not ONESIGNAL_APP_ID or ONESIGNAL_APP_ID == "your-onesignal-app-id-here":
+        raise HTTPException(status_code=424, detail="ONESIGNAL_APP_ID is not set on the backend server")
+    if not ONESIGNAL_REST_KEY or ONESIGNAL_REST_KEY == "your-onesignal-rest-api-key-here":
+        raise HTTPException(status_code=424, detail="ONESIGNAL_REST_API_KEY is not set on the backend server")
+
+    player_ids = _get_player_ids(user_id)
+    if not player_ids:
+        raise HTTPException(
+            status_code=424,
+            detail=f"No device token registered for this account. Open the web app, click 'Notify me when ready', and allow notifications first.",
+        )
+
     sent = send_push(
         user_id=user_id,
         title="Test notification",
@@ -82,10 +96,7 @@ def test_push(user_id: str = Depends(get_current_user)):
         data={"type": "test"},
     )
     if not sent:
-        raise HTTPException(
-            status_code=424,
-            detail="Not sent — check ONESIGNAL_APP_ID / ONESIGNAL_REST_API_KEY env vars, or register a device token first",
-        )
+        raise HTTPException(status_code=424, detail="OneSignal API call failed — check server logs for details")
     return {"status": "sent"}
 
 
