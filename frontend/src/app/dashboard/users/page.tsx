@@ -102,12 +102,20 @@ export default function UsersPage() {
                       : "—"}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <Link
-                      href={`/dashboard/recommendations?user=${encodeURIComponent(p.user_id)}`}
-                      className="text-xs text-primary hover:underline font-medium"
-                    >
-                      View Plan →
-                    </Link>
+                    <div className="flex items-center justify-end gap-3">
+                      <Link
+                        href={`/dashboard/preferences?user=${encodeURIComponent(p.user_id)}`}
+                        className="text-xs text-muted-foreground hover:text-foreground hover:underline font-medium"
+                      >
+                        Preferences →
+                      </Link>
+                      <Link
+                        href={`/dashboard/recommendations?user=${encodeURIComponent(p.user_id)}`}
+                        className="text-xs text-primary hover:underline font-medium"
+                      >
+                        View Plan →
+                      </Link>
+                    </div>
                   </td>
                 </tr>
               ))}

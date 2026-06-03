@@ -21,6 +21,7 @@ import {
   History,
   Users,
   UserPlus,
+  SlidersHorizontal,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -29,6 +30,7 @@ import { UserNav } from "./user-nav";
 const studyItems = [
   { title: "Users", href: "/dashboard/users", icon: Users },
   { title: "Add New User", href: "/dashboard/users/new", icon: UserPlus },
+  { title: "Preferences", href: "/dashboard/preferences", icon: SlidersHorizontal },
 ];
 
 const planItems = [
