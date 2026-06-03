@@ -1,4 +1,3 @@
-import os
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -8,9 +7,6 @@ from core.supabase import get_supabase
 
 logger = logging.getLogger("backend.routers.users")
 router = APIRouter(prefix="/users", tags=["users"])
-
-_EMAIL_DOMAIN = "adam.participant"
-_DEFAULT_PASSWORD = os.getenv("PARTICIPANT_DEFAULT_PASSWORD", "")
 
 
 class CreateParticipantRequest(BaseModel):
@@ -34,9 +30,6 @@ def create_participant(
     role: str = Depends(require_coordinator),
 ):
     """Create a new participant account. Only coordinators and admins can do this."""
-    if not _DEFAULT_PASSWORD:
-        raise HTTPException(status_code=500, detail="PARTICIPANT_DEFAULT_PASSWORD env var not set")
-
     sb = get_supabase()
 
     # Auto-generate next participant ID (P001, P002, ...)
@@ -47,33 +40,19 @@ def create_participant(
         if pid.upper().startswith("P") and pid[1:].isdigit():
             max_num = max(max_num, int(pid[1:]))
     participant_id = f"P{max_num + 1:03d}"
-    email = f"{participant_id}@{_EMAIL_DOMAIN}"
 
-    # Create Supabase auth user
-    try:
-        auth_resp = sb.auth.admin.create_user({
-            "email": email,
-            "password": _DEFAULT_PASSWORD,
-            "email_confirm": True,
-        })
-    except Exception as exc:
-        logger.error("Failed to create auth user for %s: %s", email, exc)
-        raise HTTPException(status_code=500, detail=f"Failed to create auth account: {exc}")
-
-    user_id = auth_resp.user.email  # email is the user_id used throughout the app
-
-    # Insert into UserRoles
+    # participant_id is the user_id — no auth account needed
     sb.table("UserRoles").insert({
-        "user_id": user_id,
+        "user_id": participant_id,
         "role": "participant",
         "coordinator_id": coordinator_id,
         "display_name": body.display_name.strip(),
         "participant_id": participant_id,
     }).execute()
 
-    logger.info("Created participant %s (%s) by coordinator %s", participant_id, email, coordinator_id)
+    logger.info("Created participant %s by coordinator %s", participant_id, coordinator_id)
     return ParticipantResponse(
-        user_id=user_id,
+        user_id=participant_id,
         participant_id=participant_id,
         display_name=body.display_name.strip(),
         coordinator_id=coordinator_id,
