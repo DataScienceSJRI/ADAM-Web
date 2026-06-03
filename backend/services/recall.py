@@ -61,7 +61,7 @@ def log_recall(
                 "Food_Name_desc": item.get("Food_Name_desc"),
                 "Food_Qty": item.get("Food_Qty"),
                 "R_desc": item.get("R_desc"),
-                "Energy_Kcal": item.get("Energy_kcal"),
+                "Energy_Kcal": int(round(float(item["Energy_kcal"]))) if item.get("Energy_kcal") is not None else None,
             }
             sb.table("DietRecall").insert(row).execute()
             recall_ids.append(recall_id)
