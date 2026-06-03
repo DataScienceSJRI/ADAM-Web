@@ -124,8 +124,11 @@ export function AppSidebar({ role }: { role: string }) {
         )}
       </SidebarContent>
 
-      <SidebarFooter className="p-4">
+      <SidebarFooter className="p-4 space-y-3">
         <UserNav />
+        <p className="text-[10px] text-muted-foreground text-center select-none">
+          v1.0.0 · 03 Jun 2026
+        </p>
       </SidebarFooter>
     </Sidebar>
   );
