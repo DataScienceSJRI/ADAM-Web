@@ -94,6 +94,7 @@ export default function PlanPage() {
   const [elapsed, setElapsed] = useState(0);
   const [backendStatus, setBackendStatus] = useState<string | null>(null);
   const [notifRequested, setNotifRequested] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
 
   const initialCountRef = useRef<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -233,15 +234,29 @@ export default function PlanPage() {
             </div>
           </div>
           {!notifRequested ? (
-            <button
-              onClick={async () => {
-                await requestPushPermission();
-                setNotifRequested(true);
-              }}
-              className="text-xs text-primary underline underline-offset-2 hover:text-primary/80"
-            >
-              Notify me when ready
-            </button>
+            <div className="flex flex-col items-center gap-1">
+              <button
+                onClick={async () => {
+                  setNotifError(null);
+                  const result = await requestPushPermission();
+                  if (result === "granted") {
+                    setNotifRequested(true);
+                  } else if (result === "no_sdk") {
+                    setNotifError("Push notifications are not available in this browser.");
+                  } else if (result === "denied") {
+                    setNotifError("Permission denied — enable notifications in your browser settings.");
+                  } else {
+                    setNotifError("Could not enable notifications. Please try again.");
+                  }
+                }}
+                className="text-xs text-primary underline underline-offset-2 hover:text-primary/80"
+              >
+                Notify me when ready
+              </button>
+              {notifError && (
+                <p className="text-xs text-destructive">{notifError}</p>
+              )}
+            </div>
           ) : (
             <p className="text-xs text-muted-foreground">You&apos;ll be notified when your plan is ready.</p>
           )}

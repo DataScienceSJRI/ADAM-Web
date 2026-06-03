@@ -11,11 +11,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _clean_user_id(email: str | None) -> str:
-    """Return the plain participant ID for @adam.participant accounts, full email otherwise."""
+    """Return the plain participant ID for @adam.participant accounts, full email otherwise.
+    Supabase lowercases emails, so p001@adam.participant must be uppercased back to P001."""
     if not email:
         return ""
     if email.endswith("@adam.participant"):
-        return email.split("@")[0]
+        return email.split("@")[0].upper()
     return email
 
 

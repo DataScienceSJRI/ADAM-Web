@@ -69,10 +69,19 @@ export function OneSignalProvider() {
   );
 }
 
-/** Call this from a button to prompt the user for push permission. */
-export async function requestPushPermission() {
+/**
+ * Prompt the user for push permission.
+ * Returns "granted" | "denied" | "no_sdk" | "error".
+ */
+export async function requestPushPermission(): Promise<"granted" | "denied" | "no_sdk" | "error"> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const OneSignal = (window as any).OneSignal;
-  if (!OneSignal) return;
-  await OneSignal.Notifications.requestPermission();
+  if (!OneSignal) return "no_sdk";
+  try {
+    await OneSignal.Notifications.requestPermission();
+    const granted = await OneSignal.Notifications.permission;
+    return granted ? "granted" : "denied";
+  } catch {
+    return "error";
+  }
 }
