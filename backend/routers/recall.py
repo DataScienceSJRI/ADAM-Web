@@ -22,14 +22,18 @@ router = APIRouter(prefix="/recall", tags=["recall"])
 @router.post("/log", response_model=RecallLogResponse)
 def recall_log(body: DietRecallLogRequest, user_id: str = Depends(get_current_user)):
     """Record whether the user ate as planned for a given meal slot."""
+    # recipe_codes (plural) takes priority; fall back to legacy recipe_code
+    codes = body.recipe_codes or ([body.recipe_code] if body.recipe_code else None)
+    # actual_quantities (plural) takes priority; fall back to legacy actual_quantity
+    quantities = body.actual_quantities or ([body.actual_quantity] if body.actual_quantity else None)
     recall_ids = log_recall(
         user_id=user_id,
         plan_id=body.plan_id,
         meal_slot=body.meal_slot,
         did_eat_as_planned=body.did_eat_as_planned,
         date=body.date,
-        recipe_code=body.recipe_code,
-        actual_quantity=body.actual_quantity,
+        recipe_codes=codes,
+        actual_quantities=quantities,
     )
     return RecallLogResponse(status="ok", recall_ids=recall_ids)
 

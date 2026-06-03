@@ -29,8 +29,8 @@ def log_recall(
     meal_slot: MealSlot,
     did_eat_as_planned: bool,
     date: Optional[str] = None,
-    recipe_code: Optional[str] = None,
-    actual_quantity: Optional[str] = None,
+    recipe_codes: Optional[List[str]] = None,
+    actual_quantities: Optional[List[str]] = None,
 ) -> List[str]:
     sb = get_supabase()
     target_date = date or str(date_type.today())
@@ -67,36 +67,57 @@ def log_recall(
             recall_ids.append(recall_id)
 
     else:
-        recall_id = str(uuid.uuid4())
-        row = {
-            "ID": recall_id,
-            "user_id": user_id,
-            "Date": target_date,
-            "Time": now.strftime("%H:%M:%S"),
-            "created_at": now.isoformat(),
-            "plan_id": plan_id,
-            "meal_slot": meal_slot.value,
-            "did_eat_as_planned": False,
-        }
-        if recipe_code:
-            recipe_resp = sb.table("Recipe").select("Recipe_Name, Energy_ENERC_KJ").eq("Recipe_Code", recipe_code).limit(1).execute()
-            if recipe_resp.data:
-                r = recipe_resp.data[0]
-                row["Food_Name"] = r.get("Recipe_Name") or recipe_code
-                row["Food_Name_desc"] = recipe_code
-                kj = r.get("Energy_ENERC_KJ")
-                if kj:
-                    row["Energy_Kcal"] = int(round(float(kj) / 4.184))
-            else:
-                row["Food_Name"] = recipe_code
-            if actual_quantity:
-                row["Food_Qty"] = actual_quantity
-            row["notes"] = "changed"
-        else:
-            row["notes"] = "skipped"
+        codes_to_log = recipe_codes or []
 
-        sb.table("DietRecall").insert(row).execute()
-        recall_ids.append(recall_id)
+        if not codes_to_log:
+            # Skipped entirely — single row with no food info
+            recall_id = str(uuid.uuid4())
+            sb.table("DietRecall").insert({
+                "ID": recall_id,
+                "user_id": user_id,
+                "Date": target_date,
+                "Time": now.strftime("%H:%M:%S"),
+                "created_at": now.isoformat(),
+                "plan_id": plan_id,
+                "meal_slot": meal_slot.value,
+                "did_eat_as_planned": False,
+                "notes": "skipped",
+            }).execute()
+            recall_ids.append(recall_id)
+        else:
+            # Fetch all provided recipe codes in one query
+            recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes_to_log).execute()
+            recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
+
+            for i, code in enumerate(codes_to_log):
+                recall_id = str(uuid.uuid4())
+                row: dict = {
+                    "ID": recall_id,
+                    "user_id": user_id,
+                    "Date": target_date,
+                    "Time": now.strftime("%H:%M:%S"),
+                    "created_at": now.isoformat(),
+                    "plan_id": plan_id,
+                    "meal_slot": meal_slot.value,
+                    "did_eat_as_planned": False,
+                    "notes": "changed",
+                }
+                recipe = recipe_map.get(code)
+                if recipe:
+                    row["Food_Name"] = recipe.get("Recipe_Name") or code
+                    row["Food_Name_desc"] = code
+                    kj = recipe.get("Energy_ENERC_KJ")
+                    if kj:
+                        row["Energy_Kcal"] = int(round(float(kj) / 4.184))
+                else:
+                    row["Food_Name"] = code
+                    row["Food_Name_desc"] = code
+                # Pick the matching quantity by index, fall back to None
+                qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
+                if qty:
+                    row["Food_Qty"] = qty
+                sb.table("DietRecall").insert(row).execute()
+                recall_ids.append(recall_id)
 
     return recall_ids
 
