@@ -105,6 +105,7 @@ def request_on_demand_replacement(
     date: str,
     meal_slot: MealSlot,
     recipe_codes: List[str],
+    original_recipe_codes: List[str] | None = None,
 ) -> OnDemandReplacementResponse:
     """
     Validate proposed recipe codes for the meal slot, compute serving quantities
@@ -165,23 +166,33 @@ def request_on_demand_replacement(
     # Update Recommendation table — preserve plan_id, WeekNo, and onboarding_id from existing rows
     try:
         timings = SLOT_TO_TIMINGS[meal_slot]
-        existing = (
+
+        # Fetch all rows for this slot to get plan metadata
+        all_slot_rows = (
             sb.table("Recommendation")
-            .select("Pkey, plan_id, WeekNo, onboarding_id")
+            .select("Pkey, plan_id, WeekNo, onboarding_id, Food_Name_desc")
             .eq("user_id", user_id)
             .eq("Date", date)
             .eq("Timings", timings)
             .execute()
-        )
-        existing_plan_id: str | None = None
-        existing_week_no: int | None = None
-        existing_onboarding_id: str | None = None
-        if existing.data:
-            existing_plan_id = existing.data[0].get("plan_id")
-            existing_week_no = existing.data[0].get("WeekNo")
-            existing_onboarding_id = existing.data[0].get("onboarding_id")
-            pkeys = [r["Pkey"] for r in existing.data]
-            sb.table("Recommendation").delete().in_("Pkey", pkeys).execute()
+        ).data or []
+
+        existing_plan_id: str | None = all_slot_rows[0].get("plan_id") if all_slot_rows else None
+        existing_week_no: int | None = all_slot_rows[0].get("WeekNo") if all_slot_rows else None
+        existing_onboarding_id: str | None = all_slot_rows[0].get("onboarding_id") if all_slot_rows else None
+
+        if original_recipe_codes:
+            # Only delete the specific recipes being replaced, leave the rest of the combo intact
+            pkeys_to_delete = [
+                r["Pkey"] for r in all_slot_rows
+                if r.get("Food_Name_desc") in original_recipe_codes
+            ]
+        else:
+            # No original specified — replace the entire slot (legacy behaviour)
+            pkeys_to_delete = [r["Pkey"] for r in all_slot_rows]
+
+        if pkeys_to_delete:
+            sb.table("Recommendation").delete().in_("Pkey", pkeys_to_delete).execute()
 
         sb.table("Recommendation").insert(
             [

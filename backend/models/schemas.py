@@ -139,8 +139,9 @@ class OnDemandReplacementRequest(BaseModel):
     date: str
     meal_slot: MealSlot
     recipe_codes: List[str]
+    original_recipe_codes: Optional[List[str]] = None  # recipes being replaced; if omitted, replaces the whole slot
 
-    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "breakfast", "recipe_codes": ["A001745"]}}}
+    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "breakfast", "recipe_codes": ["A001745"], "original_recipe_codes": ["A002798"]}}}
 
 
 class OnDemandReplacementResponse(BaseModel):
