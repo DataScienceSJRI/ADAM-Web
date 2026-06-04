@@ -2,7 +2,7 @@ import logging
 from typing import List
 
 from core.supabase import get_supabase
-from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, SLOT_TO_TIMINGS
+from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
 
 logger = logging.getLogger("backend.services.replacement")
 
@@ -29,38 +29,89 @@ def _is_tagged(row: dict, slot_col: str) -> bool:
         return False
 
 
+def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
+    """
+    Compute GL for a list of recipe rows.
+    GL = GI * max(0, Carbohydrate_g - TotalDietaryFibre_FIBTG_g) / 100
+    GI is fetched from SubCategory_foods_GI_GL keyed by Recipe_Category (stored as Code).
+    Returns {Recipe_Code: GL}.
+    """
+    if not recipe_rows:
+        return {}
+
+    categories = list({str(row.get("Recipe_Category") or "").strip() for row in recipe_rows if row.get("Recipe_Category")})
+    gi_map: dict[str, float] = {}
+    if categories:
+        gi_resp = (
+            sb.table("SubCategory_foods_GI_GL")
+            .select("Code, GI_Avg")
+            .in_("Code", categories)
+            .execute()
+        )
+        gi_map = {
+            str(r["Code"]).strip(): float(r.get("GI_Avg") or 0)
+            for r in (gi_resp.data or [])
+        }
+
+    result: dict[str, float] = {}
+    for row in recipe_rows:
+        gi = gi_map.get(str(row.get("Recipe_Category") or "").strip(), 0.0)
+        carb = float(row.get("Carbohydrate_g") or 0)
+        fiber = float(row.get("TotalDietaryFibre_FIBTG_g") or 0)
+        result[str(row["Recipe_Code"])] = gi * max(0.0, carb - fiber) / 100.0
+
+    return result
+
+
 def get_preapproved_replacements(
     date: str,
     day: int,
     meal_slot: MealSlot,
     recipe_codes: List[str],
-) -> List[List[dict]]:
+    recipe_quantities: List[float] | None = None,
+) -> ReplacementsResponse:
     """
     For each recipe in the combination, find up to 3 same-subcategory alternatives
-    that are tagged for the given meal slot.
+    that are tagged for the given meal slot, ranked by GL proximity to the original.
     Transpose into up to 3 alternate combinations (one pick per position).
+    Returns original_gl (total meal GL at given quantities) alongside alternatives.
     """
     sb = get_supabase()
     slot_col = _SLOT_TAG_COL.get(meal_slot)
 
-    per_recipe_alts: list[list[dict]] = []
+    # Pad/default quantities to 1.0 per recipe
+    quantities: list[float] = list(recipe_quantities or [])
+    while len(quantities) < len(recipe_codes):
+        quantities.append(1.0)
 
-    for rc in recipe_codes:
+    per_recipe_alts: list[list[dict]] = []
+    total_original_gl: float = 0.0
+
+    for rc, qty in zip(recipe_codes, quantities):
         rc = str(rc).strip()
 
-        # Fetch this recipe's subcategory
-        target_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Category").eq("Recipe_Code", rc).execute()
+        # Fetch this recipe's subcategory and nutrients needed for GL
+        target_resp = (
+            sb.table("Recipe")
+            .select("Recipe_Code, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
+            .eq("Recipe_Code", rc)
+            .execute()
+        )
         if not target_resp.data:
             continue
 
-        subcat = target_resp.data[0].get("Recipe_Category", "")
+        row0 = target_resp.data[0]
+        subcat = row0.get("Recipe_Category", "")
         if not subcat:
             continue
 
-        # Fetch a larger pool of same-subcategory candidates to allow for slot filtering
+        original_gl = _compute_gl_map(sb, [row0]).get(rc, 0.0)
+        total_original_gl += original_gl * qty
+
+        # Fetch a larger pool of same-subcategory candidates for slot filtering + GL ranking
         candidate_resp = (
             sb.table("Recipe")
-            .select("Recipe_Code, Recipe_Name")
+            .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
             .eq("Recipe_Category", subcat)
             .neq("Recipe_Code", rc)
             .limit(20)
@@ -80,12 +131,17 @@ def get_preapproved_replacements(
             tagged_codes = {row["Recipe_Code"] for row in (tag_resp.data or []) if _is_tagged(row, slot_col)}
             candidates = [row for row in candidates if row["Recipe_Code"] in tagged_codes]
 
+        # Compute GL for all candidates in one batch GI lookup, then rank by proximity to original
+        gl_map = _compute_gl_map(sb, candidates)
+        candidates.sort(key=lambda row: abs(gl_map.get(str(row["Recipe_Code"]), 0.0) - original_gl))
+
         alts = [
             {
                 "recipe_code": row["Recipe_Code"],
                 "recipe_name": row.get("Recipe_Name") or "",
-                "quantity": 1.0,
+                "quantity": qty,
                 "unit": "serving",
+                "gl": round(gl_map.get(str(row["Recipe_Code"]), 0.0) * qty, 2),
             }
             for row in candidates[:3]
         ]
@@ -97,7 +153,13 @@ def get_preapproved_replacements(
         if combo:
             result_combos.append(combo)
 
-    return result_combos
+    return ReplacementsResponse(
+        date=date,
+        day=day,
+        meal_slot=meal_slot,
+        original_gl=round(total_original_gl, 2),
+        alternatives=result_combos,
+    )
 
 
 def request_on_demand_replacement(

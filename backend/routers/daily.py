@@ -68,19 +68,20 @@ def get_replacements(
     day: int = Query(..., description="Day number 1–7"),
     meal_slot: MealSlot = Query(...),
     recipe_codes: List[str] = Query(..., description="Current combination recipe codes"),
+    recipe_quantities: List[float] = Query(default=[], description="Serving quantities for each recipe code (same order); defaults to 1.0"),
     user_id: str = Depends(get_current_user),
 ):
-    """Return 3 pre-approved alternate combinations for the given slot and combination."""
+    """Return 3 pre-approved alternate combinations for the given slot and combination, ranked by GL proximity."""
     if not recipe_codes:
         raise HTTPException(status_code=400, detail="recipe_codes must not be empty")
 
-    combos = get_preapproved_replacements(
+    return get_preapproved_replacements(
         date=date,
         day=day,
         meal_slot=meal_slot,
         recipe_codes=recipe_codes,
+        recipe_quantities=recipe_quantities or None,
     )
-    return ReplacementsResponse(date=date, day=day, meal_slot=meal_slot, alternatives=combos)
 
 
 @router.post("/replacements/request", response_model=OnDemandReplacementResponse)
