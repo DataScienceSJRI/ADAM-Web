@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { z } from "zod";
 import {
   Card,
   CardContent,
@@ -12,31 +13,50 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 
-export type BasicDetails = {
-  Age: number;
-  Gender: string;
-  Weight: number;
-  Height: number;
-  Hba1c: number;
-  Activity_levels: string;
-  dietary_type: string;
-  diet_restrictions: string[];
-  breakfast_time: string;   // "HH:MM"
-  lunch_time: string;       // "HH:MM"
-  dinner_time: string;      // "HH:MM"
-  step_count: number;
-};
-
-const GENDERS = ["Male", "Female", "Other", "Prefer not to say"];
-const DIETARY_TYPES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"];
-const DIET_RESTRICTIONS = ["Gluten Free"];
-const ACTIVITY_LEVELS = [
+const GENDERS = ["Male", "Female", "Other"] as const;
+const ACTIVITY_LEVELS_VALUES = [
   "Sedentary",
   "Lightly Active",
   "Moderately Active",
   "Very Active",
   "Extra Active",
-];
+] as const;
+const DIETARY_TYPE_VALUES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"] as const;
+
+export const BasicDetailsSchema = z.object({
+  Age: z.number({ error: "Required" })
+    .int("Must be a whole number")
+    .min(18, "Must be at least 18 years old")
+    .max(120, "Must be 120 or below"),
+  Gender: z.enum(GENDERS, "Required"),
+  Weight: z.number({ error: "Required" })
+    .min(10, "Must be at least 10 kg")
+    .max(300, "Must be 300 kg or below"),
+  Height: z.number({ error: "Required" })
+    .min(50, "Must be at least 50 cm")
+    .max(250, "Must be 250 cm or below"),
+  Hba1c: z.number()
+    .refine(v => v === 0 || (v >= 3 && v <= 20), "Must be between 3 and 20 %"),
+  Activity_levels: z.enum(ACTIVITY_LEVELS_VALUES, "Required"),
+  dietary_type: z.enum(DIETARY_TYPE_VALUES, "Required"),
+  diet_restrictions: z.array(z.string()),
+  breakfast_time: z.string(),
+  lunch_time: z.string(),
+  dinner_time: z.string(),
+  step_count: z.number()
+    .min(0)
+    .max(100000, "Must be 100,000 or below"),
+});
+
+export type BasicDetails = z.infer<typeof BasicDetailsSchema>;
+
+// Loose type used for internal form state before validation
+type FormState = Omit<BasicDetails, "Gender" | "Activity_levels" | "dietary_type"> & {
+  Gender: string;
+  Activity_levels: string;
+  dietary_type: string;
+};
+const DIET_RESTRICTIONS = ["Gluten Free"];
 
 export function BasicDetailsForm({
   defaultValues,
@@ -47,7 +67,7 @@ export function BasicDetailsForm({
   onNext: (data: BasicDetails) => void;
   loading?: boolean;
 }) {
-  const [form, setForm] = useState<BasicDetails>(
+  const [form, setForm] = useState<FormState>(
     defaultValues ?? {
       Age: 0,
       Gender: "",
@@ -63,27 +83,26 @@ export function BasicDetailsForm({
       step_count: 0,
     }
   );
-  const [errors, setErrors] = useState<Partial<Record<keyof BasicDetails, string>>>({});
+  const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({});
 
-  function update<K extends keyof BasicDetails>(key: K, val: BasicDetails[K]) {
+  function update<K extends keyof FormState>(key: K, val: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: val }));
     setErrors((prev) => ({ ...prev, [key]: undefined }));
   }
 
-  function validate(): boolean {
-    const e: Partial<Record<keyof BasicDetails, string>> = {};
-    if (!form.Age || form.Age <= 0) e.Age = "Must be greater than 0";
-    if (!form.Gender) e.Gender = "Required";
-    if (!form.Weight || form.Weight <= 0) e.Weight = "Must be greater than 0";
-    if (!form.Height || form.Height <= 0) e.Height = "Must be greater than 0";
-    if (!form.Activity_levels) e.Activity_levels = "Required";
-    if (!form.dietary_type) e.dietary_type = "Required";
-    setErrors(e);
-    return Object.keys(e).length === 0;
-  }
-
   function handleNext() {
-    if (validate()) onNext(form);
+    const result = BasicDetailsSchema.safeParse(form);
+    if (result.success) {
+      setErrors({});
+      onNext(result.data);
+    } else {
+      const e: Partial<Record<keyof FormState, string>> = {};
+      for (const issue of result.error.issues) {
+        const key = issue.path[0] as keyof FormState;
+        if (!e[key]) e[key] = issue.message;
+      }
+      setErrors(e);
+    }
   }
 
   return (
@@ -99,6 +118,7 @@ export function BasicDetailsForm({
             <Input
               type="number"
               min={1}
+              max={120}
               value={form.Age || ""}
               onChange={(e) => update("Age", parseInt(e.target.value) || 0)}
               placeholder="30"
@@ -117,9 +137,7 @@ export function BasicDetailsForm({
             >
               <option value="">Select…</option>
               {GENDERS.map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
+                <option key={g} value={g}>{g}</option>
               ))}
             </select>
             {errors.Gender && (
@@ -133,7 +151,8 @@ export function BasicDetailsForm({
             <label className="text-sm font-medium">Weight (kg)</label>
             <Input
               type="number"
-              min={1}
+              min={10}
+              max={300}
               step="0.1"
               value={form.Weight || ""}
               onChange={(e) => update("Weight", parseFloat(e.target.value) || 0)}
@@ -148,7 +167,8 @@ export function BasicDetailsForm({
             <label className="text-sm font-medium">Height (cm)</label>
             <Input
               type="number"
-              min={1}
+              min={50}
+              max={250}
               step="0.1"
               value={form.Height || ""}
               onChange={(e) => update("Height", parseFloat(e.target.value) || 0)}
@@ -167,12 +187,14 @@ export function BasicDetailsForm({
           </label>
           <Input
             type="number"
-            min={0}
+            min={3}
+            max={20}
             step="0.1"
             value={form.Hba1c || ""}
             onChange={(e) => update("Hba1c", parseFloat(e.target.value) || 0)}
             placeholder="e.g. 5"
           />
+          {errors.Hba1c && <p className="text-xs text-destructive">{errors.Hba1c}</p>}
         </div>
 
         <div className="space-y-1.5">
@@ -183,10 +205,8 @@ export function BasicDetailsForm({
             className="w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <option value="">Select…</option>
-            {ACTIVITY_LEVELS.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
+            {ACTIVITY_LEVELS_VALUES.map((a) => (
+              <option key={a} value={a}>{a}</option>
             ))}
           </select>
           {errors.Activity_levels && (
@@ -202,10 +222,8 @@ export function BasicDetailsForm({
             className="w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
           >
             <option value="">Select…</option>
-            {DIETARY_TYPES.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
+            {DIETARY_TYPE_VALUES.map((d) => (
+              <option key={d} value={d}>{d}</option>
             ))}
           </select>
           {errors.dietary_type && (
@@ -277,10 +295,12 @@ export function BasicDetailsForm({
           <Input
             type="number"
             min={0}
+            max={100000}
             value={form.step_count || ""}
             onChange={(e) => update("step_count", parseInt(e.target.value) || 0)}
             placeholder="e.g. 6000"
           />
+          {errors.step_count && <p className="text-xs text-destructive">{errors.step_count}</p>}
         </div>
 
         <div className="flex justify-end pt-2">
