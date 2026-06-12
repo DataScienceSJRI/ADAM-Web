@@ -7,11 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
 from core.supabase import get_supabase
 from models.schemas import (
+    DailyMealItem,
     DailyPlanResponse,
     MealSlot,
     OnDemandReplacementRequest,
     OnDemandReplacementResponse,
     ReplacementsResponse,
+    TimingSummary,
 )
 from services.replacement import get_preapproved_replacements, request_on_demand_replacement
 
@@ -59,7 +61,68 @@ def get_daily_plan(
         .eq("Date", target_date)
         .execute()
     )
-    return DailyPlanResponse(date=target_date, meals=result.data)
+
+    # Fetch GL data: GL per recipe, Meal_GL per timing
+    gl_result = (
+        sb.table("FinalSummary")
+        .select("Meal_Time, Recipe_Code, GL, Meal_GL")
+        .eq("user_id", user_id)
+        .eq("plan_id", active_plan_id)
+        .eq("Date", target_date)
+        .execute()
+    )
+
+    # Build lookup maps from FinalSummary
+    gl_by_item: dict = {}       # (Meal_Time, Recipe_Code) → GL
+    meal_gl_by_timing: dict = {}  # Meal_Time → Meal_GL (first non-null wins)
+    for row in (gl_result.data or []):
+        timing = (row.get("Meal_Time") or "").strip()
+        code = (row.get("Recipe_Code") or "").strip()
+        gl = row.get("GL")
+        meal_gl = row.get("Meal_GL")
+        if timing and code:
+            gl_by_item[(timing, code)] = gl
+        if timing and meal_gl is not None and timing not in meal_gl_by_timing:
+            meal_gl_by_timing[timing] = meal_gl
+
+    # Attach per-item GL and accumulate per-timing kcal
+    meals: List[DailyMealItem] = []
+    kcal_by_timing: dict = {}
+    seen_timings: list = []
+    for row in (result.data or []):
+        timing = (row.get("Timings") or "").strip()
+        code = (row.get("Food_Name_desc") or "").strip()
+        row["GL"] = gl_by_item.get((timing, code))
+
+        kcal = row.get("Energy_kcal")
+        if timing:
+            if kcal is not None:
+                kcal_by_timing[timing] = kcal_by_timing.get(timing, 0.0) + kcal
+            if timing not in seen_timings:
+                seen_timings.append(timing)
+
+        meals.append(DailyMealItem(**row))
+
+    # Build per-timing summaries preserving meal order
+    by_timing = [
+        TimingSummary(
+            timing=t,
+            total_kcal=round(kcal_by_timing[t], 1) if t in kcal_by_timing else None,
+            total_gl=round(meal_gl_by_timing[t], 2) if t in meal_gl_by_timing else None,
+        )
+        for t in seen_timings
+    ]
+
+    total_kcal_val = sum(kcal_by_timing.values()) if kcal_by_timing else None
+    total_gl_val = sum(meal_gl_by_timing.values()) if meal_gl_by_timing else None
+
+    return DailyPlanResponse(
+        date=target_date,
+        meals=meals,
+        total_kcal=round(total_kcal_val, 1) if total_kcal_val is not None else None,
+        total_gl=round(total_gl_val, 2) if total_gl_val is not None else None,
+        by_timing=by_timing,
+    )
 
 
 @router.get("/replacements", response_model=ReplacementsResponse)

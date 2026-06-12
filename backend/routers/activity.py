@@ -19,7 +19,7 @@ def activity_log(body: ActivityLogRequest, user_id: str = Depends(get_current_us
         pa_name=body.pa_name,
         duration_min=body.duration_min,
         intensity=body.intensity,
-        time_of_day=body.time_of_day,
+        date=body.date,
     )
     return ActivityLogResponse(status="ok", activity_id=activity_id)
 

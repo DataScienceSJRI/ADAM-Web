@@ -211,7 +211,7 @@ export default function PlanPage() {
     return (
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">My Plans</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Meal Plans</h1>
           <p className="text-muted-foreground">Your personalised meal plan history.</p>
         </div>
         <div className="rounded-xl border p-10 flex flex-col items-center justify-center text-center gap-6 min-h-64">
@@ -269,8 +269,8 @@ export default function PlanPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">My Plans</h1>
-        <p className="text-muted-foreground">Your personalised meal plan history.</p>
+        <h1 className="text-2xl font-bold tracking-tight">Meal Plans</h1>
+        <p className="text-muted-foreground">All the personalised meal plan history.</p>
       </div>
 
       {timedOut && (

@@ -93,9 +93,9 @@ class ActivityLogRequest(BaseModel):
     pa_name: str
     duration_min: int
     intensity: IntensityLevel
-    time_of_day: TimeOfDay
+    date: Optional[str] = None
 
-    model_config = {"json_schema_extra": {"example": {"pa_name": "Walking", "duration_min": 30, "intensity": "Light", "time_of_day": "Morning"}}}
+    model_config = {"json_schema_extra": {"example": {"pa_name": "Walking", "duration_min": 30, "intensity": "Light", "date": "2026-06-12"}}}
 
 
 class MealReactionRequest(BaseModel):
@@ -211,13 +211,23 @@ class DailyMealItem(BaseModel):
     Food_Qty: Optional[float] = None
     R_desc: Optional[str] = None
     Energy_kcal: Optional[float] = None
+    GL: Optional[float] = None
 
     model_config = {"extra": "allow"}
+
+
+class TimingSummary(BaseModel):
+    timing: str
+    total_kcal: Optional[float] = None
+    total_gl: Optional[float] = None
 
 
 class DailyPlanResponse(BaseModel):
     date: str
     meals: List[DailyMealItem]
+    total_kcal: Optional[float] = None
+    total_gl: Optional[float] = None
+    by_timing: List[TimingSummary] = []
 
 
 class ReplacementsResponse(BaseModel):

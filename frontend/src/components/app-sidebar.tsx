@@ -20,7 +20,6 @@ import {
   CalendarDays,
   History,
   Users,
-  UserPlus,
   SlidersHorizontal,
 } from "lucide-react";
 import Link from "next/link";
@@ -29,14 +28,18 @@ import { UserNav } from "./user-nav";
 
 const studyItems = [
   { title: "Users", href: "/dashboard/users", icon: Users },
-  { title: "Add New User", href: "/dashboard/users/new", icon: UserPlus },
   { title: "Preferences", href: "/dashboard/preferences", icon: SlidersHorizontal },
 ];
 
 const planItems = [
   { title: "Recommendations", href: "/dashboard/recommendations", icon: LayoutDashboard },
-  { title: "My Plans", href: "/dashboard/plan", icon: CalendarDays },
+  { title: "Plans", href: "/dashboard/plan", icon: CalendarDays },
   { title: "Session History", href: "/dashboard/sessions", icon: History },
+];
+
+const logItems = [
+  { title: 'Food Logs', href: '/dashboard/logs/food', icon: ClipboardList },
+  { title: 'Feedback', href: '/dashboard/logs/feedback', icon: Heart },
 ];
 
 const setupItems = [
@@ -90,6 +93,24 @@ export function AppSidebar({ role }: { role: string }) {
           <SidebarGroupContent>
             <SidebarMenu>
               {planItems.map((item) => (
+                <SidebarMenuItem key={item.href}>
+                  <SidebarMenuButton asChild isActive={pathname === item.href}>
+                    <Link href={item.href}>
+                      <item.icon className="h-4 w-4" />
+                      <span>{item.title}</span>
+                    </Link>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              ))}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+
+        <SidebarGroup>
+          <SidebarGroupLabel>Dietary Logs</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {logItems.map((item) => (
                 <SidebarMenuItem key={item.href}>
                   <SidebarMenuButton asChild isActive={pathname === item.href}>
                     <Link href={item.href}>
