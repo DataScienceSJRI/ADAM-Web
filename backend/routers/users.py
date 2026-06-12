@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core.auth import get_current_user
@@ -36,14 +37,19 @@ def create_participant(
     """Create a new participant account. Only coordinators and admins can do this."""
     sb = get_supabase()
 
-    # Auto-generate next participant ID (P001, P002, ...)
+    # Auto-generate next participant ID (P001_JOHN, P002_PRIYA, ...)
     existing = sb.table("UserRoles").select("participant_id").eq("role", "participant").execute()
     max_num = 0
     for row in (existing.data or []):
         pid = row.get("participant_id") or ""
-        if pid.upper().startswith("P") and pid[1:].isdigit():
-            max_num = max(max_num, int(pid[1:]))
-    participant_id = f"P{max_num + 1:03d}"
+        m = re.match(r"^P(\d+)", pid.upper())
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+
+    # Build name slug: first word of display_name, uppercase letters/digits only, max 10 chars
+    first_word = (body.display_name.strip().split()[0] if body.display_name.strip() else "")
+    name_slug = re.sub(r"[^A-Z0-9]", "", first_word.upper())[:10]
+    participant_id = f"P{max_num + 1:03d}_{name_slug}" if name_slug else f"P{max_num + 1:03d}"
 
     email = f"{participant_id}@adam.participant"
 
