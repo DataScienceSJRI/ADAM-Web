@@ -106,6 +106,7 @@ const MEAL_ORDER = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 export default function RecommendationsPage() {
   const searchParams = useSearchParams();
   const planParam = searchParams.get("plan");
+  const userParam = searchParams.get("user");
 
   const [rows, setRows] = useState<RecommendationRow[]>([]);
   const [plans, setPlans] = useState<PlanOption[]>([]);
@@ -129,12 +130,14 @@ export default function RecommendationsPage() {
       if (!user?.email) return;
 
       const isAdmin = user.email === "test@example.com";
+      // userParam lets coordinators view a specific participant's plan
+      const targetUserId = userParam ?? (isAdmin ? null : user.email);
       let recQuery = supabase
         .from("Recommendation")
         .select("Pkey, plan_id, user_id, onboarding_id, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, WeekNo, Energy_kcal")
         .order("Pkey", { ascending: false })
         .limit(5000);
-      if (!isAdmin) recQuery = recQuery.eq("user_id", user.email);
+      if (targetUserId) recQuery = recQuery.eq("user_id", targetUserId);
       const { data: myRecData, error: recErr } = await recQuery;
 
       if (recErr) { setError(recErr.message); setLoading(false); return; }
@@ -340,7 +343,11 @@ export default function RecommendationsPage() {
     <div className="space-y-5">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Recommendations</h1>
-        <p className="text-muted-foreground">Your personalised 7-day meal plan.</p>
+        <p className="text-muted-foreground">
+          {userParam
+            ? <><span className="font-medium text-foreground">{userParam}</span> — 7-day meal plan.</>
+            : "Your personalised 7-day meal plan."}
+        </p>
       </div>
 
       {/* Admin: owner tabs */}

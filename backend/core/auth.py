@@ -59,4 +59,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     email: str | None = payload.get("email")
     if not email:
         raise _CREDENTIALS_EXCEPTION
+    # Participant accounts use P001@adam.participant (Supabase lowercases emails,
+    # so it arrives as p001@adam.participant). Strip the domain and uppercase so
+    # the result always matches the stored user_id ("P001").
+    if email.endswith("@adam.participant"):
+        return email.split("@")[0].upper()
     return email

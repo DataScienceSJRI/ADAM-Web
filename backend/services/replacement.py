@@ -21,6 +21,14 @@ _SLOT_TAG_COL: dict = {
 }
 
 
+def _is_tagged(row: dict, slot_col: str) -> bool:
+    """Return True when a RecipeTagging row's slot column equals 1 (handles float strings like '1.0')."""
+    try:
+        return int(float(row.get(slot_col) or 0)) == 1
+    except (TypeError, ValueError):
+        return False
+
+
 def get_preapproved_replacements(
     date: str,
     day: int,
@@ -28,17 +36,19 @@ def get_preapproved_replacements(
     recipe_codes: List[str],
 ) -> List[List[dict]]:
     """
-    For each recipe in the combination, find up to 3 same-subcategory alternatives.
-    Transpose into 3 alternate combinations (one pick per position).
+    For each recipe in the combination, find up to 3 same-subcategory alternatives
+    that are tagged for the given meal slot.
+    Transpose into up to 3 alternate combinations (one pick per position).
     """
     sb = get_supabase()
+    slot_col = _SLOT_TAG_COL.get(meal_slot)
 
     per_recipe_alts: list[list[dict]] = []
 
     for rc in recipe_codes:
         rc = str(rc).strip()
 
-        # Fetch just this recipe to get its subcategory
+        # Fetch this recipe's subcategory
         target_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Category").eq("Recipe_Code", rc).execute()
         if not target_resp.data:
             continue
@@ -47,15 +57,28 @@ def get_preapproved_replacements(
         if not subcat:
             continue
 
-        # Fetch alternatives in the same subcategory (exclude the current recipe)
-        alts_resp = (
+        # Fetch a larger pool of same-subcategory candidates to allow for slot filtering
+        candidate_resp = (
             sb.table("Recipe")
             .select("Recipe_Code, Recipe_Name")
             .eq("Recipe_Category", subcat)
             .neq("Recipe_Code", rc)
-            .limit(3)
+            .limit(20)
             .execute()
         )
+        candidates = candidate_resp.data or []
+
+        # Filter candidates by meal-slot tag using Python-side parsing (column stores "1.0"/"0.0" strings)
+        if slot_col and candidates:
+            cand_codes = [row["Recipe_Code"] for row in candidates]
+            tag_resp = (
+                sb.table("RecipeTagging")
+                .select(f"Recipe_Code, {slot_col}")
+                .in_("Recipe_Code", cand_codes)
+                .execute()
+            )
+            tagged_codes = {row["Recipe_Code"] for row in (tag_resp.data or []) if _is_tagged(row, slot_col)}
+            candidates = [row for row in candidates if row["Recipe_Code"] in tagged_codes]
 
         alts = [
             {
@@ -64,7 +87,7 @@ def get_preapproved_replacements(
                 "quantity": 1.0,
                 "unit": "serving",
             }
-            for row in (alts_resp.data or [])
+            for row in candidates[:3]
         ]
         per_recipe_alts.append(alts)
 
@@ -82,6 +105,7 @@ def request_on_demand_replacement(
     date: str,
     meal_slot: MealSlot,
     recipe_codes: List[str],
+    original_recipe_codes: List[str] | None = None,
 ) -> OnDemandReplacementResponse:
     """
     Validate proposed recipe codes for the meal slot, compute serving quantities
@@ -99,7 +123,7 @@ def request_on_demand_replacement(
         logger.info("on_demand: possible=False — recipe not found in Recipe table")
         return OnDemandReplacementResponse(possible=False)
 
-    # Check meal-slot tag in RecipeTagging
+    # Check meal-slot tag in RecipeTagging — every requested code must have a row and be tagged
     slot_col = _SLOT_TAG_COL.get(meal_slot)
     if slot_col:
         tag_resp = (
@@ -109,13 +133,13 @@ def request_on_demand_replacement(
             .execute()
         )
         logger.info("on_demand: tagging rows=%s", tag_resp.data)
-        for row in (tag_resp.data or []):
-            try:
-                tagged = int(float(row.get(slot_col) or 0)) == 1
-            except (TypeError, ValueError):
-                tagged = False
-            if not tagged:
-                logger.info("on_demand: possible=False — %s not tagged for %s (value=%s)", row["Recipe_Code"], slot_col, row.get(slot_col))
+        tag_map = {row["Recipe_Code"]: row for row in (tag_resp.data or [])}
+        for rc in recipe_codes:
+            if rc not in tag_map:
+                logger.info("on_demand: possible=False — %s has no RecipeTagging row", rc)
+                return OnDemandReplacementResponse(possible=False)
+            if not _is_tagged(tag_map[rc], slot_col):
+                logger.info("on_demand: possible=False — %s not tagged for %s (value=%s)", rc, slot_col, tag_map[rc].get(slot_col))
                 return OnDemandReplacementResponse(possible=False)
 
     # Compute servings based on energy target
@@ -123,11 +147,13 @@ def request_on_demand_replacement(
     energy_per_recipe = target_energy / len(found)
 
     combination: list[RecipeWithQty] = []
+    energy_by_code: dict[str, float] = {}
     for row in found:
         base_kj = float(row.get("Energy_ENERC_KJ") or 0)
         base_kcal = (base_kj / 4.184) if base_kj > 0 else 100.0
         serving = round(energy_per_recipe / base_kcal, 2)
         serving = max(0.25, min(serving, 3.0))
+        energy_by_code[str(row["Recipe_Code"])] = round(serving * base_kcal, 1)
         combination.append(
             RecipeWithQty(
                 recipe_code=str(row["Recipe_Code"]),
@@ -137,33 +163,50 @@ def request_on_demand_replacement(
             )
         )
 
-    # Update Recommendation table
+    # Update Recommendation table — preserve plan_id, WeekNo, and onboarding_id from existing rows
     try:
         timings = SLOT_TO_TIMINGS[meal_slot]
-        existing = (
+
+        # Fetch all rows for this slot to get plan metadata
+        all_slot_rows = (
             sb.table("Recommendation")
-            .select("Pkey, plan_id")
+            .select("Pkey, plan_id, WeekNo, onboarding_id, Food_Name_desc")
             .eq("user_id", user_id)
             .eq("Date", date)
             .eq("Timings", timings)
             .execute()
-        )
-        existing_plan_id: str | None = None
-        if existing.data:
-            existing_plan_id = existing.data[0].get("plan_id")
-            pkeys = [r["Pkey"] for r in existing.data]
-            sb.table("Recommendation").delete().in_("Pkey", pkeys).execute()
+        ).data or []
+
+        existing_plan_id: str | None = all_slot_rows[0].get("plan_id") if all_slot_rows else None
+        existing_week_no: int | None = all_slot_rows[0].get("WeekNo") if all_slot_rows else None
+        existing_onboarding_id: str | None = all_slot_rows[0].get("onboarding_id") if all_slot_rows else None
+
+        if original_recipe_codes:
+            # Only delete the specific recipes being replaced, leave the rest of the combo intact
+            pkeys_to_delete = [
+                r["Pkey"] for r in all_slot_rows
+                if r.get("Food_Name_desc") in original_recipe_codes
+            ]
+        else:
+            # No original specified — replace the entire slot (legacy behaviour)
+            pkeys_to_delete = [r["Pkey"] for r in all_slot_rows]
+
+        if pkeys_to_delete:
+            sb.table("Recommendation").delete().in_("Pkey", pkeys_to_delete).execute()
 
         sb.table("Recommendation").insert(
             [
                 {
                     "user_id": user_id,
                     "plan_id": existing_plan_id,
+                    "onboarding_id": existing_onboarding_id,
+                    "WeekNo": existing_week_no,
                     "Date": date,
                     "Timings": timings,
                     "Food_Name": item.recipe_name,
                     "Food_Name_desc": item.recipe_code,
                     "Food_Qty": item.quantity,
+                    "Energy_kcal": energy_by_code.get(item.recipe_code),
                 }
                 for item in combination
             ]

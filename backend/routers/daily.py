@@ -101,4 +101,5 @@ def request_replacement(
         date=body.date,
         meal_slot=body.meal_slot,
         recipe_codes=body.recipe_codes,
+        original_recipe_codes=body.original_recipe_codes,
     )

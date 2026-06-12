@@ -6,6 +6,7 @@ from typing import Optional, List
 class GeneratePlanRequest(BaseModel):
     week_no: int = 1
     onboarding_id: Optional[str] = None
+    target_user_id: Optional[str] = None
 
     model_config = {"json_schema_extra": {"example": {"week_no": 1, "onboarding_id": "a1b2c3d4-0000-0000-0000-000000000000"}}}
 
@@ -38,7 +39,7 @@ class MealSlot(str, Enum):
     BREAKFAST = "breakfast"
     LUNCH = "lunch"
     DINNER = "dinner"
-    SNACK = "snack"
+    SNACK = "snacks"
 
 
 # DB Recommendation.Timings stores "Snacks" (plural) for snack slot
@@ -112,10 +113,12 @@ class DietRecallLogRequest(BaseModel):
     date: Optional[str] = None
     meal_slot: MealSlot
     did_eat_as_planned: bool
-    recipe_code: Optional[str] = None
-    actual_quantity: Optional[str] = None
+    recipe_code: Optional[str] = None              # single recipe (legacy)
+    recipe_codes: Optional[List[str]] = None       # multiple recipes (preferred)
+    actual_quantity: Optional[str] = None          # single quantity (legacy)
+    actual_quantities: Optional[List[str]] = None  # one per recipe_codes entry (preferred)
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False, "recipe_code": "A000002", "actual_quantity": "2"}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False, "recipe_codes": ["B000029", "A001234"], "actual_quantities": ["0.8", "1.0"]}}}
 
 
 class DietRecallImageRequest(BaseModel):
@@ -138,8 +141,9 @@ class OnDemandReplacementRequest(BaseModel):
     date: str
     meal_slot: MealSlot
     recipe_codes: List[str]
+    original_recipe_codes: Optional[List[str]] = None  # recipes being replaced; if omitted, replaces the whole slot
 
-    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "breakfast", "recipe_codes": ["A001745"]}}}
+    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "breakfast", "recipe_codes": ["A001745"], "original_recipe_codes": ["A002798"]}}}
 
 
 class OnDemandReplacementResponse(BaseModel):

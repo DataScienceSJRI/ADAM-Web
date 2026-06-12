@@ -10,8 +10,20 @@ logger = logging.getLogger("backend.routers.auth")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _clean_user_id(email: str | None) -> str:
+    """Return the plain participant ID for @adam.participant accounts, full email otherwise.
+    Supabase lowercases emails, so p001@adam.participant must be uppercased back to P001."""
+    if not email:
+        return ""
+    if email.endswith("@adam.participant"):
+        return email.split("@")[0].upper()
+    return email
+
+
 def _supabase_login(email: str, password: str) -> LoginResponse:
     sb = get_supabase()
+    if "@" not in email:
+        email = f"{email}@adam.participant"
     try:
         resp = sb.auth.sign_in_with_password({"email": email, "password": password})
     except Exception as exc:
@@ -24,7 +36,7 @@ def _supabase_login(email: str, password: str) -> LoginResponse:
     return LoginResponse(
         access_token=resp.session.access_token,
         refresh_token=resp.session.refresh_token,
-        user_id=resp.user.email,
+        user_id=_clean_user_id(resp.user.email),
     )
 
 
@@ -57,7 +69,7 @@ def refresh(body: RefreshRequest):
     return LoginResponse(
         access_token=resp.session.access_token,
         refresh_token=resp.session.refresh_token,
-        user_id=resp.user.email,
+        user_id=_clean_user_id(resp.user.email),
     )
 
 

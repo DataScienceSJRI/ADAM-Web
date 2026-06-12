@@ -16,7 +16,7 @@ def _clean(row: dict) -> dict:
     return {k: (None if (isinstance(v, float) and v != v) else v) for k, v in row.items()}
 
 
-_SLOT_COL_MAP = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snack"}
+_SLOT_COL_MAP = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snacks": "Snack"}
 
 
 @router.get("")
@@ -24,7 +24,7 @@ def get_recipes(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),
     search: Optional[str] = Query(None, description="Plain-text search on recipe name"),
-    meal_slot: Optional[str] = Query(None, description="Filter by slot: breakfast, lunch, dinner, snack"),
+    meal_slot: Optional[str] = Query(None, description="Filter by slot: breakfast, lunch, dinner, snacks"),
     user_id: str = Depends(get_current_user),
 ):
     """Return paginated recipes. Use ?search= for plain-text name search, ?meal_slot= to filter by slot."""
@@ -66,7 +66,7 @@ def get_recipes(
 @router.get("/search")
 def search_recipes(
     q: str = Query(..., min_length=1, description="Plain-text recipe name to search"),
-    meal_slot: Optional[str] = Query(None, description="Filter by slot: breakfast, lunch, dinner, snack"),
+    meal_slot: Optional[str] = Query(None, description="Filter by slot: breakfast, lunch, dinner, snacks"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user_id: str = Depends(get_current_user),

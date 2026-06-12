@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
 const MEAL_TIMES = ["Breakfast", "Lunch", "Dinner", "Snacks"] as const;
@@ -29,6 +30,26 @@ type DetailsRow = {
 };
 
 export default function PreferencesPage() {
+  return (
+    <Suspense fallback={
+      <div className="space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">Preferences</h1>
+        <div className="space-y-2">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-16 rounded-lg border bg-muted/30 animate-pulse" />
+          ))}
+        </div>
+      </div>
+    }>
+      <PreferencesContent />
+    </Suspense>
+  );
+}
+
+function PreferencesContent() {
+  const searchParams = useSearchParams();
+  const targetUserParam = searchParams.get("user");
+
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<PrefRow[]>([]);
@@ -38,20 +59,29 @@ export default function PreferencesPage() {
   const [prefLoading, setPrefLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>("Breakfast");
+  const [viewingUser, setViewingUser] = useState<string | null>(null);
 
-  // Load sessions + subcategory map once
+  // Load sessions + subcategory map when target user changes
   useEffect(() => {
+    setSessions([]);
+    setSelectedId(null);
+    setPrefs([]);
+    setDetails(null);
+    setLoading(true);
     let cancelled = false;
     async function fetchSessions() {
       const supabase = createClient();
       const { data: { user } } = await supabase.auth.getUser();
       if (!user || cancelled) return;
 
+      const queryUserId = targetUserParam ?? user.email!;
+      setViewingUser(targetUserParam ?? null);
+
       const [sessRes, subCatRes] = await Promise.all([
         supabase
           .from("BE_Onboarding_Sessions")
           .select("onboarding_id, created_at")
-          .eq("user_id", user.email)
+          .eq("user_id", queryUserId)
           .order("created_at", { ascending: false })
           .limit(100),
         supabase
@@ -83,7 +113,7 @@ export default function PreferencesPage() {
     }
     fetchSessions();
     return () => { cancelled = true; };
-  }, []);
+  }, [targetUserParam]);
 
   // Load prefs + details whenever selected session changes
   useEffect(() => {
@@ -151,7 +181,13 @@ export default function PreferencesPage() {
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Preferences</h1>
-        <p className="text-muted-foreground">Your meal preferences from onboarding.</p>
+        <p className="text-muted-foreground">
+          {viewingUser ? (
+            <><span className="font-medium text-foreground">{viewingUser}</span> — meal preferences from onboarding.</>
+          ) : (
+            "Your meal preferences from onboarding."
+          )}
+        </p>
       </div>
 
       {/* Session selector */}

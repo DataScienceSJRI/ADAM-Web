@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { requestPushPermission } from "@/components/onesignal-provider";
 
 const STAGES = [
   { at: 0,   label: "Loading your preferences…",      status: "generating" },
@@ -92,6 +93,8 @@ export default function PlanPage() {
   const [loading, setLoading] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const [backendStatus, setBackendStatus] = useState<string | null>(null);
+  const [notifRequested, setNotifRequested] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
 
   const initialCountRef = useRef<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -120,14 +123,26 @@ export default function PlanPage() {
 
       if (!startedGenerating) return;
 
+      // Seeding elapsed time from when the session was created so that navigating
+      // away and back doesn't reset the counter to zero.
+      if (onboardingIdParam) {
+        const { data: sess } = await supabase
+          .from("BE_Onboarding_Sessions")
+          .select("created_at")
+          .eq("onboarding_id", onboardingIdParam)
+          .maybeSingle();
+        if (sess?.created_at) {
+          const secondsSinceStart = Math.floor((Date.now() - new Date(sess.created_at).getTime()) / 1000);
+          setElapsed(Math.max(0, secondsSinceStart));
+        }
+      }
+
       // Elapsed time ticker
       tickRef.current = setInterval(() => {
         setElapsed(e => e + 1);
       }, 1000);
 
-      // Poll plan_status on BE_Onboarding_Sessions if we have onboarding_id
-      // AND poll Recommendation row count — whichever resolves first wins
-      pollRef.current = setInterval(async () => {
+      const pollGeneration = async () => {
         if (!mounted) { stopPolling(); return; }
 
         // Check session plan_status if onboarding_id is known
@@ -136,7 +151,7 @@ export default function PlanPage() {
             .from("BE_Onboarding_Sessions")
             .select("plan_status")
             .eq("onboarding_id", onboardingIdParam)
-            .single();
+            .maybeSingle();
           if (!mounted) return;
           const status: string | null = sess?.plan_status ?? null;
           if (status && IN_PROGRESS_STATUSES.has(status)) setBackendStatus(status);
@@ -163,7 +178,13 @@ export default function PlanPage() {
           stopPolling();
           router.replace("/dashboard/plan");
         }
-      }, POLL_INTERVAL_MS);
+      };
+
+      // Poll plan_status on BE_Onboarding_Sessions if we have onboarding_id
+      // AND poll Recommendation row count — whichever resolves first wins
+      await pollGeneration();
+      if (!mounted) return;
+      pollRef.current = setInterval(pollGeneration, POLL_INTERVAL_MS);
 
       // Hard timeout fallback
       timeoutRef.current = setTimeout(() => {
@@ -197,7 +218,7 @@ export default function PlanPage() {
           <div className="h-10 w-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
           <div className="space-y-1">
             <p className="text-base font-medium">{stage.label}</p>
-            <p className="text-xs text-muted-foreground">Elapsed: {elapsedLabel} · usually takes ~5 minutes</p>
+            <p className="text-xs text-muted-foreground">Elapsed: {elapsedLabel} · usually takes 5–10 minutes</p>
           </div>
           <div className="w-full max-w-sm space-y-1.5">
             <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
@@ -212,7 +233,34 @@ export default function PlanPage() {
               ))}
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">Please keep this page open</p>
+          {!notifRequested ? (
+            <div className="flex flex-col items-center gap-1">
+              <button
+                onClick={async () => {
+                  setNotifError(null);
+                  const result = await requestPushPermission();
+                  if (result === "granted") {
+                    setNotifRequested(true);
+                  } else if (result === "no_sdk") {
+                    setNotifError("Push notifications are not available in this browser.");
+                  } else if (result === "denied") {
+                    setNotifError("Permission denied — enable notifications in your browser settings.");
+                  } else {
+                    setNotifError("Could not enable notifications. Please try again.");
+                  }
+                }}
+                className="text-xs text-primary underline underline-offset-2 hover:text-primary/80"
+              >
+                Notify me when ready
+              </button>
+              {notifError && (
+                <p className="text-xs text-destructive">{notifError}</p>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">You&apos;ll be notified when your plan is ready.</p>
+          )}
+          <p className="text-xs text-muted-foreground">You can close this page — we&apos;ll notify you.</p>
         </div>
       </div>
     );

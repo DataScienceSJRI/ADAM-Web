@@ -1,12 +1,14 @@
 from supabase import create_client, Client
-from functools import lru_cache
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-@lru_cache(maxsize=1)
+# URL and key are read once at import time; a fresh client is created per call
+# to avoid HTTP/2 stale-connection errors from long-lived connection pools.
+_SUPABASE_URL = os.environ["SUPABASE_URL"]
+_SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+
+
 def get_supabase() -> Client:
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_KEY"]
-    return create_client(url, key)
+    return create_client(_SUPABASE_URL, _SUPABASE_KEY)
