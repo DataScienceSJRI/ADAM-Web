@@ -93,9 +93,9 @@ class ActivityLogRequest(BaseModel):
     pa_name: str
     duration_min: int
     intensity: IntensityLevel
-    time_of_day: TimeOfDay
+    date: Optional[str] = None
 
-    model_config = {"json_schema_extra": {"example": {"pa_name": "Walking", "duration_min": 30, "intensity": "Light", "time_of_day": "Morning"}}}
+    model_config = {"json_schema_extra": {"example": {"pa_name": "Walking", "duration_min": 30, "intensity": "Light", "date": "2026-06-12"}}}
 
 
 class MealReactionRequest(BaseModel):
@@ -213,36 +213,13 @@ class DailyMealItem(BaseModel):
     Energy_kcal: Optional[float] = None
     GL: Optional[float] = None
 
-    model_config = {
-        "extra": "allow",
-        "json_schema_extra": {
-            "example": {
-                "Pkey": 1,
-                "user_id": "user@example.com",
-                "WeekNo": 1,
-                "Date": "2026-06-12",
-                "Timings": "Breakfast",
-                "Food_Name": "Idli",
-                "Food_Name_desc": "A001745",
-                "Food_Qty": 2.0,
-                "R_desc": "pieces",
-                "Energy_kcal": 210.0,
-                "GL": 8.1,
-            }
-        },
-    }
+    model_config = {"extra": "allow"}
 
 
 class TimingSummary(BaseModel):
     timing: str
     total_kcal: Optional[float] = None
     total_gl: Optional[float] = None
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {"timing": "Breakfast", "total_kcal": 420.0, "total_gl": 12.50}
-        }
-    }
 
 
 class DailyPlanResponse(BaseModel):
@@ -251,44 +228,6 @@ class DailyPlanResponse(BaseModel):
     total_kcal: Optional[float] = None
     total_gl: Optional[float] = None
     by_timing: List[TimingSummary] = []
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "date": "2026-06-12",
-                "total_kcal": 1840.5,
-                "total_gl": 47.23,
-                "by_timing": [
-                    {"timing": "Breakfast", "total_kcal": 420.0, "total_gl": 12.50},
-                    {"timing": "Lunch",     "total_kcal": 680.2, "total_gl": 18.40},
-                    {"timing": "Dinner",    "total_kcal": 740.3, "total_gl": 16.33},
-                ],
-                "meals": [
-                    {
-                        "Pkey": 1, "user_id": "user@example.com", "WeekNo": 1,
-                        "Date": "2026-06-12", "Timings": "Breakfast",
-                        "Food_Name": "Idli", "Food_Name_desc": "A001745",
-                        "Food_Qty": 2.0, "R_desc": "pieces",
-                        "Energy_kcal": 210.0, "GL": 8.1,
-                    },
-                    {
-                        "Pkey": 2, "user_id": "user@example.com", "WeekNo": 1,
-                        "Date": "2026-06-12", "Timings": "Breakfast",
-                        "Food_Name": "Coconut Chutney", "Food_Name_desc": "A004981",
-                        "Food_Qty": 1.0, "R_desc": "serving",
-                        "Energy_kcal": 210.0, "GL": 4.4,
-                    },
-                    {
-                        "Pkey": 3, "user_id": "user@example.com", "WeekNo": 1,
-                        "Date": "2026-06-12", "Timings": "Lunch",
-                        "Food_Name": "Rice", "Food_Name_desc": "B000029",
-                        "Food_Qty": 1.5, "R_desc": "cup",
-                        "Energy_kcal": 340.1, "GL": 9.2,
-                    },
-                ],
-            }
-        }
-    }
 
 
 class ReplacementsResponse(BaseModel):
