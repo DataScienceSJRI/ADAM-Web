@@ -155,7 +155,7 @@ export function MealPreferencesForm({
   }, [rows, currentSubTab, search, isVegOnly]);
 
   const REQUIRED_MEAL_TIMES = ["Breakfast", "Lunch", "Dinner"] as const;
-  const MAIN_MIN = 0;
+  const MAIN_MIN = 5;
 
   const incompleteMealTimes = REQUIRED_MEAL_TIMES.filter(
     (mt) => selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length < MAIN_MIN
@@ -167,7 +167,7 @@ export function MealPreferencesForm({
       <CardHeader>
         <CardTitle>Meal Preferences</CardTitle>
         <CardDescription>
-          Select the types of food you typically eat at each meal time.
+          Select at least 5 main dishes for each of Breakfast, Lunch, and Dinner.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -178,6 +178,13 @@ export function MealPreferencesForm({
             const totalCount = selections.filter((s) => s.meal_time === mt).length;
             const isRequired = (REQUIRED_MEAL_TIMES as readonly string[]).includes(mt);
             const done = isRequired ? mainCount >= MAIN_MIN : true;
+            const badgeColor = !isRequired
+              ? "bg-muted text-muted-foreground"
+              : done
+              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+              : mainCount > 0
+              ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
+              : "bg-destructive/15 text-destructive";
             return (
               <button
                 key={mt}
@@ -189,15 +196,9 @@ export function MealPreferencesForm({
                 }`}
               >
                 {mt}
-                {isRequired ? (
-                  <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
-                    done ? "bg-emerald-100 text-emerald-700" : "bg-primary/15 text-primary"
-                  }`}>
-                    {mainCount}/{MAIN_MIN}
-                  </span>
-                ) : totalCount > 0 && (
-                  <span className="ml-1.5 rounded-full bg-muted text-muted-foreground px-1.5 py-0.5 text-[10px] font-semibold">
-                    {totalCount}
+                {(isRequired || totalCount > 0) && (
+                  <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${badgeColor}`}>
+                    {isRequired ? `${mainCount}/${MAIN_MIN}` : totalCount}
                   </span>
                 )}
               </button>
@@ -268,19 +269,13 @@ export function MealPreferencesForm({
 
         <div className="space-y-2 pt-2">
           {!canProceed && (
-            <div className="flex flex-wrap gap-1.5">
+            <p className="text-xs text-destructive">
+              Select at least {MAIN_MIN} main dishes for:{" "}
               {incompleteMealTimes.map((mt) => {
                 const count = selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length;
-                return (
-                  <span
-                    key={mt}
-                    className="rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground"
-                  >
-                    {mt}: {count}/{MAIN_MIN} main items
-                  </span>
-                );
-              })}
-            </div>
+                return `${mt} (${count}/${MAIN_MIN})`;
+              }).join(", ")}
+            </p>
           )}
           <div className="flex justify-between items-center">
             <Button variant="outline" onClick={onBack}>
