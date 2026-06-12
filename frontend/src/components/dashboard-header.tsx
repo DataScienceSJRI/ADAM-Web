@@ -7,7 +7,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 
 const PAGE_TITLES: Record<string, string> = {
   "/dashboard/recommendations": "Recommendations",
-  "/dashboard/plan": "My Plans",
+  "/dashboard/plan": "Meal Plans",
   "/dashboard/preferences": "Preferences",
   "/dashboard/sessions": "Session History",
   "/onboarding": "Onboarding",
