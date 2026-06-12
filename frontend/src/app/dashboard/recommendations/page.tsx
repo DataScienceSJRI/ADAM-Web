@@ -117,6 +117,7 @@ export default function RecommendationsPage() {
   const [glData, setGlData] = useState<GLRow[]>([]);
   const [profiles, setProfiles] = useState<Record<string, UserProfile>>({});
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [participantName, setParticipantName] = useState<string | null>(null);
   const [selectedMeal, setSelectedMeal] = useState<{ date: string; timing: string } | null>(null);
   const [ownerFilter, setOwnerFilter] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -186,6 +187,15 @@ export default function RecommendationsPage() {
       const myProfile: UserProfile = profileMap[user.email] ?? { user_id: user.email, display_name: null };
       if (!profileMap[user.email]) {
         await supabase.from("UserProfiles").upsert({ user_id: user.email });
+      }
+
+      if (userParam) {
+        const { data: roleRow } = await supabase
+          .from("UserRoles")
+          .select("display_name")
+          .eq("user_id", userParam)
+          .maybeSingle();
+        setParticipantName(roleRow?.display_name ?? null);
       }
 
       setRows(allRows);
@@ -345,7 +355,13 @@ export default function RecommendationsPage() {
         <h1 className="text-2xl font-bold tracking-tight">Recommendations</h1>
         <p className="text-muted-foreground">
           {userParam
-            ? <><span className="font-medium text-foreground">{userParam}</span> — 7-day meal plan.</>
+            ? <>
+                <span className="font-medium text-foreground font-mono">{userParam}</span>
+                {participantName && (
+                  <span className="text-foreground"> · {participantName}</span>
+                )}
+                {" — 7-day meal plan."}
+              </>
             : "Your personalised 7-day meal plan."}
         </p>
       </div>

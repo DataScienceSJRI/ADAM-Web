@@ -1,343 +1,201 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { requestPushPermission } from "@/components/onesignal-provider";
 
-const STAGES = [
-  { at: 0,   label: "Loading your preferences…",      status: "generating" },
-  { at: 30,  label: "Scoring recipes for your profile…", status: null },
-  { at: 60,  label: "Running optimisation…",           status: "optimizing" },
-  { at: 300, label: "Finalising your 7-day plan…",    status: "saving" },
-  { at: 420, label: "Almost there…",                  status: null },
-];
-
-// Statuses that mean the task is still in progress — keep polling
-const IN_PROGRESS_STATUSES = new Set(["generating", "optimizing", "saving"]);
-
-type PlanCard = {
-  plan_id: string;
-  start_date: string | null;
-  end_date: string | null;
-  row_count: number;
-  max_pkey: number;
-  onboarding_id: string | null;
+type Participant = {
+  user_id: string;
+  participant_id: string;
+  display_name: string | null;
+  plan_status: string | null;
+  last_plan_at: string | null;
   created_at: string | null;
 };
 
-const POLL_INTERVAL_MS = 5000;
-const POLL_TIMEOUT_MS = 660_000; // 11 minutes — LP solver can take up to ~8 min
-
-async function fetchPlanCards(email: string): Promise<PlanCard[]> {
-  const supabase = createClient();
-  const { data } = await supabase
-    .from("Recommendation")
-    .select("Pkey, plan_id, onboarding_id, Date")
-    .eq("user_id", email)
-    .order("Pkey", { ascending: false })
-    .limit(5000);
-
-  if (!data || data.length === 0) return [];
-
-  const map = new Map<string, PlanCard>();
-  for (const row of data) {
-    const pid = row.plan_id ?? "unknown";
-    if (!map.has(pid)) {
-      map.set(pid, { plan_id: pid, start_date: row.Date, end_date: row.Date, row_count: 0, max_pkey: row.Pkey ?? 0, onboarding_id: row.onboarding_id ?? null, created_at: null });
-    }
-    const p = map.get(pid)!;
-    p.row_count++;
-    if ((row.Pkey ?? 0) > p.max_pkey) p.max_pkey = row.Pkey ?? 0;
-    if (row.Date) {
-      if (!p.start_date || row.Date < p.start_date) p.start_date = row.Date;
-      if (!p.end_date || row.Date > p.end_date) p.end_date = row.Date;
-    }
-  }
-
-  // fetching the timestamsps from the onboarding session to show in the ui -> my plans page. 
-  const onbIds = [...new Set([...map.values()].map((p) => p.onboarding_id).filter(Boolean))] as string[];
-  if (onbIds.length > 0) {
-    const { data: sessions } = await supabase
-      .from("BE_Onboarding_Sessions")
-      .select("onboarding_id, created_at")
-      .in("onboarding_id", onbIds);
-    const sessionMap = new Map<string, string>();
-    for (const s of sessions ?? []) {
-      if (s.onboarding_id) sessionMap.set(s.onboarding_id, s.created_at);
-    }
-    for (const p of map.values()) {
-      if (p.onboarding_id && sessionMap.has(p.onboarding_id)) {
-        p.created_at = sessionMap.get(p.onboarding_id)!;
-      }
-    }
-  }
-
-  return [...map.values()].sort((a, b) =>
-    b.max_pkey - a.max_pkey
-  );
+function PlanBadge({ status }: { status: string | null }) {
+  if (!status)
+    return <span className="text-xs text-muted-foreground">No plan</span>;
+  if (status.startsWith("ok:"))
+    return (
+      <span className="rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400 px-2 py-0.5 text-xs font-medium">
+        Ready
+      </span>
+    );
+  if (["generating", "optimizing", "saving"].includes(status))
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400 px-2 py-0.5 text-xs font-medium">
+        <span className="h-2 w-2 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
+        Generating…
+      </span>
+    );
+  if (status.startsWith("error") || status.includes("No solution"))
+    return (
+      <span className="rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 px-2 py-0.5 text-xs font-medium">
+        Failed
+      </span>
+    );
+  return <span className="text-xs text-muted-foreground">{status}</span>;
 }
 
-export default function PlanPage() {
-  const searchParams = useSearchParams();
+const IN_PROGRESS = new Set(["generating", "optimizing", "saving"]);
+
+export default function ParticipantPlansPage() {
   const router = useRouter();
-  const startedGenerating = searchParams.get("generating") === "true";
-  const onboardingIdParam = searchParams.get("onboarding_id");
-
-  const [generating, setGenerating] = useState(startedGenerating);
-  const [genFailed, setGenFailed] = useState(false);
-  const [failMessage, setFailMessage] = useState<string | null>(null);
-  const [timedOut, setTimedOut] = useState(false);
-  const [plans, setPlans] = useState<PlanCard[]>([]);
+  const [participants, setParticipants] = useState<Participant[]>([]);
   const [loading, setLoading] = useState(true);
-  const [elapsed, setElapsed] = useState(0);
-  const [backendStatus, setBackendStatus] = useState<string | null>(null);
-  const [notifRequested, setNotifRequested] = useState(false);
-  const [notifError, setNotifError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const initialCountRef = useRef<number | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const load = useCallback(async () => {
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) { router.push("/login"); return; }
 
-  const stopPolling = useCallback(() => {
-    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-    if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-    if (tickRef.current) { clearInterval(tickRef.current); tickRef.current = null; }
-  }, []);
+    const res = await fetch("/api/users", {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!res.ok) { setError("Failed to load participants"); setLoading(false); return; }
+    setParticipants(await res.json());
+    setLoading(false);
+  }, [router]);
 
+  useEffect(() => { load(); }, [load]);
+
+  // Poll while any participant has a plan generating
   useEffect(() => {
-    let mounted = true;
-
-    async function init() {
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!mounted || !user?.email) { setLoading(false); return; }
-
-      const initial = await fetchPlanCards(user.email);
-      if (!mounted) return;
-      setPlans(initial);
-      initialCountRef.current = initial.length;
-      setLoading(false);
-
-      if (!startedGenerating) return;
-
-      // Seeding elapsed time from when the session was created so that navigating
-      // away and back doesn't reset the counter to zero.
-      if (onboardingIdParam) {
-        const { data: sess } = await supabase
-          .from("BE_Onboarding_Sessions")
-          .select("created_at")
-          .eq("onboarding_id", onboardingIdParam)
-          .maybeSingle();
-        if (sess?.created_at) {
-          const secondsSinceStart = Math.floor((Date.now() - new Date(sess.created_at).getTime()) / 1000);
-          setElapsed(Math.max(0, secondsSinceStart));
-        }
-      }
-
-      // Elapsed time ticker
-      tickRef.current = setInterval(() => {
-        setElapsed(e => e + 1);
-      }, 1000);
-
-      const pollGeneration = async () => {
-        if (!mounted) { stopPolling(); return; }
-
-        // Check session plan_status if onboarding_id is known
-        if (onboardingIdParam) {
-          const { data: sess } = await supabase
-            .from("BE_Onboarding_Sessions")
-            .select("plan_status")
-            .eq("onboarding_id", onboardingIdParam)
-            .maybeSingle();
-          if (!mounted) return;
-          const status: string | null = sess?.plan_status ?? null;
-          if (status && IN_PROGRESS_STATUSES.has(status)) setBackendStatus(status);
-          if (status && !IN_PROGRESS_STATUSES.has(status)) {
-            stopPolling();
-            if (status.startsWith("ok:")) {
-              const updated = await fetchPlanCards(user.email!);
-              if (mounted) { setPlans(updated); setGenerating(false); router.replace("/dashboard/plan"); }
-            } else {
-              setFailMessage(status);
-              setGenFailed(true);
-              setGenerating(false);
-            }
-            return;
-          }
-        }
-
-        // Fallback: check if new Recommendation rows appeared
-        const updated = await fetchPlanCards(user.email!);
-        if (!mounted) return;
-        if (updated.length > (initialCountRef.current ?? 0)) {
-          setPlans(updated);
-          setGenerating(false);
-          stopPolling();
-          router.replace("/dashboard/plan");
-        }
-      };
-
-      // Poll plan_status on BE_Onboarding_Sessions if we have onboarding_id
-      // AND poll Recommendation row count — whichever resolves first wins
-      await pollGeneration();
-      if (!mounted) return;
-      pollRef.current = setInterval(pollGeneration, POLL_INTERVAL_MS);
-
-      // Hard timeout fallback
-      timeoutRef.current = setTimeout(() => {
-        if (!mounted) return;
-        stopPolling();
-        setGenerating(false);
-        setTimedOut(true);
-      }, POLL_TIMEOUT_MS);
-    }
-
-    init();
-    return () => { mounted = false; stopPolling(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  if (generating) {
-    const stageByStatus = backendStatus ? STAGES.find(s => s.status === backendStatus) : null;
-    const stageByTime = [...STAGES].reverse().find(s => elapsed >= s.at) ?? STAGES[0];
-    const stage = stageByStatus ?? stageByTime;
-    const progressPct = Math.min(95, (elapsed / 480) * 100);
-    const mins = Math.floor(elapsed / 60);
-    const secs = elapsed % 60;
-    const elapsedLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-    return (
-      <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Meal Plans</h1>
-          <p className="text-muted-foreground">Your personalised meal plan history.</p>
-        </div>
-        <div className="rounded-xl border p-10 flex flex-col items-center justify-center text-center gap-6 min-h-64">
-          <div className="h-10 w-10 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-          <div className="space-y-1">
-            <p className="text-base font-medium">{stage.label}</p>
-            <p className="text-xs text-muted-foreground">Elapsed: {elapsedLabel} · usually takes 5–10 minutes</p>
-          </div>
-          <div className="w-full max-w-sm space-y-1.5">
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full rounded-full bg-primary transition-all duration-1000"
-                style={{ width: `${progressPct}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-[10px] text-muted-foreground">
-              {STAGES.slice(0, -1).map((s) => (
-                <span key={s.at} className={elapsed >= s.at ? "text-primary font-medium" : ""}>·</span>
-              ))}
-            </div>
-          </div>
-          {!notifRequested ? (
-            <div className="flex flex-col items-center gap-1">
-              <button
-                onClick={async () => {
-                  setNotifError(null);
-                  const result = await requestPushPermission();
-                  if (result === "granted") {
-                    setNotifRequested(true);
-                  } else if (result === "no_sdk") {
-                    setNotifError("Push notifications are not available in this browser.");
-                  } else if (result === "denied") {
-                    setNotifError("Permission denied — enable notifications in your browser settings.");
-                  } else {
-                    setNotifError("Could not enable notifications. Please try again.");
-                  }
-                }}
-                className="text-xs text-primary underline underline-offset-2 hover:text-primary/80"
-              >
-                Notify me when ready
-              </button>
-              {notifError && (
-                <p className="text-xs text-destructive">{notifError}</p>
-              )}
-            </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">You&apos;ll be notified when your plan is ready.</p>
-          )}
-          <p className="text-xs text-muted-foreground">You can close this page — we&apos;ll notify you.</p>
-        </div>
-      </div>
+    const hasInProgress = participants.some(
+      (p) => p.plan_status && IN_PROGRESS.has(p.plan_status)
     );
-  }
+    if (!hasInProgress) return;
+    const id = setInterval(load, 8000);
+    return () => clearInterval(id);
+  }, [participants, load]);
+
+  const withPlan = participants.filter((p) => p.plan_status);
+  const noPlan = participants.filter((p) => !p.plan_status);
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold tracking-tight">Meal Plans</h1>
-        <p className="text-muted-foreground">All the personalised meal plan history.</p>
+        <h1 className="text-2xl font-bold tracking-tight">Participant Plans</h1>
+        <p className="text-muted-foreground">
+          Generated meal plans for all your participants.
+        </p>
       </div>
-
-      {timedOut && (
-        <div className="rounded-lg border border-yellow-300 bg-yellow-50 dark:bg-yellow-950 dark:border-yellow-800 p-4 text-sm text-yellow-800 dark:text-yellow-300">
-          Plan generation is taking longer than expected. It may still be running in the background — refresh this page in a moment.
-        </div>
-      )}
-      {genFailed && failMessage && (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
-          {failMessage}
-        </div>
-      )}
 
       {loading ? (
         <div className="space-y-3">
-          {[1, 2].map((i) => (
-            <div key={i} className="h-24 rounded-xl border bg-muted/30 animate-pulse" />
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="h-20 rounded-xl border bg-muted/30 animate-pulse" />
           ))}
         </div>
-      ) : plans.length === 0 ? (
+      ) : error ? (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+          {error}
+        </div>
+      ) : participants.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-24 text-center">
-          <p className="text-base font-medium">No plans yet</p>
+          <p className="text-base font-medium">No participants yet</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Complete onboarding to generate your first personalised 7-day meal plan.
+            Add participants from the{" "}
+            <Link href="/dashboard/users" className="text-primary underline underline-offset-2">
+              Users
+            </Link>{" "}
+            page.
           </p>
         </div>
       ) : (
-        <div className="space-y-3">
-          {plans.map((plan, i) => {
-            const fmtDate = (iso: string) =>
-              new Date(iso + "T00:00:00").toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
-            return (
-              <Link
-                key={plan.plan_id}
-                href={`/dashboard/recommendations?plan=${encodeURIComponent(plan.plan_id)}`}
-                className="block rounded-xl border p-5 hover:bg-muted/30 transition-colors"
-              >
-                <div className="flex items-center justify-between gap-4">
-                  <div className="space-y-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="font-semibold">{i === 0 ? "Latest Plan" : `Plan ${plans.length - i}`}</p>
-                      {i === 0 && (
-                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">Latest</span>
+        <div className="space-y-6">
+          {withPlan.length > 0 && (
+            <div className="space-y-3">
+              {withPlan.map((p) => {
+                const inProgress = p.plan_status ? IN_PROGRESS.has(p.plan_status) : false;
+                const hasReady = p.plan_status?.startsWith("ok:");
+                return (
+                  <div
+                    key={p.user_id}
+                    className="rounded-xl border p-5 flex items-center justify-between gap-4"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono font-semibold text-sm">
+                          {p.participant_id}
+                        </span>
+                        {p.display_name && (
+                          <span className="text-sm text-muted-foreground">
+                            {p.display_name}
+                          </span>
+                        )}
+                        <PlanBadge status={p.plan_status} />
+                      </div>
+                      {p.last_plan_at && (
+                        <p className="text-xs text-muted-foreground">
+                          {inProgress ? "Started" : "Generated"}:{" "}
+                          {new Date(p.last_plan_at).toLocaleString("en-IN", {
+                            day: "numeric",
+                            month: "short",
+                            year: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </p>
                       )}
                     </div>
-                    {plan.created_at && (
-                      <p className="text-xs text-muted-foreground">
-                        Generated: {new Date(plan.created_at).toLocaleString("en-IN", {
-                          day: "numeric", month: "short", year: "numeric",
-                          hour: "2-digit", minute: "2-digit",
-                        })}
-                      </p>
-                    )}
-                    {plan.start_date && plan.end_date && (
-                      <p className="text-xs text-muted-foreground">
-                        {fmtDate(plan.start_date)} — {fmtDate(plan.end_date)}
-                      </p>
-                    )}
-                    <p className="text-xs text-muted-foreground">
-                      {plan.row_count} meal {plan.row_count === 1 ? "entry" : "entries"}
-                    </p>
+                    <div className="flex items-center gap-3 shrink-0">
+                      {hasReady && (
+                        <Link
+                          href={`/dashboard/recommendations?user=${encodeURIComponent(p.user_id)}`}
+                          className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                        >
+                          View Plan →
+                        </Link>
+                      )}
+                      {!hasReady && !inProgress && (
+                        <Link
+                          href={`/onboarding?participant_id=${encodeURIComponent(p.user_id)}`}
+                          className="text-xs text-primary hover:underline font-medium"
+                        >
+                          Retry Onboarding →
+                        </Link>
+                      )}
+                    </div>
                   </div>
-                  <span className="text-sm text-primary font-medium shrink-0">View Meals →</span>
-                </div>
-              </Link>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
+
+          {noPlan.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Not yet onboarded ({noPlan.length})
+              </p>
+              <div className="rounded-xl border overflow-hidden">
+                {noPlan.map((p, i) => (
+                  <div
+                    key={p.user_id}
+                    className={`flex items-center justify-between px-4 py-3 gap-4 ${
+                      i < noPlan.length - 1 ? "border-b" : ""
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono text-sm font-medium">{p.participant_id}</span>
+                      {p.display_name && (
+                        <span className="text-sm text-muted-foreground">{p.display_name}</span>
+                      )}
+                    </div>
+                    <Link
+                      href={`/onboarding?participant_id=${encodeURIComponent(p.user_id)}`}
+                      className="text-xs text-primary hover:underline font-medium shrink-0"
+                    >
+                      Start Onboarding →
+                    </Link>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

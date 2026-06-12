@@ -115,7 +115,10 @@ function OnboardingFlow() {
       }
     }
 
-    const planUrl = `/dashboard/plan?generating=true&onboarding_id=${encodeURIComponent(onboardingId)}`;
+    const redirectUrl = participantUserId
+      ? `/dashboard/users`
+      : `/dashboard/plan?generating=true&onboarding_id=${encodeURIComponent(onboardingId)}`;
+
     const markPlanStatus = async (status: string) => {
       await supabase
         .from("BE_Onboarding_Sessions")
@@ -123,7 +126,7 @@ function OnboardingFlow() {
         .eq("onboarding_id", onboardingId);
     };
 
-    router.push(planUrl);
+    router.push(redirectUrl);
 
     void fetch("/api/plan", {
       method: "POST",
