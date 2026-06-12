@@ -134,9 +134,10 @@ export function BasicDetailsForm({
             <Input
               type="number"
               min={1}
+              step="0.1"
               value={form.Weight || ""}
-              onChange={(e) => update("Weight", parseInt(e.target.value) || 0)}
-              placeholder="65"
+              onChange={(e) => update("Weight", parseFloat(e.target.value) || 0)}
+              placeholder="65.0"
             />
             {errors.Weight && (
               <p className="text-xs text-destructive">{errors.Weight}</p>
@@ -148,9 +149,10 @@ export function BasicDetailsForm({
             <Input
               type="number"
               min={1}
+              step="0.1"
               value={form.Height || ""}
-              onChange={(e) => update("Height", parseInt(e.target.value) || 0)}
-              placeholder="165"
+              onChange={(e) => update("Height", parseFloat(e.target.value) || 0)}
+              placeholder="165.0"
             />
             {errors.Height && (
               <p className="text-xs text-destructive">{errors.Height}</p>
