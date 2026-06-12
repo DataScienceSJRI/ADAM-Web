@@ -29,7 +29,7 @@ export type BasicDetails = {
 
 const GENDERS = ["Male", "Female", "Other", "Prefer not to say"];
 const DIETARY_TYPES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"];
-const DIET_RESTRICTIONS = ["Diabetic", "Gluten Free"];
+const DIET_RESTRICTIONS = ["Gluten Free"];
 const ACTIVITY_LEVELS = [
   "Sedentary",
   "Lightly Active",
@@ -212,10 +212,7 @@ export function BasicDetailsForm({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-sm font-medium">
-            Dietary Restrictions{" "}
-            <span className="font-normal text-muted-foreground">(optional)</span>
-          </label>
+          <label className="text-sm font-medium">Dietary Restrictions</label>
           <div className="flex gap-4">
             {DIET_RESTRICTIONS.map((r) => (
               <label key={r} className="flex items-center gap-2 text-sm">
