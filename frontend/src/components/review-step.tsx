@@ -17,6 +17,7 @@ export function ReviewStep({
   basicDetails,
   selections,
   onBack,
+  onEditBasicDetails,
   onSubmit,
   submitting,
   error,
@@ -24,6 +25,7 @@ export function ReviewStep({
   basicDetails: BasicDetails;
   selections: MealSelection[];
   onBack: () => void;
+  onEditBasicDetails: () => void;
   onSubmit: () => void;
   submitting: boolean;
   error: string | null;
@@ -33,7 +35,16 @@ export function ReviewStep({
       {/* Basic Details summary */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Basic Details</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base">Basic Details</CardTitle>
+            <button
+              onClick={onEditBasicDetails}
+              disabled={submitting}
+              className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
+            >
+              Edit
+            </button>
+          </div>
         </CardHeader>
         <CardContent>
           <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
@@ -66,7 +77,16 @@ export function ReviewStep({
       {/* Meal Preferences summary */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">Meal Preferences</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base">Meal Preferences</CardTitle>
+            <button
+              onClick={onBack}
+              disabled={submitting}
+              className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
+            >
+              Edit
+            </button>
+          </div>
           <CardDescription>
             {selections.length} selection{selections.length !== 1 ? "s" : ""} across all meal times
           </CardDescription>

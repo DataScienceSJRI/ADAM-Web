@@ -210,6 +210,7 @@ function OnboardingFlow() {
           basicDetails={basicDetails!}
           selections={selections}
           onBack={() => setStep(1)}
+          onEditBasicDetails={() => setStep(0)}
           onSubmit={handleSubmit}
           submitting={submitting}
           error={error}
