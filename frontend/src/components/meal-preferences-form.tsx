@@ -142,7 +142,7 @@ export function MealPreferencesForm({
   const subTabs = SUB_TABS[activeTab];
   const currentSubTab = subTabs.find((t) => t.key === activeSubTab) ?? subTabs[0];
 
-  const isVegOnly = dietaryType?.toLowerCase() !== "non veg";
+  const isVegOnly = ["veg", "vegan"].includes(dietaryType?.toLowerCase() ?? "");
 
   const visibleRows = useMemo(() => {
     let filtered = rows.filter(currentSubTab.filter);
