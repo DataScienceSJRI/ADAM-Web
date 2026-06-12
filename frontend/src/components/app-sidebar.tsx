@@ -33,7 +33,7 @@ const studyItems = [
 
 const planItems = [
   { title: "Recommendations", href: "/dashboard/recommendations", icon: LayoutDashboard },
-  { title: "Plans", href: "/dashboard/plan", icon: CalendarDays },
+  { title: "Participant Plans", href: "/dashboard/plan", icon: CalendarDays },
   { title: "Session History", href: "/dashboard/sessions", icon: History },
 ];
 
