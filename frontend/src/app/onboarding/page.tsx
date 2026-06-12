@@ -50,7 +50,6 @@ function OnboardingFlow() {
     const targetUserId = participantUserId ?? user.email!;
     const onboardingId = crypto.randomUUID();
 
-    // Creating session record for traceability and loader polling.
     const { error: sessionError } = await supabase
       .from("BE_Onboarding_Sessions")
       .insert({ onboarding_id: onboardingId, user_id: targetUserId, plan_status: "generating" });

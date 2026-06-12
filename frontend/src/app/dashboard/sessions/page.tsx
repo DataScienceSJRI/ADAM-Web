@@ -51,7 +51,6 @@ export default function SessionsPage() {
         if (!isAdmin && participantIds.size > 0) {
           sessionQuery = sessionQuery.in("user_id", [...participantIds]);
         } else if (!isAdmin) {
-          // No participants yet
           setLoading(false);
           return;
         }
