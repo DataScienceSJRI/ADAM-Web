@@ -212,10 +212,7 @@ export function BasicDetailsForm({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-sm font-medium">
-            Dietary Restrictions{" "}
-            <span className="font-normal text-muted-foreground"></span>
-          </label>
+          <label className="text-sm font-medium">Dietary Restrictions</label>
           <div className="flex gap-4">
             {DIET_RESTRICTIONS.map((r) => (
               <label key={r} className="flex items-center gap-2 text-sm">
