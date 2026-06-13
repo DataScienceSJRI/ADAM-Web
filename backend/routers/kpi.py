@@ -40,6 +40,7 @@ def get_kpi(
         return {
             "date": target_date,
             "blood_sugar_control_score": None,
+            "gl_per_day": None,
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "message": "No plan found.",
         }
@@ -59,6 +60,7 @@ def get_kpi(
         return {
             "date": target_date,
             "blood_sugar_control_score": None,
+            "gl_per_day": None,
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "message": "No meals found for this date.",
         }
@@ -96,6 +98,7 @@ def get_kpi(
     return {
         "date": target_date,
         "blood_sugar_control_score": score,
+        "gl_per_day": round(total_gl, 1),
         "nutrition": {
             "carbs_g": round(total_carbs, 1),
             "protein_g": round(total_protein, 1),

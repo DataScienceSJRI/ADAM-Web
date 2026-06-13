@@ -1,4 +1,5 @@
 import logging
+from datetime import date as date_type
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
@@ -11,9 +12,25 @@ logger = logging.getLogger("backend.routers.activity")
 router = APIRouter(prefix="/activity", tags=["activity"])
 
 
+MAX_ACTIVITY_LOGS = 10
+
+
 @router.post("/log", response_model=ActivityLogResponse)
 def activity_log(body: ActivityLogRequest, user_id: str = Depends(get_current_user)):
     """Log a physical activity entry for the authenticated user."""
+    sb = get_supabase()
+    count_resp = (
+        sb.table("user_physical_activity_recall")
+        .select("ID", count="exact")
+        .eq("UID", user_id)
+        .eq("Date", body.date or str(date_type.today()))
+        .execute()
+    )
+    if (count_resp.count or 0) >= MAX_ACTIVITY_LOGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Maximum of {MAX_ACTIVITY_LOGS} activities per day already reached.",
+        )
     activity_id = log_activity(
         user_id=user_id,
         pa_name=body.pa_name,
