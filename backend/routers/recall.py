@@ -6,6 +6,7 @@ from core.supabase import get_supabase
 from models.schemas import (
     DietRecallImageRequest,
     DietRecallLogRequest,
+    DietRecallUpdateRequest,
     MealSlot,
     RecallHistoryItem,
     RecallHistoryResponse,
@@ -69,6 +70,24 @@ def get_recall_history(
         for r in (resp.data or [])
     ]
     return RecallHistoryResponse(items=items, total=resp.count or len(items))
+
+@router.put("/{recall_id}")
+def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = Depends(get_current_user)):
+    """Update a diet recall entry belonging to the authenticated user."""
+    updates = {k: v for k, v in {
+        "did_eat_as_planned": body.did_eat_as_planned,
+        "Food_Qty": body.food_qty,
+        "notes": body.notes,
+    }.items() if v is not None}
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided to update.")
+
+    sb = get_supabase()
+    resp = sb.table("DietRecall").update(updates).eq("ID", recall_id).eq("user_id", user_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Recall entry not found")
+    return {"status": "updated", "id": recall_id}
 
 
 @router.delete("/{recall_id}")
