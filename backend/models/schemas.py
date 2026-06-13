@@ -121,6 +121,14 @@ class DietRecallLogRequest(BaseModel):
     model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False, "recipe_codes": ["B000029", "A001234"], "actual_quantities": ["0.8", "1.0"]}}}
 
 
+class DietRecallUpdateRequest(BaseModel):
+    did_eat_as_planned: Optional[bool] = None
+    food_qty: Optional[str] = None
+    notes: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {"did_eat_as_planned": False, "food_qty": "0.75", "notes": "ate less"}}}
+
+
 class DietRecallImageRequest(BaseModel):
     plan_id: str
     meal_slot: MealSlot
