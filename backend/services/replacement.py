@@ -1,8 +1,13 @@
+import itertools
 import logging
 from typing import List
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
+
+_VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
+_GL_TOLERANCE = 0.20   # ±20% band around original meal GL
+_GL_FLOOR = 1.0        # minimum absolute tolerance when original GL is near zero
 
 logger = logging.getLogger("backend.services.replacement")
 
@@ -61,6 +66,84 @@ def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
         result[str(row["Recipe_Code"])] = gi * max(0.0, carb - fiber) / 100.0
 
     return result
+
+
+def _fetch_slot_gl(sb, user_id: str, date: str, meal_slot: MealSlot) -> tuple[float, list[dict]]:
+    """
+    Return (total_gl, slot_rows) for the user's current plan for the given slot.
+    Filters to the most recent plan_id to avoid stale rows from old plan versions.
+    slot_rows includes Food_Name_desc (recipe code), Food_Qty, Pkey and plan metadata.
+    """
+    timings = SLOT_TO_TIMINGS[meal_slot]
+
+    # Resolve the active plan_id by taking the most recently created plan for this user
+    plan_resp = (
+        sb.table("BE_Onboarding_Sessions")
+        .select("plan_id")
+        .eq("user_id", user_id)
+        .not_.is_("plan_id", "null")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    active_plan_id = (plan_resp.data[0].get("plan_id") if plan_resp.data else None)
+
+    query = (
+        sb.table("Recommendation")
+        .select("Pkey, Food_Name_desc, Food_Qty, plan_id, WeekNo, onboarding_id")
+        .eq("user_id", user_id)
+        .eq("Date", date)
+        .eq("Timings", timings)
+    )
+    if active_plan_id:
+        query = query.eq("plan_id", active_plan_id)
+
+    slot_rows = query.execute().data or []
+
+    if not slot_rows:
+        return 0.0, slot_rows
+
+    codes = [str(r["Food_Name_desc"]) for r in slot_rows if r.get("Food_Name_desc")]
+    recipe_rows = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
+        .in_("Recipe_Code", codes)
+        .execute()
+    ).data or []
+
+    gl_map = _compute_gl_map(sb, recipe_rows)
+    qty_map = {str(r["Food_Name_desc"]): float(r.get("Food_Qty") or 1.0) for r in slot_rows}
+    total_gl = sum(gl_map.get(rc, 0.0) * qty_map.get(rc, 1.0) for rc in codes)
+    return total_gl, slot_rows
+
+
+def _best_qty_combo(
+    gl_per_recipe: list[float],
+    target_gl: float,
+    fixed_gl: float,
+) -> list[float] | None:
+    """
+    Enumerate all combinations of _VALID_QUANTITIES for each recipe.
+    Return the quantity list whose (fixed_gl + combo_gl) is closest to target_gl
+    and falls within the ±_GL_TOLERANCE band, or None if no valid combo exists.
+    """
+    tolerance = max(_GL_FLOOR, target_gl * _GL_TOLERANCE)
+    lo = target_gl - tolerance
+    hi = target_gl + tolerance
+
+    best_combo: list[float] | None = None
+    best_delta = float("inf")
+
+    for qtys in itertools.product(_VALID_QUANTITIES, repeat=len(gl_per_recipe)):
+        combo_gl = sum(g * q for g, q in zip(gl_per_recipe, qtys))
+        total_gl = fixed_gl + combo_gl
+        if lo <= total_gl <= hi:
+            delta = abs(total_gl - target_gl)
+            if delta < best_delta:
+                best_delta = delta
+                best_combo = list(qtys)
+
+    return best_combo
 
 
 def get_preapproved_replacements(
@@ -170,22 +253,30 @@ def request_on_demand_replacement(
     original_recipe_codes: List[str] | None = None,
 ) -> OnDemandReplacementResponse:
     """
-    Validate proposed recipe codes for the meal slot, compute serving quantities
-    targeting the slot's energy budget, and update the Recommendation table.
+    Validate proposed recipe codes, find the quantity combination closest to the
+    current slot's GL within ±20%, and write it to the Recommendation table.
+    Rejects if no valid quantity combination exists.
     """
     sb = get_supabase()
 
-    # Fetch only the proposed recipes
-    recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", recipe_codes).execute()
+    # Fetch nutritional data for proposed recipes (need GL + energy)
+    recipe_resp = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g, Energy_ENERC_KJ")
+        .in_("Recipe_Code", recipe_codes)
+        .execute()
+    )
     found = recipe_resp.data or []
+    found_map = {str(r["Recipe_Code"]): r for r in found}
 
-    logger.info("on_demand: requested=%s found=%s", recipe_codes, [r["Recipe_Code"] for r in found])
+    logger.info("on_demand: requested=%s found=%s", recipe_codes, list(found_map.keys()))
 
     if len(found) < len(recipe_codes):
-        logger.info("on_demand: possible=False — recipe not found in Recipe table")
+        missing = [rc for rc in recipe_codes if rc not in found_map]
+        logger.info("on_demand: possible=False — recipes not found: %s", missing)
         return OnDemandReplacementResponse(possible=False)
 
-    # Check meal-slot tag in RecipeTagging — every requested code must have a row and be tagged
+    # Check meal-slot tag — every proposed recipe must be tagged for this slot
     slot_col = _SLOT_TAG_COL.get(meal_slot)
     if slot_col:
         tag_resp = (
@@ -201,43 +292,72 @@ def request_on_demand_replacement(
                 logger.info("on_demand: possible=False — %s has no RecipeTagging row", rc)
                 return OnDemandReplacementResponse(possible=False)
             if not _is_tagged(tag_map[rc], slot_col):
-                logger.info("on_demand: possible=False — %s not tagged for %s (value=%s)", rc, slot_col, tag_map[rc].get(slot_col))
+                logger.info("on_demand: possible=False — %s not tagged for %s", rc, slot_col)
                 return OnDemandReplacementResponse(possible=False)
 
-    # Compute servings based on energy target
-    target_energy = _ENERGY_TARGET_KCAL.get(meal_slot, 500.0)
-    energy_per_recipe = target_energy / len(found)
+    # Fetch current slot rows for plan metadata (plan_id, WeekNo etc.) and original recipes' GL
+    _, all_slot_rows = _fetch_slot_gl(sb, user_id, date, meal_slot)
+
+    # Determine which recipes are being replaced and compute their current GL as the target
+    replaced_set = set(original_recipe_codes) if original_recipe_codes else {
+        str(r.get("Food_Name_desc") or "") for r in all_slot_rows if r.get("Food_Name_desc")
+    }
+
+    # Compute target GL from the original recipes being replaced (at their current plan quantities)
+    original_codes_in_plan = [
+        str(r.get("Food_Name_desc") or "") for r in all_slot_rows
+        if r.get("Food_Name_desc") and str(r["Food_Name_desc"]) in replaced_set
+    ]
+    target_gl = 0.0
+    if original_codes_in_plan:
+        orig_recipe_rows = (
+            sb.table("Recipe")
+            .select("Recipe_Code, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
+            .in_("Recipe_Code", original_codes_in_plan)
+            .execute()
+        ).data or []
+        orig_gl_map = _compute_gl_map(sb, orig_recipe_rows)
+        orig_qty_map = {
+            str(r["Food_Name_desc"]): float(r.get("Food_Qty") or 1.0)
+            for r in all_slot_rows if str(r.get("Food_Name_desc") or "") in replaced_set
+        }
+        target_gl = sum(orig_gl_map.get(rc, 0.0) * orig_qty_map.get(rc, 1.0) for rc in original_codes_in_plan)
+
+    logger.info("on_demand: target_gl=%.2f (GL of recipes being replaced)", target_gl)
+
+    # Compute per-unit GL for each proposed recipe
+    gl_map = _compute_gl_map(sb, found)
+    gl_per_recipe = [gl_map.get(str(rc), 0.0) for rc in recipe_codes]
+
+    # Find the quantity combo whose GL is closest to target_gl and within ±20% band
+    # fixed_gl=0: we compare proposed GL directly against the replaced recipes' GL
+    best_qtys = _best_qty_combo(gl_per_recipe, target_gl, fixed_gl=0.0)
+    if best_qtys is None:
+        logger.info("on_demand: possible=False — no quantity combo within ±20%% GL band (target=%.2f)", target_gl)
+        return OnDemandReplacementResponse(possible=False)
+
+    logger.info("on_demand: accepted qtys=%s", best_qtys)
 
     combination: list[RecipeWithQty] = []
     energy_by_code: dict[str, float] = {}
-    for row in found:
+    for rc, qty in zip(recipe_codes, best_qtys):
+        row = found_map[rc]
         base_kj = float(row.get("Energy_ENERC_KJ") or 0)
         base_kcal = (base_kj / 4.184) if base_kj > 0 else 100.0
-        serving = round(energy_per_recipe / base_kcal, 2)
-        serving = max(0.25, min(serving, 3.0))
-        energy_by_code[str(row["Recipe_Code"])] = round(serving * base_kcal, 1)
+        energy_by_code[rc] = round(qty * base_kcal, 1)
         combination.append(
             RecipeWithQty(
-                recipe_code=str(row["Recipe_Code"]),
+                recipe_code=rc,
                 recipe_name=str(row.get("Recipe_Name") or ""),
-                quantity=serving,
+                quantity=qty,
                 unit="serving",
+                gl=round(gl_map.get(rc, 0.0) * qty, 2),
             )
         )
 
-    # Update Recommendation table — preserve plan_id, WeekNo, and onboarding_id from existing rows
+    # Update Recommendation table — reuse slot rows already fetched above
     try:
         timings = SLOT_TO_TIMINGS[meal_slot]
-
-        # Fetch all rows for this slot to get plan metadata
-        all_slot_rows = (
-            sb.table("Recommendation")
-            .select("Pkey, plan_id, WeekNo, onboarding_id, Food_Name_desc")
-            .eq("user_id", user_id)
-            .eq("Date", date)
-            .eq("Timings", timings)
-            .execute()
-        ).data or []
 
         existing_plan_id: str | None = all_slot_rows[0].get("plan_id") if all_slot_rows else None
         existing_week_no: int | None = all_slot_rows[0].get("WeekNo") if all_slot_rows else None
