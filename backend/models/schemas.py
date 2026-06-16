@@ -288,6 +288,7 @@ class RecallHistoryItem(BaseModel):
     did_eat_as_planned: Optional[bool] = None
     food_name: Optional[str] = None
     food_qty: Optional[float] = None
+    r_desc: Optional[str] = None
     energy_kcal: Optional[float] = None
     notes: Optional[str] = None
 
