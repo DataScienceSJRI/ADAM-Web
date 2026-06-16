@@ -85,9 +85,12 @@ def log_recall(
             }).execute()
             recall_ids.append(recall_id)
         else:
-            # Fetch all provided recipe codes in one query
+            # Fetch recipe info and default unit (Description) from RecipeTagging
             recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes_to_log).execute()
             recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
+
+            tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description").in_("Recipe_Code", codes_to_log).execute()
+            tag_map = {t["Recipe_Code"]: t.get("Description") for t in (tag_resp.data or []) if t.get("Recipe_Code")}
 
             for i, code in enumerate(codes_to_log):
                 recall_id = str(uuid.uuid4())
@@ -112,6 +115,9 @@ def log_recall(
                 else:
                     row["Food_Name"] = code
                     row["Food_Name_desc"] = code
+                desc = tag_map.get(code)
+                if desc and str(desc).strip().lower() not in ("nan", "none", ""):
+                    row["R_desc"] = str(desc).strip()
                 # Pick the matching quantity by index, fall back to None
                 qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
                 if qty:
