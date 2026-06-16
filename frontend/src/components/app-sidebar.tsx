@@ -21,6 +21,7 @@ import {
   History,
   Users,
   SlidersHorizontal,
+  MessageSquareMore,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -29,6 +30,7 @@ import { UserNav } from "./user-nav";
 const studyItems = [
   { title: "Users", href: "/dashboard/users", icon: Users },
   { title: "Preferences", href: "/dashboard/preferences", icon: SlidersHorizontal },
+  
 ];
 
 const planItems = [
@@ -39,7 +41,7 @@ const planItems = [
 
 const logItems = [
   { title: 'Food Logs', href: '/dashboard/logs/food', icon: ClipboardList },
-  { title: 'Feedback', href: '/dashboard/logs/feedback', icon: Heart },
+  { title: "Image Feedback", href: "/dashboard/feedback", icon: MessageSquareMore },
 ];
 
 const setupItems = [
