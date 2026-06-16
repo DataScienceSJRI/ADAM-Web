@@ -657,7 +657,7 @@ export default function FeedbackPage() {
                   return (
                     <button
                       key={pg.user_id}
-                      onClick={() => { setSelectedId(pg.user_id); setStatusFilter("all"); setDateRange("all"); }}
+                      onClick={() => { setSelectedId(pg.user_id); setStatusFilter("all"); }}
                       className={`w-full text-left rounded-xl px-3 py-3 border transition-colors ${
                         selectedId === pg.user_id ? "bg-primary/10 border-primary/30" : "bg-card hover:bg-muted/40 border-transparent"
                       }`}
@@ -687,7 +687,7 @@ export default function FeedbackPage() {
                 filteredParticipants.map(pg => (
                   <button
                     key={pg.user_id}
-                    onClick={() => { setSelectedId(pg.user_id); setStatusFilter("all"); setDateRange("all"); }}
+                    onClick={() => { setSelectedId(pg.user_id); setStatusFilter("all"); }}
                     title={pg.display_name ?? pg.participant_id ?? pg.user_id}
                     className={`relative w-10 h-10 rounded-xl border transition-colors flex items-center justify-center ${
                       selectedId === pg.user_id ? "bg-primary/10 border-primary/30" : "bg-card hover:bg-muted/40 border-transparent"
