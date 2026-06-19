@@ -22,6 +22,8 @@ const ACTIVITY_LEVELS_VALUES = [
   "Extra Active",
 ] as const;
 const DIETARY_TYPE_VALUES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"] as const;
+const NON_VEG_TYPES = ["Non Veg", "Eggatarian", "Ovo veg"] as const;
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
 export const BasicDetailsSchema = z.object({
   Age: z.number({ error: "Required" })
@@ -41,6 +43,7 @@ export const BasicDetailsSchema = z.object({
   Activity_levels: z.enum(ACTIVITY_LEVELS_VALUES, "Required"),
   dietary_type: z.enum(DIETARY_TYPE_VALUES, "Required"),
   diet_restrictions: z.array(z.string()),
+  non_veg_days: z.array(z.string()),
   breakfast_time: z.string(),
   lunch_time: z.string(),
   dinner_time: z.string(),
@@ -78,6 +81,7 @@ export function BasicDetailsForm({
       Activity_levels: "",
       dietary_type: "",
       diet_restrictions: [],
+      non_veg_days: [],
       breakfast_time: "",
       lunch_time: "",
       dinner_time: "",
@@ -237,6 +241,36 @@ export function BasicDetailsForm({
             <p className="text-xs text-destructive">{errors.dietary_type}</p>
           )}
         </div>
+
+        {(NON_VEG_TYPES as readonly string[]).includes(form.dietary_type) && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">
+              Preferred Non-Veg Days{" "}
+              <span className="font-normal text-muted-foreground">(optional)</span>
+            </label>
+            <div className="flex gap-1.5 flex-wrap">
+              {DAYS.map((day) => (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => {
+                    const next = form.non_veg_days.includes(day)
+                      ? form.non_veg_days.filter((d) => d !== day)
+                      : [...form.non_veg_days, day];
+                    update("non_veg_days", next);
+                  }}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    form.non_veg_days.includes(day)
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background text-foreground hover:bg-muted"
+                  }`}
+                >
+                  {day}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium">Dietary Restrictions</label>
