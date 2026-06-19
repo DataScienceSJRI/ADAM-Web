@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -88,8 +89,9 @@ def list_reviews(
 
 
 class ReviewUpdateRequest(BaseModel):
-    action: str  # "approve" | "reject" | "analyse"
+    action: str  # "approve" | "reject" | "analyse" | "identify"
     reviewed_foods_by_human: Optional[str] = None
+    vlm_backend: Optional[str] = None  # "openai" | "ollama" — only used with action="identify"
 
 
 @router.patch("/reviews/{review_id}")
@@ -115,6 +117,35 @@ def update_review(
         )
         update: dict = {"tracked_foods_by_ai": analysis}
 
+    elif body.action == "identify":
+        pre_url = review.get("pre_image_id")
+        if not pre_url:
+            raise HTTPException(status_code=400, detail="No pre-meal image to identify")
+        backend = body.vlm_backend or os.environ.get("VLM_BACKEND", "ollama")
+        if backend not in ("openai", "ollama"):
+            raise HTTPException(status_code=400, detail="vlm_backend must be 'openai' or 'ollama'")
+        if backend == "openai":
+            # OpenAI is fast (~15 s) — run synchronously so the result returns immediately.
+            try:
+                import json
+                from services.food_id import identify_image_from_url_sync
+                result = identify_image_from_url_sync(pre_url, vlm_backend="openai")
+                update = {"tracked_foods_by_ai": json.dumps(result)}
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            except Exception:
+                logger.exception("Food identification (OpenAI) failed for review %s", review_id)
+                raise HTTPException(status_code=500, detail="Food identification failed")
+        else:
+            # Ollama is slow (~5 min) — enqueue and return immediately with processing sentinel.
+            try:
+                from services.food_id_worker import PROCESSING_SENTINEL, enqueue_food_id_job
+                enqueue_food_id_job(review_id, pre_url, vlm_backend=backend)
+                update = {"tracked_foods_by_ai": PROCESSING_SENTINEL}
+            except Exception:
+                logger.exception("Failed to enqueue food ID job for review %s", review_id)
+                raise HTTPException(status_code=500, detail="Failed to queue food identification job")
+
     elif body.action in ("approve", "reject"):
         update = {
             "review_status": "approved" if body.action == "approve" else "rejected",
@@ -125,7 +156,7 @@ def update_review(
             update["reviewed_foods_by_human"] = body.reviewed_foods_by_human
 
     else:
-        raise HTTPException(status_code=400, detail="action must be 'approve', 'reject', or 'analyse'")
+        raise HTTPException(status_code=400, detail="action must be 'approve', 'reject', 'analyse', or 'identify'")
 
     updated = sb.table("MealImageReview").update(update).eq("id", review_id).execute()
     if not updated.data:

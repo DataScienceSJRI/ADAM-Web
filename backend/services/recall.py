@@ -196,4 +196,15 @@ def log_recall_image(
         "created_at": now.isoformat(),
     }).execute()
 
+    # Auto-enqueue food identification when a pre-meal image is present.
+    if image_url_pre:
+        try:
+            from services.food_id_worker import PROCESSING_SENTINEL, enqueue_food_id_job
+            sb.table("MealImageReview").update(
+                {"tracked_foods_by_ai": PROCESSING_SENTINEL}
+            ).eq("id", review_id).execute()
+            enqueue_food_id_job(review_id, image_url_pre)
+        except Exception:
+            logger.warning("Could not enqueue food ID job for review %s", review_id)
+
     return recall_id, review_id

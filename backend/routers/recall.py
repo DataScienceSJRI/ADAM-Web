@@ -7,6 +7,8 @@ from models.schemas import (
     DietRecallImageRequest,
     DietRecallLogRequest,
     DietRecallUpdateRequest,
+    IdentifiedFood,
+    ImageIdentifyResponse,
     MealSlot,
     RecallHistoryItem,
     RecallHistoryResponse,
@@ -112,3 +114,64 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         image_url_post=body.image_url_post,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
+
+
+@router.post("/{recall_id}/identify", response_model=ImageIdentifyResponse)
+async def identify_recall_image(recall_id: str, user_id: str = Depends(get_current_user)):
+    """Run the food identification pipeline on the pre-meal image for a recall entry.
+
+    Downloads the stored pre-meal image, identifies food items via VLM + ADS recipe
+    matching, and returns recipe codes with gram estimates the frontend can use to
+    pre-fill the recall form.
+    """
+    sb = get_supabase()
+    row = (
+        sb.table("DietRecall")
+        .select("ID, user_id, image_url_pre")
+        .eq("ID", recall_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Recall entry not found")
+
+    image_url = row.data.get("image_url_pre")
+    if not image_url:
+        raise HTTPException(status_code=400, detail="No pre-meal image for this recall entry")
+
+    from services.food_id import identify_image_from_url
+
+    try:
+        result = await identify_image_from_url(image_url)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        logger.exception("Food identification failed for recall %s", recall_id)
+        raise HTTPException(status_code=500, detail="Food identification failed")
+
+    foods: list[IdentifiedFood] = []
+    for fr in result.get("foods", []):
+        match = fr.get("match", {})
+        qty = fr.get("quantity")
+        matched = match.get("matched")
+        foods.append(
+            IdentifiedFood(
+                food_id=fr["food_id"],
+                description=matched["recipe_name"] if matched else fr["food_id"],
+                recipe_code=matched["recipe_code"] if matched else None,
+                recipe_name=matched["recipe_name"] if matched else None,
+                quantity_g=qty["quantity_g"] if qty else None,
+                quantity_g_min=qty["quantity_g_min"] if qty else None,
+                quantity_g_max=qty["quantity_g_max"] if qty else None,
+                quantity_confidence=qty["quantity_confidence"] if qty else None,
+                match_status=match["status"],
+                match_confidence=match["match_confidence"],
+            )
+        )
+
+    return ImageIdentifyResponse(
+        analysis_id=result["analysis_id"],
+        foods=foods,
+        flags=result.get("flags", []),
+    )

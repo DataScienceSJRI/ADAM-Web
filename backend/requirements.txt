@@ -14,3 +14,5 @@ rq==1.16.0
 redis>=5.0.0
 python-multipart
 openai>=1.0.0
+pydantic-settings>=2.3
+ollama>=0.3

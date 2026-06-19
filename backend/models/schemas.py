@@ -345,6 +345,25 @@ class WebMealReactionRequest(BaseModel):
     }}}
 
 
+class IdentifiedFood(BaseModel):
+    food_id: str
+    description: str
+    recipe_code: Optional[str] = None
+    recipe_name: Optional[str] = None
+    quantity_g: Optional[float] = None
+    quantity_g_min: Optional[float] = None
+    quantity_g_max: Optional[float] = None
+    quantity_confidence: Optional[str] = None
+    match_status: str
+    match_confidence: float
+
+
+class ImageIdentifyResponse(BaseModel):
+    analysis_id: str
+    foods: List[IdentifiedFood]
+    flags: List[str]
+
+
 class WebReactionItem(BaseModel):
     id: Optional[int] = None
     plan_id: Optional[str] = None

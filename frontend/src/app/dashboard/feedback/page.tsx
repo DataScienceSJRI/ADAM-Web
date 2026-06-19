@@ -36,6 +36,149 @@ type MealGroup = {
   post: Review | null;
 };
 
+type RecipeResult = { Recipe_Code: string; Recipe_Name: string; Recipe_Category: string | null };
+type ManualSelection = { recipe_code: string; recipe_name: string };
+type FoodCandidate = { recipe_code: string; recipe_name: string | null; energy_kcal: number | null };
+type FoodMatch = {
+  status: "accepted" | "accepted_flagged" | "unidentified" | "not_found";
+  matched: FoodCandidate | null;
+  match_confidence: number;
+  candidates_considered: FoodCandidate[];
+};
+type FoodQty = {
+  quantity_g: number; quantity_g_min: number; quantity_g_max: number;
+  quantity_confidence: "high" | "medium" | "low";
+};
+type FoodResult = { food_id: string; match: FoodMatch; quantity: FoodQty | null };
+type PipelineOutput = { analysis_id: string; foods: FoodResult[]; flags: string[] };
+
+const IDENTIFY_PHASES = [
+  "Analysing scene with AI…",
+  "Searching recipe database…",
+  "Matching food items…",
+  "Estimating quantities…",
+] as const;
+
+function IdentifyProgress({ phase }: { phase: number }) {
+  return (
+    <div className="space-y-2.5 py-1">
+      {IDENTIFY_PHASES.map((label, i) => {
+        const done = i < phase;
+        const active = i === phase;
+        return (
+          <div key={i} className={`flex items-center gap-2.5 transition-opacity ${i > phase ? "opacity-25" : ""}`}>
+            <span className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 text-[9px] font-bold transition-colors ${
+              done ? "bg-emerald-500 text-white" :
+              active ? "bg-primary text-primary-foreground animate-pulse" :
+              "border border-muted-foreground/30 text-muted-foreground"
+            }`}>
+              {done ? "✓" : i + 1}
+            </span>
+            <span className={`text-xs ${active ? "text-foreground font-medium" : "text-muted-foreground"}`}>{label}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+const STATUS_STYLE: Record<string, string> = {
+  accepted: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+  accepted_flagged: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  unidentified: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  not_found: "bg-muted text-muted-foreground",
+};
+const CONF_STYLE: Record<string, string> = {
+  high: "text-emerald-600 dark:text-emerald-400",
+  medium: "text-amber-600 dark:text-amber-400",
+  low: "text-red-500 dark:text-red-400",
+};
+
+function FoodIdResults({
+  data, selections, onSelect,
+}: {
+  data: PipelineOutput;
+  selections: Record<string, string>;
+  onSelect: (foodId: string, code: string) => void;
+}) {
+  return (
+    <div className="space-y-2.5">
+      {data.foods.map(fr => {
+        const { match, quantity } = fr;
+        const overrideCode = selections[fr.food_id];
+        const overrideCandidate = overrideCode
+          ? match.candidates_considered.find(c => c.recipe_code === overrideCode) ?? null
+          : null;
+        const display = overrideCandidate ?? match.matched;
+        const altCandidates = match.candidates_considered.filter(
+          c => c.recipe_code !== (overrideCode ?? match.matched?.recipe_code)
+        );
+        return (
+          <div key={fr.food_id} className="rounded-lg border bg-card p-3 space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="font-medium text-sm truncate">
+                  {display?.recipe_name ?? "Unidentified"}
+                  {overrideCandidate && (
+                    <span className="ml-1.5 text-[10px] text-amber-600 dark:text-amber-400">(override)</span>
+                  )}
+                </p>
+                {display && (
+                  <p className="font-mono text-[10px] text-muted-foreground">{display.recipe_code}</p>
+                )}
+              </div>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium shrink-0 capitalize ${STATUS_STYLE[match.status] ?? ""}`}>
+                {match.status.replace("_", " ")}
+              </span>
+            </div>
+            {quantity && (
+              <p className="text-xs flex items-center gap-1.5">
+                <span className="font-medium">{Math.round(quantity.quantity_g)}g</span>
+                <span className="text-muted-foreground">({Math.round(quantity.quantity_g_min)}–{Math.round(quantity.quantity_g_max)}g)</span>
+                <span className={`font-medium ${CONF_STYLE[quantity.quantity_confidence] ?? ""}`}>
+                  · {quantity.quantity_confidence}
+                </span>
+              </p>
+            )}
+            {match.candidates_considered.length > 1 && (
+              <div>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1.5">Other candidates</p>
+                <div className="flex flex-wrap gap-1">
+                  {altCandidates.map(c => (
+                    <button
+                      key={c.recipe_code}
+                      onClick={() => onSelect(fr.food_id, c.recipe_code)}
+                      className="text-[10px] px-2 py-0.5 rounded-full border hover:bg-muted transition-colors"
+                    >
+                      {c.recipe_name ?? c.recipe_code}
+                    </button>
+                  ))}
+                  {overrideCode && match.matched && (
+                    <button
+                      onClick={() => onSelect(fr.food_id, match.matched!.recipe_code)}
+                      className="text-[10px] px-2 py-0.5 rounded-full border border-amber-300 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors"
+                    >
+                      Reset to AI pick
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {data.flags.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-900/10 dark:border-amber-800 p-2.5 space-y-1">
+          <p className="text-[10px] font-semibold text-amber-700 dark:text-amber-400 uppercase tracking-wider">Flags</p>
+          {data.flags.map((flag, i) => (
+            <p key={i} className="text-xs text-amber-700 dark:text-amber-400">• {flag}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function groupStatus(g: MealGroup): Review["review_status"] {
   const rows = [g.pre, g.post].filter(Boolean) as Review[];
   if (rows.some(r => r.review_status === "pending")) return "pending";
@@ -160,12 +303,34 @@ function ReviewModal({
   const [index, setIndex] = useState(() => Math.max(0, initialGroups.findIndex(g => g.key === initialGroup.key)));
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
+  const [aiTab, setAiTab] = useState<"compliance" | "food_id">("compliance");
+  const [identifyPhase, setIdentifyPhase] = useState<number>(-1);
+  const [candidateSelections, setCandidateSelections] = useState<Record<string, string>>({});
+  const [manualSearch, setManualSearch] = useState("");
+  const [manualResults, setManualResults] = useState<RecipeResult[]>([]);
+  const [manualSearching, setManualSearching] = useState(false);
+  const [manualSelections, setManualSelections] = useState<ManualSelection[]>([]);
 
   const group = groups[index] ?? groups[0];
   const pendingRemaining = groups.filter(g => groupStatus(g) === "pending").length;
 
   useEffect(() => {
     setNotes(group?.pre?.reviewed_foods_by_human ?? group?.post?.reviewed_foods_by_human ?? "");
+    setCandidateSelections({});
+    setManualSearch("");
+    setManualResults([]);
+    setManualSelections([]);
+    const rawAi = group?.pre?.tracked_foods_by_ai ?? group?.post?.tracked_foods_by_ai ?? null;
+    if (rawAi === "__processing__" || rawAi === "__failed__") {
+      setAiTab("food_id");
+    } else {
+      try {
+        const parsed = rawAi ? JSON.parse(rawAi) : null;
+        setAiTab(parsed?.analysis_id ? "food_id" : "compliance");
+      } catch {
+        setAiTab("compliance");
+      }
+    }
   }, [group?.key]);
 
   useEffect(() => {
@@ -178,6 +343,67 @@ function ReviewModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [groups.length, onClose]);
 
+  // Advance phase indicator while the identify pipeline is running synchronously (OpenAI)
+  useEffect(() => {
+    if (loading !== "identify") { setIdentifyPhase(-1); return; }
+    setIdentifyPhase(0);
+    const t1 = setTimeout(() => setIdentifyPhase(1), 7000);
+    const t2 = setTimeout(() => setIdentifyPhase(2), 14000);
+    const t3 = setTimeout(() => setIdentifyPhase(3), 23000);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [loading]);
+
+  // Poll Supabase every 5 s while the Ollama job is processing
+  useEffect(() => {
+    const rawAi = group?.pre?.tracked_foods_by_ai ?? group?.post?.tracked_foods_by_ai ?? null;
+    const rowId = group?.pre?.id ?? group?.post?.id;
+    if (!rowId || rawAi !== "__processing__") return;
+    const supabase = createClient();
+    const timer = setInterval(async () => {
+      const { data } = await supabase
+        .from("MealImageReview")
+        .select("tracked_foods_by_ai")
+        .eq("id", rowId)
+        .single();
+      const val = (data as { tracked_foods_by_ai?: string } | null)?.tracked_foods_by_ai;
+      if (val && val !== "__processing__") {
+        const review = group.pre?.id === rowId ? group.pre : group.post;
+        if (review) {
+          const updatedReview: Review = { ...review, tracked_foods_by_ai: val };
+          // Update modal's own groups state so the result renders immediately
+          setGroups(prev => prev.map(g => ({
+            ...g,
+            pre: g.pre?.id === rowId ? updatedReview : g.pre,
+            post: g.post?.id === rowId ? updatedReview : g.post,
+          })));
+          onUpdated([updatedReview]);
+        }
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [group?.key, group?.pre?.tracked_foods_by_ai, group?.post?.tracked_foods_by_ai]);
+
+  // Debounced recipe search for manual selection
+  useEffect(() => {
+    const q = manualSearch.trim();
+    if (q.length < 2) { setManualResults([]); return; }
+    const timer = setTimeout(async () => {
+      setManualSearching(true);
+      try {
+        const res = await fetch(`/api/recipes/search?q=${encodeURIComponent(q)}&page_size=8`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) {
+          const data = await res.json() as { recipes?: RecipeResult[] };
+          setManualResults(data.recipes ?? []);
+        }
+      } finally {
+        setManualSearching(false);
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [manualSearch, token]);
+
   async function patchReview(reviewId: string, body: object): Promise<Review | null> {
     const res = await fetch(`/api/feedback/reviews/${reviewId}`, {
       method: "PATCH",
@@ -187,7 +413,10 @@ function ReviewModal({
     return res.ok ? await res.json() : null;
   }
 
-  async function doAction(action: "approve" | "reject" | "analyse") {
+  async function doAction(
+    action: "approve" | "reject" | "analyse" | "identify",
+    options: { vlm_backend?: string } = {}
+  ) {
     setLoading(action);
     try {
       const targets = [group.pre, group.post].filter((r): r is Review => r !== null);
@@ -197,10 +426,30 @@ function ReviewModal({
         const target = group.pre ?? group.post;
         if (!target) return;
         const result = await patchReview(target.id, { action: "analyse" });
-        if (result) updated = [result];
+        if (result) { updated = [result]; setAiTab("compliance"); }
+      } else if (action === "identify") {
+        const target = group.pre ?? group.post;
+        if (!target) return;
+        const result = await patchReview(target.id, { action: "identify", vlm_backend: options.vlm_backend });
+        if (result) { updated = [result]; setAiTab("food_id"); }
       } else {
+        // Serialize candidate overrides + manual selections alongside coordinator notes
+        const hasOverrides = Object.keys(candidateSelections).length > 0 || manualSelections.length > 0;
+        const notesToSave = hasOverrides
+          ? JSON.stringify({
+              overrides: Object.entries(candidateSelections).map(([fid, code]) => ({
+                food_id: fid,
+                recipe_code: code,
+                recipe_name: parsedFoodId?.foods
+                  .find(f => f.food_id === fid)?.match.candidates_considered
+                  .find(c => c.recipe_code === code)?.recipe_name ?? null,
+              })),
+              manual: manualSelections,
+              notes: notes || undefined,
+            })
+          : notes || null;
         const results = await Promise.all(
-          targets.map(r => patchReview(r.id, { action, reviewed_foods_by_human: notes || null }))
+          targets.map(r => patchReview(r.id, { action, reviewed_foods_by_human: notesToSave }))
         );
         updated = results.filter((r): r is Review => r !== null);
       }
@@ -215,7 +464,7 @@ function ReviewModal({
           };
         }));
         onUpdated(updated);
-        if (action !== "analyse" && index < groups.length - 1) setIndex(i => i + 1);
+        if (action !== "analyse" && action !== "identify" && index < groups.length - 1) setIndex(i => i + 1);
       }
     } finally {
       setLoading(null);
@@ -226,6 +475,20 @@ function ReviewModal({
 
   const status = groupStatus(group);
   const aiText = group.pre?.tracked_foods_by_ai ?? group.post?.tracked_foods_by_ai ?? null;
+
+  const isProcessing = aiText === "__processing__";
+  const isFailed = aiText === "__failed__";
+
+  // Detect whether aiText is a food ID pipeline result (JSON) or plain compliance text
+  const parsedFoodId: PipelineOutput | null = (() => {
+    if (isProcessing || isFailed) return null;
+    try {
+      const p = aiText ? JSON.parse(aiText) : null;
+      return p?.analysis_id && Array.isArray(p?.foods) ? (p as PipelineOutput) : null;
+    } catch { return null; }
+  })();
+  const complianceText = parsedFoodId || isProcessing || isFailed ? null : aiText;
+
   const notesValue = group.pre?.reviewed_foods_by_human ?? group.post?.reviewed_foods_by_human ?? null;
   const reviewedBy = group.pre?.reviewed_by ?? group.post?.reviewed_by ?? null;
   const reviewedAt = group.pre?.reviewed_at ?? group.post?.reviewed_at ?? null;
@@ -319,25 +582,149 @@ function ReviewModal({
           </div>
 
           <div className="flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-auto p-5">
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">AI Analysis</p>
+            <div className="flex-1 overflow-auto p-5 space-y-3">
+
+              {/* Tab bar */}
+              <div className="flex items-center justify-between">
+                <div className="flex rounded-lg border overflow-hidden text-[10px]">
+                  {(["food_id", "compliance"] as const).map(tab => (
+                    <button
+                      key={tab}
+                      onClick={() => setAiTab(tab)}
+                      className={`px-2.5 py-1 font-medium capitalize transition-colors ${
+                        aiTab === tab ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+                      }`}
+                    >
+                      {tab === "food_id" ? "Food ID" : "Compliance"}
+                    </button>
+                  ))}
+                </div>
                 {status === "pending" && (
-                  <button
-                    onClick={() => doAction("analyse")}
-                    disabled={loading === "analyse"}
-                    className="text-xs px-2.5 py-1 rounded-md bg-secondary hover:bg-secondary/80 transition-colors disabled:opacity-50"
-                  >
-                    {loading === "analyse" ? "Analysing…" : aiText ? "Re-analyse" : "Run AI"}
-                  </button>
+                  <div className="flex gap-1.5">
+                    {aiTab === "food_id" ? (
+                      <>
+                        <button
+                          onClick={() => doAction("identify", { vlm_backend: "ollama" })}
+                          disabled={!!loading || isProcessing}
+                          className="text-xs px-2.5 py-1 rounded-md bg-secondary hover:bg-secondary/80 transition-colors disabled:opacity-50"
+                          title="Queue with Ollama (~5 min, local)"
+                        >
+                          {loading === "identify" ? "…" : isProcessing ? "Queued" : "Ollama"}
+                        </button>
+                        <button
+                          onClick={() => doAction("identify", { vlm_backend: "openai" })}
+                          disabled={!!loading}
+                          className="text-xs px-2.5 py-1 rounded-md bg-primary/10 hover:bg-primary/20 text-primary transition-colors disabled:opacity-50"
+                          title="Run with OpenAI GPT-4o (~15 s)"
+                        >
+                          {loading === "identify" ? "…" : "OpenAI"}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => doAction("analyse")}
+                        disabled={!!loading}
+                        className="text-xs px-2.5 py-1 rounded-md bg-secondary hover:bg-secondary/80 transition-colors disabled:opacity-50"
+                        title="Run GPT-4o compliance analysis on both images"
+                      >
+                        {loading === "analyse" ? "Analysing…" : complianceText ? "Re-analyse" : "Run AI"}
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
-              {aiText ? (
-                <MarkdownText text={aiText} />
+
+              {/* Tab content */}
+              {aiTab === "food_id" ? (
+                <div className="space-y-3">
+                  {loading === "identify" ? (
+                    <IdentifyProgress phase={identifyPhase} />
+                  ) : isProcessing ? (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-3 space-y-1">
+                      <p className="text-xs font-medium flex items-center gap-1.5">
+                        <span className="inline-block animate-spin">⏳</span> Identifying foods…
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">Ollama is analysing the pre-meal image (~5 min). Results will appear automatically.</p>
+                    </div>
+                  ) : isFailed ? (
+                    <div className="rounded-lg border border-red-200 bg-red-50 dark:bg-red-950/20 dark:border-red-800 p-3 space-y-1">
+                      <p className="text-xs font-medium text-red-700 dark:text-red-400">Food identification failed.</p>
+                      <p className="text-[10px] text-muted-foreground">Check the worker logs. You can retry with OpenAI (faster) or re-queue Ollama using the buttons above.</p>
+                    </div>
+                  ) : parsedFoodId ? (
+                    <FoodIdResults
+                      data={parsedFoodId}
+                      selections={candidateSelections}
+                      onSelect={(fid, code) => setCandidateSelections(prev => ({ ...prev, [fid]: code }))}
+                    />
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">
+                      {status === "pending"
+                        ? "Choose Ollama (queued) or OpenAI (instant) to identify food items."
+                        : "No food identification data recorded."}
+                    </p>
+                  )}
+
+                  {/* Manual recipe search — always visible in Food ID tab */}
+                  <div className="border-t pt-3 space-y-2">
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Manual search</p>
+                    <input
+                      type="text"
+                      value={manualSearch}
+                      onChange={e => setManualSearch(e.target.value)}
+                      placeholder="Search recipes by name…"
+                      className="w-full rounded-md border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                    {manualSearching && <p className="text-[10px] text-muted-foreground">Searching…</p>}
+                    {manualResults.length > 0 && (
+                      <div className="space-y-1 max-h-28 overflow-auto">
+                        {manualResults.map(r => {
+                          const isSelected = manualSelections.some(s => s.recipe_code === r.Recipe_Code);
+                          return (
+                            <button
+                              key={r.Recipe_Code}
+                              onClick={() => setManualSelections(prev =>
+                                isSelected
+                                  ? prev.filter(s => s.recipe_code !== r.Recipe_Code)
+                                  : [...prev, { recipe_code: r.Recipe_Code, recipe_name: r.Recipe_Name }]
+                              )}
+                              className={`w-full text-left rounded px-2 py-1.5 text-xs flex items-center justify-between gap-2 transition-colors border ${
+                                isSelected ? "bg-primary/10 border-primary/30" : "hover:bg-muted border-transparent"
+                              }`}
+                            >
+                              <span className="truncate">{r.Recipe_Name}</span>
+                              <span className="font-mono text-[10px] text-muted-foreground shrink-0">{r.Recipe_Code}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {manualSelections.length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {manualSelections.map(s => (
+                          <span key={s.recipe_code} className="flex items-center gap-1 text-[10px] rounded-full border bg-primary/5 px-2 py-0.5">
+                            {s.recipe_name}
+                            <button
+                              onClick={() => setManualSelections(prev => prev.filter(m => m.recipe_code !== s.recipe_code))}
+                              className="text-muted-foreground hover:text-foreground leading-none"
+                            >×</button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
-                <p className="text-xs text-muted-foreground italic">
-                  {status === "pending" ? "Click 'Run AI' to analyse images." : "No AI analysis recorded."}
-                </p>
+                /* Compliance tab */
+                loading === "analyse" ? (
+                  <p className="text-xs text-muted-foreground italic animate-pulse">Analysing images…</p>
+                ) : complianceText ? (
+                  <MarkdownText text={complianceText} />
+                ) : (
+                  <p className="text-xs text-muted-foreground italic">
+                    {status === "pending" ? "Click 'Run AI' to analyse images." : "No AI analysis recorded."}
+                  </p>
+                )
               )}
             </div>
 
