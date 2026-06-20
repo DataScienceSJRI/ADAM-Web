@@ -144,7 +144,7 @@ export default async function SessionsPage() {
         : null,
       recruited_by: isAdmin
         ? (coordinatorMap.get(s.user_id) ?? null)
-        : user.email,
+        : user.email ?? null,
     };
   });
 
