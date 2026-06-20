@@ -4,10 +4,11 @@ import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { BasicDetailsForm, type BasicDetails } from "@/components/basic-details-form";
+import { HealthDetailsForm, type HealthDetails, HEALTH_DETAILS_DEFAULT } from "@/components/health-details-form";
 import { MealPreferencesForm, type MealSelection } from "@/components/meal-preferences-form";
 import { ReviewStep } from "@/components/review-step";
 
-const STEPS = ["Basic Details", "Meal Preferences", "Review & Confirm"];
+const STEPS = ["Basic Details", "Health Details", "Meal Preferences", "Review & Confirm"];
 
 export default function OnboardingPage() {
   return (
@@ -23,6 +24,7 @@ function OnboardingFlow() {
   const participantUserId = searchParams.get("participant_id") ?? null;
   const [step, setStep] = useState(0);
   const [basicDetails, setBasicDetails] = useState<BasicDetails | null>(null);
+  const [healthDetails, setHealthDetails] = useState<HealthDetails>(HEALTH_DETAILS_DEFAULT);
   const [selections, setSelections] = useState<MealSelection[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +32,11 @@ function OnboardingFlow() {
   function handleBasicDetailsNext(data: BasicDetails) {
     setBasicDetails(data);
     setStep(1);
+  }
+
+  function handleHealthDetailsNext(data: HealthDetails) {
+    setHealthDetails(data);
+    setStep(2);
   }
 
   async function handleSubmit() {
@@ -62,6 +69,7 @@ function OnboardingFlow() {
     const {
       dietary_type,
       diet_restrictions,
+      non_veg_days,
       breakfast_time,
       lunch_time,
       dinner_time,
@@ -90,6 +98,15 @@ function OnboardingFlow() {
         step_count: step_count || null,
         user_id: targetUserId,
         onboarding_id: onboardingId,
+        health_details: {
+          co_morbidities: healthDetails.co_morbidities,
+          medications: healthDetails.medications || null,
+          allergies_dislikes: healthDetails.allergies_dislikes || null,
+          smoking: healthDetails.smoking,
+          tobacco: healthDetails.tobacco,
+          alcohol: healthDetails.alcohol,
+          non_veg_days: non_veg_days.length > 0 ? non_veg_days : null,
+        },
       });
     if (pdError) {
       console.warn("Could not save preference details:", pdError.message);
@@ -158,6 +175,7 @@ function OnboardingFlow() {
           Onboarding participant: <span className="font-mono font-semibold">{participantUserId}</span>
         </div>
       )}
+
       {/* Step progress indicator */}
       <div className="space-y-2">
         <div className="flex justify-between">
@@ -199,20 +217,28 @@ function OnboardingFlow() {
       )}
 
       {step === 1 && (
-        <MealPreferencesForm
-          selections={selections}
-          onChange={setSelections}
+        <HealthDetailsForm
+          defaultValues={healthDetails}
           onBack={() => setStep(0)}
-          onNext={() => setStep(2)}
-          dietaryType={basicDetails?.dietary_type}
+          onNext={handleHealthDetailsNext}
         />
       )}
 
       {step === 2 && (
+        <MealPreferencesForm
+          selections={selections}
+          onChange={setSelections}
+          onBack={() => setStep(1)}
+          onNext={() => setStep(3)}
+          dietaryType={basicDetails?.dietary_type}
+        />
+      )}
+
+      {step === 3 && (
         <ReviewStep
           basicDetails={basicDetails!}
           selections={selections}
-          onBack={() => setStep(1)}
+          onBack={() => setStep(2)}
           onEditBasicDetails={() => setStep(0)}
           onSubmit={handleSubmit}
           submitting={submitting}
