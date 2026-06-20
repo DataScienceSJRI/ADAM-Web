@@ -64,6 +64,7 @@ def get_recall_history(
             did_eat_as_planned=r.get("did_eat_as_planned"),
             food_name=r.get("Food_Name"),
             food_qty=r.get("Food_Qty"),
+            r_desc=r.get("R_desc"),
             energy_kcal=r.get("Energy_Kcal"),
             notes=r.get("notes"),
         )

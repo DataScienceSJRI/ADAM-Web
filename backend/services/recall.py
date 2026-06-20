@@ -85,9 +85,12 @@ def log_recall(
             }).execute()
             recall_ids.append(recall_id)
         else:
-            # Fetch all provided recipe codes in one query
+            # Fetch recipe info and default unit (Description) from RecipeTagging
             recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes_to_log).execute()
             recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
+
+            tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description").in_("Recipe_Code", codes_to_log).execute()
+            tag_map = {t["Recipe_Code"]: t.get("Description") for t in (tag_resp.data or []) if t.get("Recipe_Code")}
 
             for i, code in enumerate(codes_to_log):
                 recall_id = str(uuid.uuid4())
@@ -112,6 +115,9 @@ def log_recall(
                 else:
                     row["Food_Name"] = code
                     row["Food_Name_desc"] = code
+                desc = tag_map.get(code)
+                if desc and str(desc).strip().lower() not in ("nan", "none", ""):
+                    row["R_desc"] = str(desc).strip()
                 # Pick the matching quantity by index, fall back to None
                 qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
                 if qty:
@@ -130,34 +136,64 @@ def log_recall_image(
     image_url_post: Optional[str],
 ) -> tuple[str, str]:
     sb = get_supabase()
+    now = datetime.now(timezone.utc)
+    today = str(date_type.today())
+
+    # If this is a post-only upload, find today's pre-only row for the same
+    # user + meal slot and patch it rather than creating a second row.
+    if image_url_post and not image_url_pre:
+        existing_recalls = (
+            sb.table("DietRecall")
+            .select("ID")
+            .eq("user_id", user_id)
+            .eq("meal_slot", meal_slot.value)
+            .eq("Date", today)
+            .is_("image_url_post", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        if existing_recalls:
+            recall_id = existing_recalls[0]["ID"]
+            sb.table("DietRecall").update({"image_url_post": image_url_post}).eq("ID", recall_id).execute()
+            existing_review = (
+                sb.table("MealImageReview")
+                .select("id")
+                .eq("diet_recall_id", recall_id)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if existing_review:
+                review_id = existing_review[0]["id"]
+                sb.table("MealImageReview").update({"post_image_id": image_url_post}).eq("id", review_id).execute()
+                return recall_id, review_id
+
+    # Default: insert a new DietRecall + MealImageReview row (pre-only or both together).
     recall_id = str(uuid.uuid4())
     review_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
 
-    recall_row: dict = {
+    sb.table("DietRecall").insert({
         "ID": recall_id,
         "user_id": user_id,
-        "Date": str(date_type.today()),
+        "Date": today,
         "Time": now.strftime("%H:%M:%S"),
         "created_at": now.isoformat(),
         "plan_id": plan_id,
         "meal_slot": meal_slot.value,
         "image_url_pre": image_url_pre,
         "image_url_post": image_url_post,
-    }
+    }).execute()
 
-    sb.table("DietRecall").insert(recall_row).execute()
-
-    sb.table("MealImageReview").insert(
-        {
-            "id": review_id,
-            "user_id": user_id,
-            "diet_recall_id": recall_id,
-            "pre_image_id": image_url_pre,
-            "post_image_id": image_url_post,
-            "review_status": "pending",
-            "created_at": now.isoformat(),
-        }
-    ).execute()
+    sb.table("MealImageReview").insert({
+        "id": review_id,
+        "user_id": user_id,
+        "diet_recall_id": recall_id,
+        "pre_image_id": image_url_pre,
+        "post_image_id": image_url_post,
+        "review_status": "pending",
+        "created_at": now.isoformat(),
+    }).execute()
 
     return recall_id, review_id
