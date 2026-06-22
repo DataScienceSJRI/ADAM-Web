@@ -1,12 +1,17 @@
 import logging
+from datetime import date as date_type, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
+from concurrent.futures import ThreadPoolExecutor
 from core.auth import get_current_user
+from core.roles import require_coordinator
 from core.supabase import get_supabase
 from models.schemas import (
     DietRecallImageRequest,
     DietRecallLogRequest,
     DietRecallUpdateRequest,
+    IdentifiedFood,
+    ImageIdentifyResponse,
     MealSlot,
     RecallHistoryItem,
     RecallHistoryResponse,
@@ -116,3 +121,231 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
 
 
+@router.post("/{recall_id}/identify", response_model=ImageIdentifyResponse)
+async def identify_recall_image(recall_id: str, user_id: str = Depends(get_current_user)):
+    """Run the food identification pipeline on the pre-meal image for a recall entry.
+
+    Downloads the stored pre-meal image, identifies food items via VLM + ADS recipe
+    matching, and returns recipe codes with gram estimates the frontend can use to
+    pre-fill the recall form.
+    """
+    sb = get_supabase()
+    row = (
+        sb.table("DietRecall")
+        .select("ID, user_id, image_url_pre")
+        .eq("ID", recall_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    if not row.data:
+        raise HTTPException(status_code=404, detail="Recall entry not found")
+
+    image_url = row.data.get("image_url_pre")
+    if not image_url:
+        raise HTTPException(status_code=400, detail="No pre-meal image for this recall entry")
+
+    from services.food_id import identify_image_from_url
+
+    try:
+        result = await identify_image_from_url(image_url)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        logger.exception("Food identification failed for recall %s", recall_id)
+        raise HTTPException(status_code=500, detail="Food identification failed")
+
+    foods: list[IdentifiedFood] = []
+    for fr in result.get("foods", []):
+        match = fr.get("match", {})
+        qty = fr.get("quantity")
+        matched = match.get("matched")
+        foods.append(
+            IdentifiedFood(
+                food_id=fr["food_id"],
+                description=matched["recipe_name"] if matched else fr["food_id"],
+                recipe_code=matched["recipe_code"] if matched else None,
+                recipe_name=matched["recipe_name"] if matched else None,
+                quantity_g=qty["quantity_g"] if qty else None,
+                quantity_g_min=qty["quantity_g_min"] if qty else None,
+                quantity_g_max=qty["quantity_g_max"] if qty else None,
+                quantity_confidence=qty["quantity_confidence"] if qty else None,
+                match_status=match["status"],
+                match_confidence=match["match_confidence"],
+            )
+        )
+
+    return ImageIdentifyResponse(
+        analysis_id=result["analysis_id"],
+        foods=foods,
+        flags=result.get("flags", []),
+    )
+
+
+@router.get("/coordinator")
+def list_coordinator_participants(
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Return all participants with their diet recall compliance summary (coordinator-only)."""
+    sb = get_supabase()
+
+    q = sb.table("UserRoles").select("user_id, participant_id, display_name").eq("role", "participant")
+    if role == "coordinator":
+        q = q.eq("coordinator_id", user_id)
+    participants = q.execute().data or []
+
+    if not participants:
+        return []
+
+    lookup_ids: list = []
+    for p in participants:
+        pid = p["user_id"]
+        lookup_ids.append(pid)
+        lookup_ids.append(f"{pid}@adam.participant")
+
+    since = str(date_type.today() - timedelta(days=90))
+    recalls = (
+        sb.table("DietRecall")
+        .select("user_id, Date, meal_slot, did_eat_as_planned")
+        .in_("user_id", lookup_ids)
+        .gte("Date", since)
+        .limit(5000)
+        .execute()
+        .data
+    ) or []
+
+    recall_by_user: dict = {}
+    for r in recalls:
+        uid = r["user_id"]
+        canonical = uid.split("@")[0]
+        if canonical not in recall_by_user:
+            recall_by_user[canonical] = {}
+        date_str = (r.get("Date") or r.get("created_at") or "")[:10]
+        slot = r.get("meal_slot") or ""
+        key = f"{date_str}_{slot}"
+        if key not in recall_by_user[canonical]:
+            recall_by_user[canonical][key] = {"all_planned": True, "date": date_str}
+        if not r.get("did_eat_as_planned"):
+            recall_by_user[canonical][key]["all_planned"] = False
+
+    result = []
+    for p in participants:
+        pid = p["user_id"]
+        combos = recall_by_user.get(pid, {})
+        total = len(combos)
+        as_planned = sum(1 for c in combos.values() if c["all_planned"])
+        pct = round(as_planned / total * 100, 1) if total > 0 else None
+        dates = sorted({c["date"] for c in combos.values() if c["date"]}, reverse=True)
+        result.append({
+            "user_id": pid,
+            "participant_id": p.get("participant_id"),
+            "display_name": p.get("display_name"),
+            "total_logged": total,
+            "compliance_pct": pct,
+            "last_logged_date": dates[0] if dates else None,
+        })
+
+    return result
+
+
+@router.get("/coordinator/{participant_id}")
+def get_participant_recall_logs(
+    participant_id: str,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Return DietRecall and Recommendation data for a specific participant (coordinator-only)."""
+    sb = get_supabase()
+
+    q = (
+        sb.table("UserRoles")
+        .select("user_id, participant_id, display_name")
+        .eq("user_id", participant_id)
+        .eq("role", "participant")
+    )
+    if role == "coordinator":
+        q = q.eq("coordinator_id", user_id)
+    rows = q.execute().data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="Participant not found or no access")
+    participant = rows[0]
+
+    email = f"{participant_id}@adam.participant"
+    user_filter = [participant_id, email]
+
+    def fetch_logs():
+        return (
+            sb.table("DietRecall")
+            .select("*")
+            .in_("user_id", user_filter)
+            .order("Date", desc=True)
+            .order("Time", desc=True)
+            .limit(500)
+            .execute()
+            .data
+        ) or []
+
+    def fetch_plan():
+        return (
+            sb.table("Recommendation")
+            .select("Pkey, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, Energy_kcal, user_id")
+            .in_("user_id", user_filter)
+            .order("Date", desc=True)
+            .limit(500)
+            .execute()
+            .data
+        ) or []
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        logs_future = ex.submit(fetch_logs)
+        plan_future = ex.submit(fetch_plan)
+        logs = logs_future.result()
+        plan_rows = plan_future.result()
+
+    dates_set: set = set()
+    for r in logs:
+        d = (r.get("Date") or "")[:10]
+        if d:
+            dates_set.add(d)
+    for r in plan_rows:
+        d = (r.get("Date") or "")[:10]
+        if d:
+            dates_set.add(d)
+
+    return {
+        "participant": {
+            "user_id": participant["user_id"],
+            "participant_id": participant.get("participant_id"),
+            "display_name": participant.get("display_name"),
+        },
+        "dates": sorted(dates_set, reverse=True),
+        "plan": plan_rows,
+        "logs": logs,
+    }
+
+
+@router.patch("/coordinator/{recall_id}")
+def coordinator_update_recall(
+    recall_id: str,
+    body: DietRecallUpdateRequest,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Coordinator edits a diet recall entry."""
+    updates = {k: v for k, v in {
+        "did_eat_as_planned": body.did_eat_as_planned,
+        "Food_Name": body.food_name,
+        "Food_Qty": body.food_qty,
+        "meal_slot": body.meal_slot.value if body.meal_slot else None,
+        "notes": body.notes,
+    }.items() if v is not None}
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+
+    sb = get_supabase()
+    resp = sb.table("DietRecall").update(updates).eq("ID", recall_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Recall entry not found")
+    return resp.data[0]

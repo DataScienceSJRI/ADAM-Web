@@ -37,3 +37,6 @@ def log_weight(body: WeightLogRequest, user_id: str = Depends(get_current_user))
         raise HTTPException(status_code=500, detail="Failed to log weight.")
     return WeightLogResponse(status="ok", id=str(resp.data[0].get("id", "")))
 
+
+
+
