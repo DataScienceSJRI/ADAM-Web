@@ -88,6 +88,20 @@ def list_reviews(
     return list(grouped.values())
 
 
+@router.get("/reviews/{review_id}")
+def get_review(
+    review_id: str,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Fetch a single MealImageReview by ID (used for polling job status)."""
+    sb = get_supabase()
+    resp = sb.table("MealImageReview").select("*").eq("id", review_id).limit(1).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Review not found")
+    return resp.data[0]
+
+
 class ReviewUpdateRequest(BaseModel):
     action: str  # "approve" | "reject" | "analyse" | "identify"
     reviewed_foods_by_human: Optional[str] = None

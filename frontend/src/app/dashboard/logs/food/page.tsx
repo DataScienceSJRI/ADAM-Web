@@ -11,8 +11,10 @@ import {
   Check,
   Minus,
   AlertTriangle,
-  Image as ImageIcon,
+  Camera,
+  Loader2,
 } from "lucide-react";
+import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -322,19 +324,31 @@ function MealSlotCard({
   date,
   planItems,
   logItems,
+  reviewsForSlot,
   onEdit,
+  onReviewImage,
 }: {
   slot: string;
   date: string;
   planItems: PlanItem[];
   logItems: LogItem[];
+  reviewsForSlot: MealImageReview[];
   onEdit: () => void;
+  onReviewImage: (review: MealImageReview) => void;
 }) {
   const meta = SLOT_META[slot] ?? SLOT_META.breakfast;
   const status = slotStatus(logItems);
-  const hasImages = logItems.some((l) => l.image_url_pre || l.image_url_post);
   const planKcal = totalKcal(planItems);
   const logKcal = totalKcalLog(logItems);
+
+  const firstReview = reviewsForSlot[0] ?? null;
+  const reviewStatus = firstReview?.review_status;
+  const isProcessing = firstReview?.tracked_foods_by_ai === "__processing__";
+  const cameraColor =
+    reviewStatus === "approved" ? "text-emerald-500" :
+    reviewStatus === "rejected" ? "text-red-500" :
+    isProcessing ? "text-amber-500" :
+    "text-blue-500";
 
   return (
     <div className="rounded-xl border overflow-hidden">
@@ -346,10 +360,23 @@ function MealSlotCard({
         </div>
         <div className="flex items-center gap-2">
           <StatusBadge status={status} />
-          {hasImages && (
-            <span title="Images submitted" className="text-blue-500">
-              <ImageIcon className="h-3.5 w-3.5" />
-            </span>
+          {firstReview && (
+            <button
+              onClick={() => onReviewImage(firstReview)}
+              title={`Image review — ${reviewStatus ?? "pending"}${reviewsForSlot.length > 1 ? ` (${reviewsForSlot.length})` : ""}`}
+              className={`relative p-0.5 rounded hover:bg-white/60 transition-colors ${cameraColor}`}
+            >
+              {isProcessing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Camera className="h-3.5 w-3.5" />
+              )}
+              {reviewsForSlot.length > 1 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-blue-500 text-white text-[8px] font-bold rounded-full w-3.5 h-3.5 flex items-center justify-center leading-none">
+                  {reviewsForSlot.length}
+                </span>
+              )}
+            </button>
           )}
           {logItems.length > 0 && (
             <button
@@ -470,6 +497,10 @@ export default function FoodLogsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isListOpen, setIsListOpen] = useState(true);
   const [editState, setEditState] = useState<EditState | null>(null);
+  const [reviewsMap, setReviewsMap] = useState<Record<string, MealImageReview>>({});
+  const [imageReviewState, setImageReviewState] = useState<{
+    review: MealImageReview; slot: string; date: string;
+  } | null>(null);
 
   // Load auth + participant list
   useEffect(() => {
@@ -539,6 +570,32 @@ export default function FoodLogsPage() {
     };
   }, [participantData, currentDate]);
 
+  // Load all image reviews for coordinator's participants
+  useEffect(() => {
+    if (!token) return;
+    fetch("/api/feedback/reviews", {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.ok ? r.json() : [])
+      .then((groups: { reviews: MealImageReview[] }[]) => {
+        const map: Record<string, MealImageReview> = {};
+        for (const g of groups) {
+          for (const r of g.reviews ?? []) {
+            if (r.diet_recall_id) map[r.diet_recall_id] = r;
+          }
+        }
+        setReviewsMap(map);
+      })
+      .catch(() => {});
+  }, [token]);
+
+  const handleReviewUpdated = useCallback((updated: MealImageReview) => {
+    setReviewsMap((prev) => ({ ...prev, [updated.diet_recall_id]: updated }));
+    setImageReviewState((prev) =>
+      prev && prev.review.id === updated.id ? { ...prev, review: updated } : prev
+    );
+  }, []);
+
   const handleSaved = useCallback((updated: LogItem[]) => {
     setParticipantData((prev) => {
       if (!prev) return prev;
@@ -593,6 +650,18 @@ export default function FoodLogsPage() {
           token={token}
           onClose={() => setEditState(null)}
           onSaved={handleSaved}
+        />
+      )}
+      {imageReviewState && token && (
+        <ImageReviewModal
+          review={imageReviewState.review}
+          slotLabel={SLOT_META[imageReviewState.slot]?.label ?? imageReviewState.slot}
+          dateLabel={new Date(imageReviewState.date).toLocaleDateString("en-IN", {
+            weekday: "long", day: "numeric", month: "long",
+          })}
+          token={token}
+          onClose={() => setImageReviewState(null)}
+          onUpdated={handleReviewUpdated}
         />
       )}
 
@@ -804,18 +873,27 @@ export default function FoodLogsPage() {
                   {/* Meal slot cards for the day */}
                   {!loadingData && dayStats && currentDate && (
                     <div className="space-y-3">
-                      {dayStats.slotData.map(({ slot, planItems, logItems }) => (
-                        <MealSlotCard
-                          key={slot}
-                          slot={slot}
-                          date={currentDate}
-                          planItems={planItems}
-                          logItems={logItems}
-                          onEdit={() =>
-                            setEditState({ slot, date: currentDate, logs: logItems })
-                          }
-                        />
-                      ))}
+                      {dayStats.slotData.map(({ slot, planItems, logItems }) => {
+                        const reviewsForSlot = logItems
+                          .map((l) => reviewsMap[l.ID])
+                          .filter((r): r is MealImageReview => !!r);
+                        return (
+                          <MealSlotCard
+                            key={slot}
+                            slot={slot}
+                            date={currentDate}
+                            planItems={planItems}
+                            logItems={logItems}
+                            reviewsForSlot={reviewsForSlot}
+                            onEdit={() =>
+                              setEditState({ slot, date: currentDate, logs: logItems })
+                            }
+                            onReviewImage={(review) =>
+                              setImageReviewState({ review, slot, date: currentDate })
+                            }
+                          />
+                        );
+                      })}
 
                       {dayStats.slotData.length === 0 && (
                         <div className="flex items-center justify-center rounded-xl border border-dashed py-12">

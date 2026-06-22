@@ -29,3 +29,17 @@ services:
       PYTHONUNBUFFERED: "1"
     depends_on:
       - redis
+
+  food-id-worker:
+    build:
+      context: ./backend
+    command: python -m services.food_id_worker
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/1
+      FOOD_ID_QUEUE_NAME: food-id
+      FOOD_ID_JOB_TIMEOUT_SECONDS: "900"
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      - redis
