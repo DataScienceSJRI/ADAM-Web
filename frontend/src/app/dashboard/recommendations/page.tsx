@@ -650,8 +650,8 @@ function MealDetailPanel({
                   <p className="text-sm font-medium">{row.Food_Name ?? row.Food_Name_desc ?? "—"}</p>
                   <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                     <p className="text-xs text-muted-foreground">
-                      {glInfo?.Portion_optimal != null && `${glInfo.Portion_optimal}${row.R_desc ? ` ${row.R_desc}` : ""}`}
-                      {glInfo?.Portion_optimal != null && row.Energy_kcal != null && " · "}
+                      {row.Food_Qty != null && `${row.Food_Qty}${row.R_desc ? ` ${row.R_desc}` : ""}`}
+                      {row.Food_Qty != null && row.Energy_kcal != null && " · "}
                       {row.Energy_kcal != null && `${Math.round(row.Energy_kcal)} kcal`}
                     </p>
                     {glInfo?.GL != null && (

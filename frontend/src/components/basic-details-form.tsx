@@ -22,6 +22,8 @@ const ACTIVITY_LEVELS_VALUES = [
   "Extra Active",
 ] as const;
 const DIETARY_TYPE_VALUES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"] as const;
+const NON_VEG_TYPES = ["Non Veg", "Eggatarian", "Ovo veg"] as const;
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
 
 export const BasicDetailsSchema = z.object({
   Age: z.number({ error: "Required" })
@@ -35,11 +37,13 @@ export const BasicDetailsSchema = z.object({
   Height: z.number({ error: "Required" })
     .min(50, "Must be at least 50 cm")
     .max(250, "Must be 250 cm or below"),
-  Hba1c: z.number()
-    .refine(v => v === 0 || (v >= 3 && v <= 20), "Must be between 3 and 20 %"),
+  Hba1c: z.number({ error: "Required" })
+    .min(3, "Must be between 3 and 20 %")
+    .max(20, "Must be between 3 and 20 %"),
   Activity_levels: z.enum(ACTIVITY_LEVELS_VALUES, "Required"),
   dietary_type: z.enum(DIETARY_TYPE_VALUES, "Required"),
   diet_restrictions: z.array(z.string()),
+  non_veg_days: z.array(z.string()),
   breakfast_time: z.string(),
   lunch_time: z.string(),
   dinner_time: z.string(),
@@ -77,6 +81,7 @@ export function BasicDetailsForm({
       Activity_levels: "",
       dietary_type: "",
       diet_restrictions: [],
+      non_veg_days: [],
       breakfast_time: "",
       lunch_time: "",
       dinner_time: "",
@@ -84,6 +89,9 @@ export function BasicDetailsForm({
     }
   );
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({});
+  const [weightRaw, setWeightRaw] = useState(defaultValues?.Weight?.toString() ?? "");
+  const [heightRaw, setHeightRaw] = useState(defaultValues?.Height?.toString() ?? "");
+  const [hba1cRaw, setHba1cRaw] = useState(defaultValues?.Hba1c?.toString() ?? "");
 
   function update<K extends keyof FormState>(key: K, val: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: val }));
@@ -150,12 +158,14 @@ export function BasicDetailsForm({
           <div className="space-y-1.5">
             <label className="text-sm font-medium">Weight (kg)</label>
             <Input
-              type="number"
-              min={10}
-              max={300}
-              step="0.1"
-              value={form.Weight || ""}
-              onChange={(e) => update("Weight", parseFloat(e.target.value) || 0)}
+              type="text"
+              inputMode="decimal"
+              value={weightRaw}
+              onChange={(e) => {
+                setWeightRaw(e.target.value);
+                const v = parseFloat(e.target.value);
+                update("Weight", isNaN(v) ? 0 : v);
+              }}
               placeholder="65.0"
             />
             {errors.Weight && (
@@ -166,12 +176,14 @@ export function BasicDetailsForm({
           <div className="space-y-1.5">
             <label className="text-sm font-medium">Height (cm)</label>
             <Input
-              type="number"
-              min={50}
-              max={250}
-              step="0.1"
-              value={form.Height || ""}
-              onChange={(e) => update("Height", parseFloat(e.target.value) || 0)}
+              type="text"
+              inputMode="decimal"
+              value={heightRaw}
+              onChange={(e) => {
+                setHeightRaw(e.target.value);
+                const v = parseFloat(e.target.value);
+                update("Height", isNaN(v) ? 0 : v);
+              }}
               placeholder="165.0"
             />
             {errors.Height && (
@@ -181,18 +193,17 @@ export function BasicDetailsForm({
         </div>
 
         <div className="space-y-1.5">
-          <label className="text-sm font-medium">
-            HbA1c{" "}
-            <span className="font-normal text-muted-foreground">(optional)</span>
-          </label>
+          <label className="text-sm font-medium">HbA1c (%)</label>
           <Input
-            type="number"
-            min={3}
-            max={20}
-            step="0.1"
-            value={form.Hba1c || ""}
-            onChange={(e) => update("Hba1c", parseFloat(e.target.value) || 0)}
-            placeholder="e.g. 5"
+            type="text"
+            inputMode="decimal"
+            value={hba1cRaw}
+            onChange={(e) => {
+              setHba1cRaw(e.target.value);
+              const v = parseFloat(e.target.value);
+              update("Hba1c", isNaN(v) ? 0 : v);
+            }}
+            placeholder="e.g. 5.4"
           />
           {errors.Hba1c && <p className="text-xs text-destructive">{errors.Hba1c}</p>}
         </div>
@@ -230,6 +241,36 @@ export function BasicDetailsForm({
             <p className="text-xs text-destructive">{errors.dietary_type}</p>
           )}
         </div>
+
+        {(NON_VEG_TYPES as readonly string[]).includes(form.dietary_type) && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">
+              Preferred Non-Veg Days{" "}
+              <span className="font-normal text-muted-foreground">(optional)</span>
+            </label>
+            <div className="flex gap-1.5 flex-wrap">
+              {DAYS.map((day) => (
+                <button
+                  key={day}
+                  type="button"
+                  onClick={() => {
+                    const next = form.non_veg_days.includes(day)
+                      ? form.non_veg_days.filter((d) => d !== day)
+                      : [...form.non_veg_days, day];
+                    update("non_veg_days", next);
+                  }}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    form.non_veg_days.includes(day)
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background text-foreground hover:bg-muted"
+                  }`}
+                >
+                  {day}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium">Dietary Restrictions</label>

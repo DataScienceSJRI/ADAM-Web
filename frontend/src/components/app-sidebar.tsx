@@ -13,45 +13,35 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import {
-  LayoutDashboard,
   UtensilsCrossed,
-  Heart,
   ClipboardList,
-  CalendarDays,
   History,
   Users,
-  SlidersHorizontal,
-  MessageSquareMore,
+  LayoutDashboard,
+  Heart,
+  Utensils,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserNav } from "./user-nav";
 
-const studyItems = [
-  { title: "Users", href: "/dashboard/users", icon: Users },
-  { title: "Preferences", href: "/dashboard/preferences", icon: SlidersHorizontal },
-  
-];
-
-const planItems = [
-  { title: "Recommendations", href: "/dashboard/recommendations", icon: LayoutDashboard },
-  { title: "Participant Plans", href: "/dashboard/plan", icon: CalendarDays },
-  { title: "Session History", href: "/dashboard/sessions", icon: History },
+const participantItems = [
+  { title: "Participants", href: "/dashboard/users", icon: Users },
 ];
 
 const logItems = [
-  { title: 'Food Logs', href: '/dashboard/logs/food', icon: ClipboardList },
-  { title: "Image Feedback", href: "/dashboard/feedback", icon: MessageSquareMore },
-];
-
-const setupItems = [
-  { title: "Onboarding", href: "/onboarding", icon: ClipboardList },
-  { title: "Preferences", href: "/dashboard/preferences", icon: Heart },
+  { title: "Diet Logs", href: "/dashboard/logs/food", icon: Utensils },
+  { title: "Image Review", href: "/dashboard/logs/feedback", icon: Heart },
+  { title: "Session History", href: "/dashboard/sessions", icon: History },
 ];
 
 export function AppSidebar({ role }: { role: string }) {
   const pathname = usePathname();
   const isCoordinator = role === "coordinator" || role === "admin";
+
+  // These pages are reached via in-page links, not sidebar nav directly.
+  const isRecommendations = pathname === "/dashboard/recommendations";
+  const isPreferences = pathname === "/dashboard/preferences";
 
   return (
     <Sidebar>
@@ -71,79 +61,60 @@ export function AppSidebar({ role }: { role: string }) {
 
       <SidebarContent>
         {isCoordinator && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Study Management</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {studyItems.map((item) => (
-                  <SidebarMenuItem key={item.href}>
-                    <SidebarMenuButton asChild isActive={pathname === item.href}>
-                      <Link href={item.href}>
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
-                      </Link>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        )}
+          <>
+            <SidebarGroup>
+              <SidebarGroupLabel>Participants</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {participantItems.map((item) => (
+                    <SidebarMenuItem key={item.href}>
+                      <SidebarMenuButton asChild isActive={pathname === item.href}>
+                        <Link href={item.href}>
+                          <item.icon className="h-4 w-4" />
+                          <span>{item.title}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                  {/* Ghost entries — highlighted when navigated to via in-page links */}
+                  {isRecommendations && (
+                    <SidebarMenuItem>
+                      <SidebarMenuButton isActive>
+                        <LayoutDashboard className="h-4 w-4" />
+                        <span>View Plan</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )}
+                  {isPreferences && (
+                    <SidebarMenuItem>
+                      <SidebarMenuButton isActive>
+                        <ClipboardList className="h-4 w-4" />
+                        <span>Preferences</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  )}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
 
-        <SidebarGroup>
-          <SidebarGroupLabel>Meal Plans</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {planItems.map((item) => (
-                <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton asChild isActive={pathname === item.href}>
-                    <Link href={item.href}>
-                      <item.icon className="h-4 w-4" />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        <SidebarGroup>
-          <SidebarGroupLabel>Dietary Logs</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {logItems.map((item) => (
-                <SidebarMenuItem key={item.href}>
-                  <SidebarMenuButton asChild isActive={pathname === item.href}>
-                    <Link href={item.href}>
-                      <item.icon className="h-4 w-4" />
-                      <span>{item.title}</span>
-                    </Link>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
-
-        {!isCoordinator && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Profile & Setup</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {setupItems.map((item) => (
-                  <SidebarMenuItem key={item.href}>
-                    <SidebarMenuButton asChild isActive={pathname === item.href}>
-                      <Link href={item.href}>
-                        <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
-                      </Link>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+            <SidebarGroup>
+              <SidebarGroupLabel>Logs</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {logItems.map((item) => (
+                    <SidebarMenuItem key={item.href}>
+                      <SidebarMenuButton asChild isActive={pathname === item.href}>
+                        <Link href={item.href}>
+                          <item.icon className="h-4 w-4" />
+                          <span>{item.title}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          </>
         )}
       </SidebarContent>
 

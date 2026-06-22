@@ -82,6 +82,15 @@ export function MealPreferencesForm({
   const [rows, setRows] = useState<SubCategoryRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [skippedMeals, setSkippedMeals] = useState<Set<MealTime>>(new Set());
+
+  function toggleSkip(mt: MealTime) {
+    setSkippedMeals(prev => {
+      const next = new Set(prev);
+      next.has(mt) ? next.delete(mt) : next.add(mt);
+      return next;
+    });
+  }
 
   useEffect(() => {
     createClient()
@@ -157,17 +166,21 @@ export function MealPreferencesForm({
   const REQUIRED_MEAL_TIMES = ["Breakfast", "Lunch", "Dinner"] as const;
   const MAIN_MIN = 5;
 
-  const incompleteMealTimes = REQUIRED_MEAL_TIMES.filter(
-    (mt) => selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length < MAIN_MIN
-  );
-  const canProceed = incompleteMealTimes.length === 0;
+  // Non-skipped meals that have started but not reached the minimum
+  const incompleteMealTimes = REQUIRED_MEAL_TIMES.filter((mt) => {
+    if (skippedMeals.has(mt)) return false;
+    const count = selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length;
+    return count > 0 && count < MAIN_MIN;
+  });
+  const allRequiredSkipped = REQUIRED_MEAL_TIMES.every(mt => skippedMeals.has(mt));
+  const canProceed = incompleteMealTimes.length === 0 && !allRequiredSkipped;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Meal Preferences</CardTitle>
         <CardDescription>
-          Select at least 5 main dishes for each of Breakfast, Lunch, and Dinner.
+          Select at least 5 main dishes per meal, or skip a meal. You must keep at least one meal.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -177,14 +190,17 @@ export function MealPreferencesForm({
             const mainCount = selections.filter((s) => s.meal_time === mt && s.dish_type === "Main").length;
             const totalCount = selections.filter((s) => s.meal_time === mt).length;
             const isRequired = (REQUIRED_MEAL_TIMES as readonly string[]).includes(mt);
-            const done = isRequired ? mainCount >= MAIN_MIN : true;
-            const badgeColor = !isRequired
+            const skipped = skippedMeals.has(mt);
+            const done = skipped || (isRequired ? mainCount >= MAIN_MIN : true);
+            const badgeColor = skipped
+              ? "bg-muted-foreground/20 text-muted-foreground"
+              : !isRequired
               ? "bg-muted text-muted-foreground"
               : done
               ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
               : mainCount > 0
               ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"
-              : "bg-destructive/15 text-destructive";
+              : "bg-muted text-muted-foreground";
             return (
               <button
                 key={mt}
@@ -193,34 +209,51 @@ export function MealPreferencesForm({
                   activeTab === mt
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
-                }`}
+                } ${skipped ? "opacity-50" : ""}`}
               >
                 {mt}
-                {(isRequired || totalCount > 0) && (
+                {skipped ? (
+                  <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${badgeColor}`}>
+                    skip
+                  </span>
+                ) : (isRequired || totalCount > 0) ? (
                   <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${badgeColor}`}>
                     {isRequired ? `${mainCount}/${MAIN_MIN}` : totalCount}
                   </span>
-                )}
+                ) : null}
               </button>
             );
           })}
         </div>
 
-        {/* Sub-tabs */}
-        <div className="flex gap-1 border-b">
-          {subTabs.map((st) => (
-            <button
-              key={st.key}
-              onClick={() => switchSubTab(st.key)}
-              className={`px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
-                activeSubTab === st.key
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {st.label}
-            </button>
-          ))}
+        {/* Sub-tabs + skip button */}
+        <div className="flex items-center justify-between border-b">
+          <div className="flex gap-1">
+            {subTabs.map((st) => (
+              <button
+                key={st.key}
+                onClick={() => switchSubTab(st.key)}
+                disabled={skippedMeals.has(activeTab)}
+                className={`px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors disabled:opacity-40 ${
+                  activeSubTab === st.key
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {st.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => toggleSkip(activeTab)}
+            className={`mb-1 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+              skippedMeals.has(activeTab)
+                ? "bg-primary/10 text-primary hover:bg-primary/20"
+                : "bg-muted text-muted-foreground hover:bg-muted/80"
+            }`}
+          >
+            {skippedMeals.has(activeTab) ? "Undo skip" : "Skip meal"}
+          </button>
         </div>
 
         {/* Search */}
@@ -229,11 +262,22 @@ export function MealPreferencesForm({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="h-8 text-sm"
+          disabled={skippedMeals.has(activeTab)}
         />
 
         {/* Grid */}
         <div className="min-h-40">
-          {loading ? (
+          {skippedMeals.has(activeTab) ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-10 gap-2">
+              <p className="text-sm text-muted-foreground">{activeTab} is skipped.</p>
+              <button
+                onClick={() => toggleSkip(activeTab)}
+                className="text-xs text-primary underline underline-offset-2"
+              >
+                Undo skip
+              </button>
+            </div>
+          ) : loading ? (
             <div className="grid grid-cols-2 gap-2">
               {[1, 2, 3, 4].map((i) => (
                 <div key={i} className="h-10 rounded-md border bg-muted/30 animate-pulse" />
@@ -268,7 +312,10 @@ export function MealPreferencesForm({
         </div>
 
         <div className="space-y-2 pt-2">
-          {!canProceed && (
+          {allRequiredSkipped && (
+            <p className="text-xs text-destructive">You must keep at least one meal (Breakfast, Lunch, or Dinner).</p>
+          )}
+          {incompleteMealTimes.length > 0 && (
             <p className="text-xs text-destructive">
               Select at least {MAIN_MIN} main dishes for:{" "}
               {incompleteMealTimes.map((mt) => {
