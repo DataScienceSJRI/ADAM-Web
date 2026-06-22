@@ -68,6 +68,24 @@ def get_activity_history(
     ]
     return ActivityHistoryResponse(items=items, total=resp.count or len(items))
 
+@router.put("/{activity_id}")
+def update_activity(activity_id: str, body: ActivityLogRequest, user_id: str = Depends(get_current_user)):
+    """Update an activity log entry belonging to the authenticated user for the date that's already there."""
+    updates = {k: v for k, v in {
+        "PA_Name": body.pa_name,
+        "Duration": body.duration_min,
+        "intensity": body.intensity,
+    }.items() if v is not None}
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided to update.")
+
+    sb = get_supabase()
+    resp = sb.table("user_physical_activity_recall").update(updates).eq("ID", activity_id).eq("UID", user_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Activity log not found")
+    return {"status": "updated", "id": activity_id}
+    
 
 @router.delete("/{activity_id}")
 def delete_activity(activity_id: str, user_id: str = Depends(get_current_user)):
