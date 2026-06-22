@@ -77,7 +77,9 @@ def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = 
     """Update a diet recall entry belonging to the authenticated user."""
     updates = {k: v for k, v in {
         "did_eat_as_planned": body.did_eat_as_planned,
+        "Food_Name": body.food_name,
         "Food_Qty": body.food_qty,
+        "meal_slot": body.meal_slot.value if body.meal_slot else None,
         "notes": body.notes,
     }.items() if v is not None}
 
@@ -112,3 +114,5 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         image_url_post=body.image_url_post,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
+
+
