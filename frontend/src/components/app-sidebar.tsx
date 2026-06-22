@@ -31,7 +31,7 @@ const participantItems = [
 
 const logItems = [
   { title: "Diet Logs", href: "/dashboard/logs/food", icon: Utensils },
-  { title: "Image Review", href: "/dashboard/logs/feedback", icon: Heart },
+  { title: "Image Review", href: "/dashboard/feedback", icon: Heart },
   { title: "Session History", href: "/dashboard/sessions", icon: History },
 ];
 

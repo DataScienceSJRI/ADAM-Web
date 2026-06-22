@@ -123,10 +123,12 @@ class DietRecallLogRequest(BaseModel):
 
 class DietRecallUpdateRequest(BaseModel):
     did_eat_as_planned: Optional[bool] = None
+    food_name: Optional[str] = None
     food_qty: Optional[str] = None
+    meal_slot: Optional[MealSlot] = None
     notes: Optional[str] = None
 
-    model_config = {"json_schema_extra": {"example": {"did_eat_as_planned": False, "food_qty": "0.75", "notes": "ate less"}}}
+    model_config = {"json_schema_extra": {"example": {"did_eat_as_planned": False, "food_name": "Idli", "food_qty": "0.75", "meal_slot": "breakfast", "notes": "ate less"}}}
 
 
 class DietRecallImageRequest(BaseModel):
@@ -380,3 +382,43 @@ class WebReactionItem(BaseModel):
 class WebReactionsListResponse(BaseModel):
     items: List[WebReactionItem]
     total: int
+
+
+class PreferenceItem(BaseModel):
+    id: Optional[str] = None
+    meal_time: Optional[str] = None
+    dish_type: Optional[str] = None
+    sub_category: Optional[str] = None
+    reaction: Optional[str] = None
+    onboarding_id: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class PreferenceUpdateRequest(BaseModel):
+    meal_time: Optional[str] = None
+    dish_type: Optional[str] = None
+    sub_category: Optional[str] = None
+    reaction: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {"meal_time": "Breakfast", "dish_type": "Main", "sub_category": "A1A", "reaction": "like"}}}
+
+
+class WeightLogRequest(BaseModel):
+    weight_kg: float
+    date: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {"weight_kg": 72.5, "date": "2026-06-22"}}}
+
+
+class WeightLogResponse(BaseModel):
+    status: str
+    id: str
+
+
+class WeightLogItem(BaseModel):
+    id: Optional[str] = None
+    weight_kg: Optional[float] = None
+    date: Optional[str] = None
+
+    model_config = {"extra": "allow"}
