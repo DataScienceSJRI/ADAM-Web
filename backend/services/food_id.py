@@ -15,6 +15,7 @@ def _build_settings(vlm_backend: str | None = None):
             "Run: pip install git+https://github.com/ictashik/FVA.git"
         ) from exc
     return Settings(
+        _env_file=None,  # prevent loading backend's .env — values supplied explicitly
         ads_base_url=os.environ.get("ADS_BASE_URL", "https://datatools.sjri.res.in/ADS"),
         ads_username=os.environ.get("ADS_USERNAME", ""),
         ads_password=os.environ.get("ADS_PASSWORD", ""),
