@@ -334,7 +334,7 @@ function MealSlotCard({
   logItems: LogItem[];
   reviewsForSlot: MealImageReview[];
   onEdit: () => void;
-  onReviewImage: (review: MealImageReview) => void;
+  onReviewImage: (reviews: MealImageReview[]) => void;
 }) {
   const meta = SLOT_META[slot] ?? SLOT_META.breakfast;
   const status = slotStatus(logItems);
@@ -362,7 +362,7 @@ function MealSlotCard({
           <StatusBadge status={status} />
           {firstReview && (
             <button
-              onClick={() => onReviewImage(firstReview)}
+              onClick={() => onReviewImage(reviewsForSlot)}
               title={`Image review — ${reviewStatus ?? "pending"}${reviewsForSlot.length > 1 ? ` (${reviewsForSlot.length})` : ""}`}
               className={`relative p-0.5 rounded hover:bg-white/60 transition-colors ${cameraColor}`}
             >
@@ -499,7 +499,7 @@ export default function FoodLogsPage() {
   const [editState, setEditState] = useState<EditState | null>(null);
   const [reviewsMap, setReviewsMap] = useState<Record<string, MealImageReview>>({});
   const [imageReviewState, setImageReviewState] = useState<{
-    review: MealImageReview; slot: string; date: string;
+    reviews: MealImageReview[]; slot: string; date: string;
   } | null>(null);
 
   // Load auth + participant list
@@ -591,9 +591,13 @@ export default function FoodLogsPage() {
 
   const handleReviewUpdated = useCallback((updated: MealImageReview) => {
     setReviewsMap((prev) => ({ ...prev, [updated.diet_recall_id]: updated }));
-    setImageReviewState((prev) =>
-      prev && prev.review.id === updated.id ? { ...prev, review: updated } : prev
-    );
+    setImageReviewState((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        reviews: prev.reviews.map((r) => r.id === updated.id ? updated : r),
+      };
+    });
   }, []);
 
   const handleSaved = useCallback((updated: LogItem[]) => {
@@ -654,7 +658,7 @@ export default function FoodLogsPage() {
       )}
       {imageReviewState && token && (
         <ImageReviewModal
-          review={imageReviewState.review}
+          reviews={imageReviewState.reviews}
           slotLabel={SLOT_META[imageReviewState.slot]?.label ?? imageReviewState.slot}
           dateLabel={new Date(imageReviewState.date).toLocaleDateString("en-IN", {
             weekday: "long", day: "numeric", month: "long",
@@ -888,8 +892,8 @@ export default function FoodLogsPage() {
                             onEdit={() =>
                               setEditState({ slot, date: currentDate, logs: logItems })
                             }
-                            onReviewImage={(review) =>
-                              setImageReviewState({ review, slot, date: currentDate })
+                            onReviewImage={(reviews) =>
+                              setImageReviewState({ reviews, slot, date: currentDate })
                             }
                           />
                         );

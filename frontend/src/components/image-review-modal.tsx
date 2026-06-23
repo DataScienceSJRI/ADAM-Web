@@ -10,6 +10,8 @@ import {
   Camera,
   ExternalLink,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 
 const PROCESSING = "__processing__";
@@ -101,25 +103,54 @@ const CONFIDENCE_CLS: Record<string, string> = {
 };
 
 export function ImageReviewModal({
-  review: initialReview,
+  reviews,
   slotLabel,
   dateLabel,
   token,
   onClose,
   onUpdated,
 }: {
-  review: MealImageReview;
+  reviews: MealImageReview[];
   slotLabel: string;
   dateLabel: string;
   token: string;
   onClose: () => void;
   onUpdated: (review: MealImageReview) => void;
 }) {
-  const [review, setReview] = useState<MealImageReview>(initialReview);
-  const [manualText, setManualText] = useState(initialReview.reviewed_foods_by_human ?? "");
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [review, setReview] = useState<MealImageReview>(reviews[0]);
+  const [manualText, setManualText] = useState(reviews[0].reviewed_foods_by_human ?? "");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expandedCandidates, setExpandedCandidates] = useState<Set<number>>(new Set());
+  const [selectedOverrides, setSelectedOverrides] = useState<Record<number, MatchCandidate>>({});
+
+  function navigate(dir: -1 | 1) {
+    const newIdx = currentIndex + dir;
+    setCurrentIndex(newIdx);
+    setReview(reviews[newIdx]);
+    setManualText(reviews[newIdx].reviewed_foods_by_human ?? "");
+    setError(null);
+    setExpandedCandidates(new Set());
+    setSelectedOverrides({});
+  }
+
+  function toggleCandidate(foodIdx: number, candidate: MatchCandidate, foods: FoodItem[]) {
+    const current = selectedOverrides[foodIdx];
+    const newOverrides = { ...selectedOverrides };
+    if (current?.recipe_code === candidate.recipe_code) {
+      delete newOverrides[foodIdx];
+    } else {
+      newOverrides[foodIdx] = candidate;
+    }
+    setSelectedOverrides(newOverrides);
+    const text = foods.map((f, i) => {
+      const name = newOverrides[i]?.recipe_name ?? f.recipe_name ?? f.description ?? "Unknown";
+      const qty = f.quantity_g != null ? ` (~${Math.round(f.quantity_g)}g)` : "";
+      return `${name}${qty}`;
+    }).join("; ");
+    setManualText(text);
+  }
 
   const parsed = parseAi(review.tracked_foods_by_ai);
 
@@ -192,6 +223,25 @@ export function ImageReviewModal({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {reviews.length > 1 && (
+              <div className="flex items-center gap-0.5 text-xs text-muted-foreground">
+                <button
+                  onClick={() => navigate(-1)}
+                  disabled={currentIndex === 0}
+                  className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <span className="tabular-nums px-0.5">{currentIndex + 1}/{reviews.length}</span>
+                <button
+                  onClick={() => navigate(1)}
+                  disabled={currentIndex === reviews.length - 1}
+                  className="p-1 rounded hover:bg-muted disabled:opacity-30 transition-colors"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
             {isApproved && (
               <span className="text-[11px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">
                 Approved
@@ -313,18 +363,28 @@ export function ImageReviewModal({
                   {parsed.foods.map((f, i) => {
                     const isExpanded = expandedCandidates.has(i);
                     const candidates = f.candidates ?? [];
+                    const override = selectedOverrides[i];
+                    const displayName = override?.recipe_name ?? f.recipe_name ?? f.description ?? "Unknown food";
+                    const displayDesc = override
+                      ? (override.recipe_description ?? undefined)
+                      : (f.recipe_name && f.description && f.recipe_name !== f.description ? f.description : undefined);
                     return (
                       <div key={i} className="rounded-lg bg-muted/20 overflow-hidden text-xs">
                         {/* Matched food row */}
                         <div className="flex items-start justify-between gap-3 px-3 py-2.5">
                           <div className="min-w-0">
-                            <p className="font-medium truncate">
-                              {f.recipe_name ?? f.description ?? "Unknown food"}
-                            </p>
-                            {f.recipe_name && f.description && f.recipe_name !== f.description && (
-                              <p className="text-muted-foreground mt-0.5 truncate">{f.description}</p>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <p className="font-medium truncate">{displayName}</p>
+                              {override && (
+                                <span className="text-[10px] bg-blue-100 text-blue-700 dark:bg-blue-950/40 dark:text-blue-400 px-1.5 py-0.5 rounded-full font-semibold shrink-0">
+                                  overridden
+                                </span>
+                              )}
+                            </div>
+                            {displayDesc && (
+                              <p className="text-muted-foreground mt-0.5 truncate">{displayDesc}</p>
                             )}
-                            {f.match_status && (
+                            {!override && f.match_status && (
                               <p className="text-muted-foreground mt-0.5 text-[10px] capitalize">{f.match_status}</p>
                             )}
                           </div>
@@ -367,17 +427,37 @@ export function ImageReviewModal({
                             <p className="px-3 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide bg-muted/10">
                               Other candidates
                             </p>
-                            {candidates.map((c) => (
-                              <div key={c.recipe_code} className="flex items-center justify-between gap-2 px-3 py-2 bg-background/50">
-                                <div className="min-w-0">
-                                  <p className="truncate text-foreground/80">{c.recipe_name ?? c.recipe_code}</p>
-                                  {c.recipe_description && (
-                                    <p className="text-muted-foreground text-[10px] truncate">{c.recipe_description}</p>
-                                  )}
+                            {candidates.map((c) => {
+                              const isSelected = override?.recipe_code === c.recipe_code;
+                              return (
+                                <div
+                                  key={c.recipe_code}
+                                  onClick={() => toggleCandidate(i, c, parsed.foods)}
+                                  className={`flex items-center justify-between gap-2 px-3 py-2 cursor-pointer transition-colors ${
+                                    isSelected
+                                      ? "bg-blue-50 dark:bg-blue-950/30"
+                                      : "bg-background/50 hover:bg-muted/40"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <div className={`h-3.5 w-3.5 rounded-full border-2 shrink-0 flex items-center justify-center transition-colors ${
+                                      isSelected ? "border-blue-500 bg-blue-500" : "border-muted-foreground/40"
+                                    }`}>
+                                      {isSelected && <div className="h-1 w-1 rounded-full bg-white" />}
+                                    </div>
+                                    <div className="min-w-0">
+                                      <p className={`truncate ${isSelected ? "font-medium text-blue-700 dark:text-blue-400" : "text-foreground/80"}`}>
+                                        {c.recipe_name ?? c.recipe_code}
+                                      </p>
+                                      {c.recipe_description && (
+                                        <p className="text-muted-foreground text-[10px] truncate">{c.recipe_description}</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <span className="text-muted-foreground text-[10px] font-mono shrink-0">{c.recipe_code}</span>
                                 </div>
-                                <span className="text-muted-foreground text-[10px] font-mono shrink-0">{c.recipe_code}</span>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
                       </div>
