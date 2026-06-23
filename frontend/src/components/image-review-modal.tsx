@@ -9,6 +9,7 @@ import {
   AlertTriangle,
   Camera,
   ExternalLink,
+  ChevronDown,
 } from "lucide-react";
 
 const PROCESSING = "__processing__";
@@ -31,12 +32,21 @@ export type MealImageReview = {
 
 type AiStatus = "none" | "processing" | "failed" | "done_structured" | "done_text";
 
+interface MatchCandidate {
+  recipe_code: string;
+  recipe_name: string | null;
+  recipe_category: string | null;
+  recipe_description: string | null;
+  recipe_weight_g: number | null;
+}
+
 interface FoodItem {
   description?: string;
   recipe_name?: string;
   quantity_g?: number;
   quantity_confidence?: "high" | "medium" | "low" | string;
   match_status?: string;
+  candidates?: MatchCandidate[];
   [key: string]: unknown;
 }
 
@@ -46,14 +56,36 @@ interface ParsedAi {
   text: string | null;
 }
 
+// Normalize a FoodResult (nested pipeline output) into a flat FoodItem
+function flattenFoodResult(f: Record<string, unknown>): FoodItem {
+  const match = f.match as Record<string, unknown> | undefined;
+  if (!match) return f as FoodItem;
+  const matched = match.matched as Record<string, unknown> | null | undefined;
+  const quantity = f.quantity as Record<string, unknown> | null | undefined;
+  const matchedCode = matched?.recipe_code as string | undefined;
+  const allCandidates = (match.candidates_considered ?? []) as MatchCandidate[];
+  // Exclude the already-matched recipe from the "other candidates" list
+  const candidates = allCandidates.filter((c) => c.recipe_code !== matchedCode);
+  return {
+    ...f,
+    recipe_name: (matched?.recipe_name ?? f.recipe_name) as string | undefined,
+    description: (matched?.recipe_description ?? f.description) as string | undefined,
+    quantity_g: (quantity?.quantity_g ?? f.quantity_g) as number | undefined,
+    quantity_confidence: (quantity?.quantity_confidence ?? f.quantity_confidence) as string | undefined,
+    match_status: (match?.status ?? f.match_status) as string | undefined,
+    candidates,
+  } as FoodItem;
+}
+
 function parseAi(raw: string | null | undefined): ParsedAi {
   if (!raw) return { status: "none", foods: [], text: null };
   if (raw === PROCESSING) return { status: "processing", foods: [], text: null };
   if (raw === FAILED) return { status: "failed", foods: [], text: null };
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const foods = (parsed?.foods ?? parsed?.items ?? parsed?.identified_foods ?? []) as FoodItem[];
-    if (Array.isArray(foods) && foods.length > 0) {
+    const rawFoods = (parsed?.foods ?? parsed?.items ?? parsed?.identified_foods ?? []) as Record<string, unknown>[];
+    if (Array.isArray(rawFoods) && rawFoods.length > 0) {
+      const foods = rawFoods.map(flattenFoodResult);
       return { status: "done_structured", foods, text: null };
     }
     return { status: "done_text", foods: [], text: JSON.stringify(parsed, null, 2) };
@@ -87,6 +119,7 @@ export function ImageReviewModal({
   const [manualText, setManualText] = useState(initialReview.reviewed_foods_by_human ?? "");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expandedCandidates, setExpandedCandidates] = useState<Set<number>>(new Set());
 
   const parsed = parseAi(review.tracked_foods_by_ai);
 
@@ -277,38 +310,79 @@ export function ImageReviewModal({
 
               {parsed.status === "done_structured" && (
                 <div className="space-y-2">
-                  {parsed.foods.map((f, i) => (
-                    <div
-                      key={i}
-                      className="flex items-start justify-between gap-3 rounded-lg bg-muted/20 px-3 py-2.5 text-xs"
-                    >
-                      <div className="min-w-0">
-                        <p className="font-medium truncate">
-                          {f.recipe_name ?? f.description ?? "Unknown food"}
-                        </p>
-                        {f.recipe_name && f.description && f.recipe_name !== f.description && (
-                          <p className="text-muted-foreground mt-0.5 truncate">{f.description}</p>
-                        )}
-                        {f.match_status && (
-                          <p className="text-muted-foreground mt-0.5 text-[10px]">{f.match_status}</p>
+                  {parsed.foods.map((f, i) => {
+                    const isExpanded = expandedCandidates.has(i);
+                    const candidates = f.candidates ?? [];
+                    return (
+                      <div key={i} className="rounded-lg bg-muted/20 overflow-hidden text-xs">
+                        {/* Matched food row */}
+                        <div className="flex items-start justify-between gap-3 px-3 py-2.5">
+                          <div className="min-w-0">
+                            <p className="font-medium truncate">
+                              {f.recipe_name ?? f.description ?? "Unknown food"}
+                            </p>
+                            {f.recipe_name && f.description && f.recipe_name !== f.description && (
+                              <p className="text-muted-foreground mt-0.5 truncate">{f.description}</p>
+                            )}
+                            {f.match_status && (
+                              <p className="text-muted-foreground mt-0.5 text-[10px] capitalize">{f.match_status}</p>
+                            )}
+                          </div>
+                          <div className="flex items-start gap-1.5 shrink-0">
+                            <div className="text-right space-y-1">
+                              {f.quantity_g != null && (
+                                <p className="font-semibold tabular-nums">{f.quantity_g} g</p>
+                              )}
+                              {f.quantity_confidence && (
+                                <span
+                                  className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                                    CONFIDENCE_CLS[f.quantity_confidence] ?? "bg-muted text-muted-foreground"
+                                  }`}
+                                >
+                                  {f.quantity_confidence}
+                                </span>
+                              )}
+                            </div>
+                            {candidates.length > 0 && (
+                              <button
+                                onClick={() =>
+                                  setExpandedCandidates((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(i)) next.delete(i); else next.add(i);
+                                    return next;
+                                  })
+                                }
+                                title={isExpanded ? "Hide other candidates" : `${candidates.length} other candidate(s)`}
+                                className="p-0.5 mt-0.5 rounded hover:bg-muted/60 text-muted-foreground transition-colors"
+                              >
+                                <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-150 ${isExpanded ? "rotate-180" : ""}`} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Other candidates */}
+                        {isExpanded && candidates.length > 0 && (
+                          <div className="border-t divide-y">
+                            <p className="px-3 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wide bg-muted/10">
+                              Other candidates
+                            </p>
+                            {candidates.map((c) => (
+                              <div key={c.recipe_code} className="flex items-center justify-between gap-2 px-3 py-2 bg-background/50">
+                                <div className="min-w-0">
+                                  <p className="truncate text-foreground/80">{c.recipe_name ?? c.recipe_code}</p>
+                                  {c.recipe_description && (
+                                    <p className="text-muted-foreground text-[10px] truncate">{c.recipe_description}</p>
+                                  )}
+                                </div>
+                                <span className="text-muted-foreground text-[10px] font-mono shrink-0">{c.recipe_code}</span>
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
-                      <div className="text-right shrink-0 space-y-1">
-                        {f.quantity_g != null && (
-                          <p className="font-semibold tabular-nums">{f.quantity_g} g</p>
-                        )}
-                        {f.quantity_confidence && (
-                          <span
-                            className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
-                              CONFIDENCE_CLS[f.quantity_confidence] ?? "bg-muted text-muted-foreground"
-                            }`}
-                          >
-                            {f.quantity_confidence}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -364,32 +438,18 @@ export function ImageReviewModal({
 
           {/* Re-run buttons */}
           {!isApproved && !isRejected && (
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => doAction("identify", { vlm_backend: "ollama" })}
-                disabled={isBusy || parsed.status === "processing"}
-                className="flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-semibold hover:bg-muted transition-colors disabled:opacity-50"
-              >
-                {busyAction === "identify" ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3.5 w-3.5" />
-                )}
-                Run: Ollama
-              </button>
-              <button
-                onClick={() => doAction("identify", { vlm_backend: "openai" })}
-                disabled={isBusy || parsed.status === "processing"}
-                className="flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-semibold hover:bg-muted transition-colors disabled:opacity-50"
-              >
-                {busyAction === "identify" ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3.5 w-3.5" />
-                )}
-                Run: OpenAI
-              </button>
-            </div>
+            <button
+              onClick={() => doAction("identify", { vlm_backend: "openai" })}
+              disabled={isBusy || parsed.status === "processing"}
+              className="w-full flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-semibold hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              {busyAction === "identify" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Re-run identification with OpenAI
+            </button>
           )}
 
           {/* Approve / Reject */}
