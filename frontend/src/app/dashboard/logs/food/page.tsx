@@ -1,11 +1,12 @@
 ﻿"use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Pencil,
   X,
   Check,
@@ -483,6 +484,117 @@ function MealSlotCard({
   );
 }
 
+// ─── Participant combobox ─────────────────────────────────────────────────────
+
+function ParticipantCombobox({
+  participants,
+  selectedId,
+  onSelect,
+}: {
+  participants: ParticipantSummary[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  const selected = participants.find((p) => p.user_id === selectedId);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return participants;
+    return participants.filter(
+      (p) =>
+        (p.display_name ?? "").toLowerCase().includes(q) ||
+        (p.participant_id ?? "").toLowerCase().includes(q)
+    );
+  }, [participants, query]);
+
+  useEffect(() => {
+    function onMouseDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+        setQuery("");
+      }
+    }
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, []);
+
+  return (
+    <div ref={ref} className="relative w-full max-w-sm">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between gap-2 rounded-xl border bg-background px-4 py-2.5 text-sm hover:bg-muted/40 transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-muted-foreground shrink-0 text-xs">Participant</span>
+          {selected ? (
+            <span className="font-mono font-medium truncate text-sm">
+              {selected.participant_id ?? selected.user_id}
+              {selected.display_name ? ` — ${selected.display_name}` : ""}
+            </span>
+          ) : (
+            <span className="text-muted-foreground italic text-xs">Select participant…</span>
+          )}
+        </div>
+        <ChevronDown className={`h-4 w-4 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute z-20 mt-1 w-full min-w-[22rem] rounded-xl border bg-popover shadow-lg overflow-hidden">
+          <div className="p-2 border-b">
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name or ID…"
+              className="w-full rounded-lg border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </div>
+          <div className="max-h-72 overflow-y-auto divide-y">
+            {filtered.length === 0 && (
+              <p className="px-4 py-3 text-xs text-muted-foreground italic text-center">No participants found</p>
+            )}
+            {filtered.map((p) => (
+              <button
+                key={p.user_id}
+                onClick={() => { onSelect(p.user_id); setOpen(false); setQuery(""); }}
+                className={`w-full text-left flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-muted/40 transition-colors ${
+                  p.user_id === selectedId ? "bg-primary/10" : ""
+                }`}
+              >
+                <div className="min-w-0">
+                  <p className="font-mono font-medium text-xs truncate">{p.participant_id ?? p.user_id}</p>
+                  {p.display_name && <p className="text-muted-foreground text-[11px] truncate">{p.display_name}</p>}
+                  <ComplianceBar pct={p.compliance_pct} />
+                </div>
+                <div className="text-right shrink-0">
+                  {p.compliance_pct !== null && (
+                    <p className={`font-semibold tabular-nums text-xs ${
+                      p.compliance_pct >= 75 ? "text-emerald-600" :
+                      p.compliance_pct >= 50 ? "text-amber-600" : "text-red-500"
+                    }`}>
+                      {p.compliance_pct}%
+                    </p>
+                  )}
+                  {p.last_logged_date && (
+                    <p className="text-muted-foreground text-[10px] mt-0.5">
+                      {new Date(p.last_logged_date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+                    </p>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function FoodLogsPage() {
@@ -494,8 +606,6 @@ export default function FoodLogsPage() {
   const [participantData, setParticipantData] = useState<ParticipantData | null>(null);
   const [loadingData, setLoadingData] = useState(false);
   const [dateIndex, setDateIndex] = useState(0);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [isListOpen, setIsListOpen] = useState(true);
   const [editState, setEditState] = useState<EditState | null>(null);
   const [reviewsMap, setReviewsMap] = useState<Record<string, MealImageReview>>({});
   const [imageReviewState, setImageReviewState] = useState<{
@@ -535,16 +645,6 @@ export default function FoodLogsPage() {
       .then((d) => { if (d) setParticipantData(d as ParticipantData); })
       .finally(() => setLoadingData(false));
   }, [selectedId, token]);
-
-  const filteredParticipants = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return participants;
-    return participants.filter(
-      (p) =>
-        (p.display_name ?? "").toLowerCase().includes(q) ||
-        (p.participant_id ?? "").toLowerCase().includes(q)
-    );
-  }, [participants, searchQuery]);
 
   const dates = participantData?.dates ?? [];
   const currentDate = dates[dateIndex] ?? null;
@@ -630,17 +730,11 @@ export default function FoodLogsPage() {
           <h1 className="text-2xl font-bold tracking-tight">Food Logs</h1>
           <p className="text-muted-foreground">Diet logs overview across all participants.</p>
         </div>
-        <div className="flex gap-6">
-          <div className="w-52 shrink-0 space-y-2">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-20 rounded-xl border bg-muted/30 animate-pulse" />
-            ))}
-          </div>
-          <div className="flex-1 space-y-3">
-            {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-28 rounded-xl border bg-muted/30 animate-pulse" />
-            ))}
-          </div>
+        <div className="h-10 w-80 rounded-xl border bg-muted/30 animate-pulse" />
+        <div className="space-y-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="h-28 rounded-xl border bg-muted/30 animate-pulse" />
+          ))}
         </div>
       </div>
     );
@@ -686,97 +780,15 @@ export default function FoodLogsPage() {
             </p>
           </div>
         ) : (
-          <div className="flex gap-6 items-start">
-
-            {/* ─── Participant sidebar ─── */}
-            <div className={`shrink-0 space-y-1.5 transition-all duration-200 ${isListOpen ? "w-52" : "w-10"}`}>
-              <div className="flex items-center justify-between px-1 mb-2">
-                {isListOpen && (
-                  <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
-                    Participants
-                  </p>
-                )}
-                <button
-                  onClick={() => setIsListOpen((o) => !o)}
-                  className="p-1 rounded-md hover:bg-muted transition-colors text-muted-foreground ml-auto"
-                  title={isListOpen ? "Collapse" : "Expand"}
-                >
-                  {isListOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                </button>
-              </div>
-
-              {isListOpen && (
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search participants…"
-                  className="w-full rounded-lg border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring mb-1"
-                />
-              )}
-
-              {isListOpen ? (
-                filteredParticipants.map((p) => (
-                  <button
-                    key={p.user_id}
-                    onClick={() => setSelectedId(p.user_id)}
-                    className={`w-full text-left rounded-xl px-3 py-3 border transition-colors ${
-                      selectedId === p.user_id
-                        ? "bg-primary/10 border-primary/30"
-                        : "bg-card hover:bg-muted/40 border-transparent"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="font-mono text-sm font-medium truncate">
-                        {p.participant_id ?? p.user_id}
-                      </span>
-                      {p.total_logged > 0 && (
-                        <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
-                          {p.total_logged}
-                        </span>
-                      )}
-                    </div>
-                    {p.display_name && (
-                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{p.display_name}</p>
-                    )}
-                    <ComplianceBar pct={p.compliance_pct} />
-                    {p.last_logged_date && (
-                      <p className="text-[10px] text-muted-foreground mt-1">
-                        Last:{" "}
-                        {new Date(p.last_logged_date).toLocaleDateString("en-IN", {
-                          day: "numeric", month: "short",
-                        })}
-                      </p>
-                    )}
-                  </button>
-                ))
-              ) : (
-                filteredParticipants.map((p) => (
-                  <button
-                    key={p.user_id}
-                    onClick={() => setSelectedId(p.user_id)}
-                    title={p.display_name ?? p.participant_id ?? p.user_id}
-                    className={`relative w-10 h-10 rounded-xl border transition-colors flex items-center justify-center ${
-                      selectedId === p.user_id
-                        ? "bg-primary/10 border-primary/30"
-                        : "bg-card hover:bg-muted/40 border-transparent"
-                    }`}
-                  >
-                    <span className="font-mono text-[10px] font-bold leading-none">
-                      {(p.participant_id ?? p.user_id).slice(0, 3)}
-                    </span>
-                    {p.compliance_pct !== null && p.compliance_pct < 50 && (
-                      <span className="absolute -top-1 -right-1 rounded-full bg-amber-500 text-white text-[8px] font-bold w-4 h-4 flex items-center justify-center leading-none">
-                        !
-                      </span>
-                    )}
-                  </button>
-                ))
-              )}
-            </div>
+          <div className="space-y-4">
+            <ParticipantCombobox
+              participants={participants}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+            />
 
             {/* ─── Main panel ─── */}
-            <div className="flex-1 min-w-0 space-y-4">
+            <div className="space-y-4">
               {selectedId && (
                 <>
                   {/* Participant heading */}
