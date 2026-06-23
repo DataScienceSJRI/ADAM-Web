@@ -9,7 +9,7 @@ PLAN_QUEUE_NAME = os.getenv("PLAN_QUEUE_NAME", "meal-plans")
 PLAN_JOB_TIMEOUT_SECONDS = int(os.getenv("PLAN_JOB_TIMEOUT_SECONDS", "1200"))
 
 FOOD_ID_QUEUE_NAME = os.getenv("FOOD_ID_QUEUE_NAME", "food-id")
-FOOD_ID_JOB_TIMEOUT_SECONDS = int(os.getenv("FOOD_ID_JOB_TIMEOUT_SECONDS", "900"))  # 15 min
+FOOD_ID_JOB_TIMEOUT_SECONDS = int(os.getenv("FOOD_ID_JOB_TIMEOUT_SECONDS", "3600"))  # 1 hour
 
 
 def get_redis() -> Redis:
