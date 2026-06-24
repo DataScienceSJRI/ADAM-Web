@@ -12,10 +12,8 @@ import {
   Check,
   Minus,
   AlertTriangle,
-  Camera,
-  Loader2,
 } from "lucide-react";
-import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
+import { type MealImageReview } from "@/components/image-review-modal";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -327,7 +325,6 @@ function MealSlotCard({
   logItems,
   reviewsForSlot,
   onEdit,
-  onReviewImage,
 }: {
   slot: string;
   date: string;
@@ -335,7 +332,6 @@ function MealSlotCard({
   logItems: LogItem[];
   reviewsForSlot: MealImageReview[];
   onEdit: () => void;
-  onReviewImage: (reviews: MealImageReview[]) => void;
 }) {
   const meta = SLOT_META[slot] ?? SLOT_META.breakfast;
   const status = slotStatus(logItems);
@@ -345,11 +341,6 @@ function MealSlotCard({
   const firstReview = reviewsForSlot[0] ?? null;
   const reviewStatus = firstReview?.review_status;
   const isProcessing = firstReview?.tracked_foods_by_ai === "__processing__";
-  const cameraColor =
-    reviewStatus === "approved" ? "text-emerald-500" :
-    reviewStatus === "rejected" ? "text-red-500" :
-    isProcessing ? "text-amber-500" :
-    "text-blue-500";
 
   return (
     <div className="rounded-xl border overflow-hidden">
@@ -362,22 +353,15 @@ function MealSlotCard({
         <div className="flex items-center gap-2">
           <StatusBadge status={status} />
           {firstReview && (
-            <button
-              onClick={() => onReviewImage(reviewsForSlot)}
-              title={`Image review — ${reviewStatus ?? "pending"}${reviewsForSlot.length > 1 ? ` (${reviewsForSlot.length})` : ""}`}
-              className={`relative p-0.5 rounded hover:bg-white/60 transition-colors ${cameraColor}`}
-            >
-              {isProcessing ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Camera className="h-3.5 w-3.5" />
-              )}
-              {reviewsForSlot.length > 1 && (
-                <span className="absolute -top-1.5 -right-1.5 bg-blue-500 text-white text-[8px] font-bold rounded-full w-3.5 h-3.5 flex items-center justify-center leading-none">
-                  {reviewsForSlot.length}
-                </span>
-              )}
-            </button>
+            <span
+              title={`Image: ${isProcessing ? "processing" : (reviewStatus ?? "pending")}`}
+              className={`h-2 w-2 rounded-full shrink-0 ${
+                reviewStatus === "approved" ? "bg-emerald-500" :
+                reviewStatus === "rejected" ? "bg-red-400" :
+                isProcessing ? "bg-amber-400 animate-pulse" :
+                "bg-blue-400"
+              }`}
+            />
           )}
           {logItems.length > 0 && (
             <button
@@ -608,9 +592,6 @@ export default function FoodLogsPage() {
   const [dateIndex, setDateIndex] = useState(0);
   const [editState, setEditState] = useState<EditState | null>(null);
   const [reviewsMap, setReviewsMap] = useState<Record<string, MealImageReview>>({});
-  const [imageReviewState, setImageReviewState] = useState<{
-    reviews: MealImageReview[]; slot: string; date: string;
-  } | null>(null);
 
   // Load auth + participant list
   useEffect(() => {
@@ -689,16 +670,6 @@ export default function FoodLogsPage() {
       .catch(() => {});
   }, [token]);
 
-  const handleReviewUpdated = useCallback((updated: MealImageReview) => {
-    setReviewsMap((prev) => ({ ...prev, [updated.diet_recall_id]: updated }));
-    setImageReviewState((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        reviews: prev.reviews.map((r) => r.id === updated.id ? updated : r),
-      };
-    });
-  }, []);
 
   const handleSaved = useCallback((updated: LogItem[]) => {
     setParticipantData((prev) => {
@@ -748,18 +719,6 @@ export default function FoodLogsPage() {
           token={token}
           onClose={() => setEditState(null)}
           onSaved={handleSaved}
-        />
-      )}
-      {imageReviewState && token && (
-        <ImageReviewModal
-          reviews={imageReviewState.reviews}
-          slotLabel={SLOT_META[imageReviewState.slot]?.label ?? imageReviewState.slot}
-          dateLabel={new Date(imageReviewState.date).toLocaleDateString("en-IN", {
-            weekday: "long", day: "numeric", month: "long",
-          })}
-          token={token}
-          onClose={() => setImageReviewState(null)}
-          onUpdated={handleReviewUpdated}
         />
       )}
 
@@ -903,9 +862,6 @@ export default function FoodLogsPage() {
                             reviewsForSlot={reviewsForSlot}
                             onEdit={() =>
                               setEditState({ slot, date: currentDate, logs: logItems })
-                            }
-                            onReviewImage={(reviews) =>
-                              setImageReviewState({ reviews, slot, date: currentDate })
                             }
                           />
                         );
