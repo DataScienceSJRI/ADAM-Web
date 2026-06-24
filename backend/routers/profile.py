@@ -36,6 +36,15 @@ def get_profile(user_id: str = Depends(get_current_user)):
     )
 
 
+def _to_timestamptz(t: str | None) -> str | None:
+    """Coerce a bare time string like '08:30:00' to a valid timestamptz for Postgres."""
+    if not t:
+        return t
+    if "T" in t or " " in t or len(t) > 12:
+        return t
+    return f"1970-01-01T{t}+00:00"
+
+
 @router.put("/profile", response_model=UserProfileResponse)
 def update_profile(body: UserProfileUpdateRequest, user_id: str = Depends(get_current_user)):
     """Update the authenticated user's profile."""
@@ -54,9 +63,9 @@ def update_profile(body: UserProfileUpdateRequest, user_id: str = Depends(get_cu
 
     detail_fields = {
         "diet_restrictions": body.diet_restrictions,
-        "breakfast_time": body.breakfast_time,
-        "lunch_time": body.lunch_time,
-        "dinner_time": body.dinner_time,
+        "breakfast_time": _to_timestamptz(body.breakfast_time),
+        "lunch_time": _to_timestamptz(body.lunch_time),
+        "dinner_time": _to_timestamptz(body.dinner_time),
     }
     detail_update = {k: v for k, v in detail_fields.items() if v is not None}
 
