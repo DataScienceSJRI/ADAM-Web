@@ -64,7 +64,7 @@ _root_path = os.environ.get("ROOT_PATH", "")
 
 app = FastAPI(
     title="ADAM API",
-    version="1.0.0",
+    version="1.1.0",
     root_path=_root_path,
     description="""
 ## ADAM — Personalised Meal Planning for Diabetics

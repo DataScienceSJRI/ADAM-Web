@@ -19,6 +19,53 @@ def _participant_email(user_id: str) -> str:
     return f"{user_id}@adam.participant"
 
 
+def _write_review_log(*, sb, review: dict, review_id: str, coordinator_id: str,
+                      action: str, human_corrected: str | None, reviewed_at: str) -> None:
+    """Append a row to FoodReviewLog whenever a review is approved or rejected."""
+    import json
+
+    # Parse stored AI JSON; skip sentinel values
+    raw_ai = review.get("tracked_foods_by_ai")
+    ai_json: dict | None = None
+    if raw_ai and raw_ai not in ("__processing__", "__failed__"):
+        try:
+            ai_json = json.loads(raw_ai)
+        except Exception:
+            ai_json = None
+
+    # Fetch meal_slot from DietRecall (best-effort)
+    meal_slot: str | None = None
+    diet_recall_id = review.get("diet_recall_id")
+    if diet_recall_id:
+        try:
+            rc = sb.table("DietRecall").select("meal_slot").eq("ID", diet_recall_id).limit(1).execute()
+            if rc.data:
+                meal_slot = rc.data[0].get("meal_slot")
+        except Exception:
+            pass
+
+    # human_corrected may be None for a reject — fall back to previously stored value
+    corrected = human_corrected if human_corrected is not None else review.get("reviewed_foods_by_human")
+
+    try:
+        sb.table("FoodReviewLog").insert({
+            "review_id": review_id,
+            "diet_recall_id": diet_recall_id,
+            "participant_id": review.get("user_id"),
+            "coordinator_id": coordinator_id,
+            "meal_slot": meal_slot,
+            "pre_image_url": review.get("pre_image_id"),
+            "post_image_url": review.get("post_image_id"),
+            "ai_identified_foods": ai_json,
+            "human_corrected_foods": corrected,
+            "review_action": action,
+            "reviewed_at": reviewed_at,
+        }).execute()
+    except Exception:
+        # Non-fatal — don't fail the approve/reject if logging fails
+        logger.exception("Failed to write FoodReviewLog for review %s", review_id)
+
+
 @router.get("/reviews")
 def list_reviews(
     user_id: str = Depends(get_current_user),
@@ -161,13 +208,24 @@ def update_review(
                 raise HTTPException(status_code=500, detail="Failed to queue food identification job")
 
     elif body.action in ("approve", "reject"):
+        now_iso = datetime.now(timezone.utc).isoformat()
         update = {
             "review_status": "approved" if body.action == "approve" else "rejected",
             "reviewed_by": user_id,
-            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "reviewed_at": now_iso,
         }
         if body.reviewed_foods_by_human is not None:
             update["reviewed_foods_by_human"] = body.reviewed_foods_by_human
+
+        _write_review_log(
+            sb=sb,
+            review=review,
+            review_id=review_id,
+            coordinator_id=user_id,
+            action=body.action,
+            human_corrected=body.reviewed_foods_by_human,
+            reviewed_at=now_iso,
+        )
 
     else:
         raise HTTPException(status_code=400, detail="action must be 'approve', 'reject', 'analyse', or 'identify'")
