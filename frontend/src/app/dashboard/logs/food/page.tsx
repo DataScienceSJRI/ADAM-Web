@@ -12,6 +12,7 @@ import {
   Check,
   Minus,
   AlertTriangle,
+  Trash2,
 } from "lucide-react";
 import { type MealImageReview } from "@/components/image-review-modal";
 
@@ -163,11 +164,13 @@ function EditModal({
   token,
   onClose,
   onSaved,
+  onDeleted,
 }: {
   state: EditState;
   token: string;
   onClose: () => void;
   onSaved: (updated: LogItem[]) => void;
+  onDeleted: (id: string) => void;
 }) {
   type FieldMap = Record<string, { food_qty: string; notes: string; did_eat_as_planned: boolean }>;
 
@@ -184,9 +187,35 @@ function EditModal({
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(new Set());
 
   function setField<K extends keyof FieldMap[string]>(id: string, key: K, val: FieldMap[string][K]) {
     setFields((prev) => ({ ...prev, [id]: { ...prev[id], [key]: val } }));
+  }
+
+  async function deleteEntry(id: string) {
+    setDeletingId(id);
+    setError(null);
+    try {
+      const res = await fetch(`/api/logs/food/entry/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok && res.status !== 204) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error((d as { detail?: string }).detail ?? "Delete failed");
+      }
+      setDeletedIds((prev) => new Set([...prev, id]));
+      setFields((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      setConfirmDeleteId(null);
+      onDeleted(id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setDeletingId(null);
+    }
   }
 
   async function save() {
@@ -221,6 +250,8 @@ function EditModal({
     }
   }
 
+  const visibleLogs = state.logs.filter((l) => !deletedIds.has(l.ID));
+
   const slotMeta = SLOT_META[state.slot] ?? SLOT_META.breakfast;
   const dateLabel = new Date(state.date).toLocaleDateString("en-IN", {
     weekday: "long", day: "numeric", month: "long", year: "numeric",
@@ -231,7 +262,7 @@ function EditModal({
       className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="bg-background w-full max-w-lg rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+      <div className="bg-background w-full max-w-lg max-h-[90vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b">
           <div>
@@ -245,15 +276,45 @@ function EditModal({
 
         {/* Body */}
         <div className="flex-1 overflow-auto p-5 space-y-4">
-          {state.logs.length === 0 && (
+          {visibleLogs.length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-4">No log entries to edit.</p>
           )}
-          {state.logs.map((l) => {
+          {visibleLogs.map((l) => {
             const f = fields[l.ID];
             if (!f) return null;
+            const isConfirming = confirmDeleteId === l.ID;
+            const isDeleting = deletingId === l.ID;
             return (
               <div key={l.ID} className="rounded-xl border p-4 space-y-3">
-                <p className="text-sm font-medium truncate">{l.Food_Name ?? "—"}</p>
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm font-medium truncate">{l.Food_Name ?? "—"}</p>
+                  {isConfirming ? (
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className="text-[11px] text-red-500 font-medium">Delete?</span>
+                      <button
+                        onClick={() => deleteEntry(l.ID)}
+                        disabled={isDeleting}
+                        className="rounded-md bg-red-500 text-white px-2 py-0.5 text-[11px] font-semibold hover:bg-red-600 disabled:opacity-50 transition-colors"
+                      >
+                        {isDeleting ? "…" : "Yes"}
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted transition-colors"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmDeleteId(l.ID)}
+                      className="p-1 rounded-md text-muted-foreground hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors shrink-0"
+                      title="Delete entry"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
                 <label className="flex items-center gap-2 cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -304,7 +365,7 @@ function EditModal({
             </button>
             <button
               onClick={save}
-              disabled={saving}
+              disabled={saving || visibleLogs.length === 0}
               className="flex-1 rounded-lg bg-primary text-primary-foreground py-2.5 text-xs font-semibold hover:bg-primary/90 transition-colors disabled:opacity-50"
             >
               {saving ? "Saving…" : "Save changes"}
@@ -671,15 +732,20 @@ export default function FoodLogsPage() {
   }, [token]);
 
 
+  const handleDeleted = useCallback((id: string) => {
+    setParticipantData((prev) => {
+      if (!prev) return prev;
+      return { ...prev, logs: prev.logs.filter((l) => l.ID !== id) };
+    });
+  }, []);
+
   const handleSaved = useCallback((updated: LogItem[]) => {
     setParticipantData((prev) => {
       if (!prev) return prev;
-      const idSet = new Set(updated.map((u) => u.ID));
       const logs = prev.logs.map((l) => {
         const u = updated.find((u) => u.ID === l.ID);
         return u ? { ...l, ...u } : l;
       });
-      // If any new IDs, add them (shouldn't happen for edit)
       const newItems = updated.filter((u) => !prev.logs.some((l) => l.ID === u.ID));
       return { ...prev, logs: [...logs, ...newItems] };
     });
@@ -719,6 +785,7 @@ export default function FoodLogsPage() {
           token={token}
           onClose={() => setEditState(null)}
           onSaved={handleSaved}
+          onDeleted={handleDeleted}
         />
       )}
 

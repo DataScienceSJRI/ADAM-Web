@@ -349,3 +349,16 @@ def coordinator_update_recall(
     if not resp.data:
         raise HTTPException(status_code=404, detail="Recall entry not found")
     return resp.data[0]
+
+
+@router.delete("/coordinator/{recall_id}", status_code=204)
+def coordinator_delete_recall(
+    recall_id: str,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Coordinator deletes a diet recall entry."""
+    sb = get_supabase()
+    resp = sb.table("DietRecall").delete().eq("ID", recall_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Recall entry not found")

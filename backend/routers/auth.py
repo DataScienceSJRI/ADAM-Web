@@ -1,4 +1,6 @@
 import logging
+import os
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from core.auth import get_current_user, oauth2_scheme
@@ -56,20 +58,36 @@ def token(form: OAuth2PasswordRequestForm = Depends()):
 @router.post("/refresh", response_model=LoginResponse)
 def refresh(body: RefreshRequest):
     """Exchange a refresh token for a new access token."""
-    sb = get_supabase()
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "") or os.environ.get("SUPABASE_KEY", "")
     try:
-        resp = sb.auth.refresh_session(body.refresh_token)
+        res = httpx.post(
+            f"{supabase_url}/auth/v1/token",
+            params={"grant_type": "refresh_token"},
+            json={"refresh_token": body.refresh_token},
+            headers={"apikey": supabase_key, "Content-Type": "application/json"},
+            timeout=10,
+        )
     except Exception as exc:
-        logger.warning("Token refresh failed: %s", exc)
+        logger.warning("Token refresh request failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
+
+    if res.status_code != 200:
+        logger.warning("Token refresh rejected: %s %s", res.status_code, res.text[:200])
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
-    if not resp.session or not resp.session.access_token:
+    data = res.json()
+    access_token = data.get("access_token")
+    refresh_token = data.get("refresh_token") or body.refresh_token
+    email = (data.get("user") or {}).get("email")
+
+    if not access_token:
         raise HTTPException(status_code=401, detail="Token refresh failed")
 
     return LoginResponse(
-        access_token=resp.session.access_token,
-        refresh_token=resp.session.refresh_token,
-        user_id=_clean_user_id(resp.user.email),
+        access_token=access_token,
+        refresh_token=refresh_token,
+        user_id=_clean_user_id(email),
     )
 
 
