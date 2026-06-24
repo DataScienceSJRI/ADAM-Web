@@ -411,6 +411,13 @@ class WeightLogRequest(BaseModel):
     model_config = {"json_schema_extra": {"example": {"weight_kg": 72.5, "date": "2026-06-22"}}}
 
 
+class WeightLogUpdateRequest(BaseModel):
+    weight_kg: Optional[float] = None
+    date: Optional[str] = None
+
+    model_config = {"json_schema_extra": {"example": {"weight_kg": 73.0, "date": "2026-06-22"}}}
+
+
 class WeightLogResponse(BaseModel):
     status: str
     id: str
