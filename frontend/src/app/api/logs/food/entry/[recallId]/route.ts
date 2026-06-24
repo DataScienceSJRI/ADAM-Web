@@ -25,3 +25,24 @@ export async function PATCH(
     return NextResponse.json({ detail: "Could not reach backend" }, { status: 503 });
   }
 }
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ recallId: string }> }
+) {
+  const { recallId } = await params;
+  const auth = req.headers.get("authorization");
+  try {
+    const res = await fetch(`${BACKEND}/api/v1/recall/coordinator/${recallId}`, {
+      method: "DELETE",
+      headers: { ...(auth ? { Authorization: auth } : {}) },
+    });
+    if (res.status === 204) return new NextResponse(null, { status: 204 });
+    const text = await res.text();
+    let json: unknown;
+    try { json = text ? JSON.parse(text) : {}; } catch { json = { detail: text?.slice(0, 300) }; }
+    return NextResponse.json(json, { status: res.status });
+  } catch {
+    return NextResponse.json({ detail: "Could not reach backend" }, { status: 503 });
+  }
+}
