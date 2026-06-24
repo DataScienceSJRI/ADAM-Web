@@ -29,9 +29,9 @@ def get_profile(user_id: str = Depends(get_current_user)):
         hba1c=b.get("Hba1c"),
         activity_level=b.get("Activity_levels"),
         diet_restrictions=d.get("diet_restrictions"),
-        breakfast_time=d.get("breakfast_time"),
-        lunch_time=d.get("lunch_time"),
-        dinner_time=d.get("dinner_time"),
+        breakfast_time=_extract_time(d.get("breakfast_time")),
+        lunch_time=_extract_time(d.get("lunch_time")),
+        dinner_time=_extract_time(d.get("dinner_time")),
         profile_url=b.get("profile_url"),
     )
 
@@ -43,6 +43,24 @@ def _to_timestamptz(t: str | None) -> str | None:
     if "T" in t or " " in t or len(t) > 12:
         return t
     return f"1970-01-01T{t}+00:00"
+
+
+def _extract_time(t: str | None) -> str | None:
+    """Strip any date prefix from a timestamptz and return just HH:MM:SS."""
+    if not t:
+        return t
+    # "1970-01-01T08:30:00+00:00" → "08:30:00"
+    # "1970-01-01 08:30:00+00" → "08:30:00"
+    for sep in ("T", " "):
+        if sep in t:
+            time_part = t.split(sep)[1]
+            # drop timezone suffix (+00:00, +00, Z, etc.)
+            for tz in ("+", "-", "Z"):
+                if tz in time_part:
+                    time_part = time_part.split(tz)[0]
+                    break
+            return time_part
+    return t
 
 
 @router.put("/profile", response_model=UserProfileResponse)
