@@ -106,14 +106,14 @@ function serializePickers(pickers: PickerEntry[]): string {
     .filter((p) => (p.selected?.name ?? p.query).trim())
     .map((p) => {
       const name = p.selected?.name ?? p.query.trim();
-      if (!p.qty) return name;
-      return p.unit === "g" ? `${name} (${p.qty}g)` : `${name} (${p.qty} ${p.unit})`;
+      const unit = p.unit === "__custom__" ? "" : p.unit;
+      if (!p.qty || !unit) return name;
+      return unit === "g" ? `${name} (${p.qty}g)` : `${name} (${p.qty} ${unit})`;
     })
     .join("; ");
 }
 
 const PRESET_UNITS = ["g", "srv", "cup", "bowl", "piece", "tsp", "tbsp"];
-const CUSTOM_SENTINEL = "__custom__";
 
 function UnitRow({
   entry,
@@ -125,7 +125,9 @@ function UnitRow({
   onChange: (partial: Partial<PickerEntry>) => void;
 }) {
   const isCustom = !PRESET_UNITS.includes(entry.unit);
-  const selectValue = isCustom ? CUSTOM_SENTINEL : entry.unit;
+  const selectValue = isCustom ? "__custom__" : entry.unit;
+  const [customText, setCustomText] = useState(isCustom ? entry.unit : "");
+  const customRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className="flex items-center gap-2 pt-0.5">
@@ -142,8 +144,13 @@ function UnitRow({
       <select
         value={selectValue}
         onChange={(e) => {
-          if (e.target.value === CUSTOM_SENTINEL) onChange({ unit: "" });
-          else onChange({ unit: e.target.value });
+          if (e.target.value === "__custom__") {
+            setCustomText("");
+            onChange({ unit: "__custom__" });
+            setTimeout(() => customRef.current?.focus(), 0);
+          } else {
+            onChange({ unit: e.target.value });
+          }
         }}
         disabled={disabled}
         className="rounded-lg border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 cursor-pointer"
@@ -151,17 +158,18 @@ function UnitRow({
         {PRESET_UNITS.map((u) => (
           <option key={u} value={u}>{u}</option>
         ))}
-        <option value={CUSTOM_SENTINEL}>custom…</option>
+        <option value="__custom__">custom…</option>
       </select>
       {isCustom && (
         <input
+          ref={customRef}
           type="text"
-          value={entry.unit}
-          onChange={(e) => onChange({ unit: e.target.value })}
+          value={customText}
+          onChange={(e) => setCustomText(e.target.value)}
+          onBlur={() => onChange({ unit: customText || "__custom__" })}
           disabled={disabled}
-          placeholder="unit"
-          className="w-20 rounded-lg border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-          autoFocus
+          placeholder="e.g. glass, slice"
+          className="w-24 rounded-lg border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
         />
       )}
     </div>
