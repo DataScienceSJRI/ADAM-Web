@@ -89,8 +89,8 @@ def log_recall(
             recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes_to_log).execute()
             recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
 
-            tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description").in_("Recipe_Code", codes_to_log).execute()
-            tag_map = {t["Recipe_Code"]: t.get("Description") for t in (tag_resp.data or []) if t.get("Recipe_Code")}
+            tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description, Portion").in_("Recipe_Code", codes_to_log).execute()
+            tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
 
             for i, code in enumerate(codes_to_log):
                 recall_id = str(uuid.uuid4())
@@ -105,22 +105,36 @@ def log_recall(
                     "did_eat_as_planned": False,
                     "notes": "changed",
                 }
+                # actual_quantities is the absolute quantity the user entered, in the
+                # recipe's own portion unit (e.g. Cups) — same as Food_Qty elsewhere.
+                # Divide by RecipeTagging.Portion (the recipe's full-portion size) to
+                # get the eaten fraction, exactly like build_daily_nutrient_summary
+                # (routers/kpi.py) does when it reads Food_Qty back later.
+                qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
+                tag_info = tag_map.get(code, {})
+                try:
+                    entered_qty = float(qty)
+                    base_portion = float(tag_info.get("Portion"))
+                    prop = (entered_qty / base_portion) if base_portion > 0 else 1.0
+                except (TypeError, ValueError):
+                    prop = 1.0
+
                 recipe = recipe_map.get(code)
                 if recipe:
                     row["Food_Name"] = recipe.get("Recipe_Name") or code
                     row["Food_Name_desc"] = code
                     kj = recipe.get("Energy_ENERC_KJ")
                     if kj:
-                        row["Energy_Kcal"] = int(round(float(kj) / 4.184))
+                        row["Energy_Kcal"] = int(round(float(kj) / 4.184 * prop))
                 else:
                     row["Food_Name"] = code
                     row["Food_Name_desc"] = code
-                desc = tag_map.get(code)
+                desc = tag_info.get("Description")
                 if desc and str(desc).strip().lower() not in ("nan", "none", ""):
                     row["R_desc"] = str(desc).strip()
-                # Pick the matching quantity by index, fall back to None
-                qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
                 if qty:
+                    # Store the entered quantity as-is (absolute, same unit as the
+                    # "ate as planned" path's Food_Qty) so both paths mean the same thing.
                     row["Food_Qty"] = qty
                 sb.table("DietRecall").insert(row).execute()
                 recall_ids.append(recall_id)
