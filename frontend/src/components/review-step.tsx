@@ -9,23 +9,28 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import type { BasicDetails } from "@/components/basic-details-form";
+import type { HealthDetails } from "@/components/health-details-form";
 import type { MealSelection } from "@/components/meal-preferences-form";
 
 const MEAL_TIMES = ["Breakfast", "Lunch", "Dinner", "Snacks"];
 
 export function ReviewStep({
   basicDetails,
+  healthDetails,
   selections,
   onBack,
   onEditBasicDetails,
+  onEditHealthDetails,
   onSubmit,
   submitting,
   error,
 }: {
   basicDetails: BasicDetails;
+  healthDetails: HealthDetails;
   selections: MealSelection[];
   onBack: () => void;
   onEditBasicDetails: () => void;
+  onEditHealthDetails: () => void;
   onSubmit: () => void;
   submitting: boolean;
   error: string | null;
@@ -117,6 +122,54 @@ export function ReviewStep({
               );
             })
           )}
+        </CardContent>
+      </Card>
+
+      {/* Health Details summary */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base">Health Details</CardTitle>
+            <button
+              onClick={onEditHealthDetails}
+              disabled={submitting}
+              className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
+            >
+              Edit
+            </button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <div>
+              <dt className="text-xs text-muted-foreground">Health Conditions</dt>
+              <dd className="font-medium">
+                {healthDetails.co_morbidities.length > 0
+                  ? healthDetails.co_morbidities.join(", ")
+                  : "None"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Medications</dt>
+              <dd className="font-medium">{healthDetails.medications || "None"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Allergies / Dislikes</dt>
+              <dd className="font-medium">{healthDetails.allergies_dislikes || "None"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Smoking</dt>
+              <dd className="font-medium">{healthDetails.smoking}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Tobacco</dt>
+              <dd className="font-medium">{healthDetails.tobacco}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Alcohol</dt>
+              <dd className="font-medium">{healthDetails.alcohol}</dd>
+            </div>
+          </dl>
         </CardContent>
       </Card>
 

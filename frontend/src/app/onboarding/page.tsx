@@ -237,9 +237,11 @@ function OnboardingFlow() {
       {step === 3 && (
         <ReviewStep
           basicDetails={basicDetails!}
+          healthDetails={healthDetails}
           selections={selections}
           onBack={() => setStep(2)}
           onEditBasicDetails={() => setStep(0)}
+          onEditHealthDetails={() => setStep(1)}
           onSubmit={handleSubmit}
           submitting={submitting}
           error={error}
