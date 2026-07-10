@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import date as date_type
 from typing import List, Optional
 
@@ -20,6 +21,24 @@ from services.replacement import get_preapproved_replacements, request_on_demand
 logger = logging.getLogger("backend.routers.daily")
 
 router = APIRouter(prefix="/plan", tags=["plan"])
+
+
+def _round_food_qty(qty: Optional[float]) -> Optional[float]:
+    """Round a portion quantity to the nearest 0.5 (0.1->0.5, 0.4->0.5, 0.74->0.5,
+    0.76->1.0, 1.74->1.5, 1.76->2.0). Rounds .25/.75 boundaries up rather than
+    Python's round() banker's-rounding (which would send 0.25 down to 0.0), and
+    never rounds a positive quantity down to 0 — the smallest displayed portion
+    is always 0.5."""
+    if qty is None:
+        return None
+    try:
+        qty = float(qty)
+    except (TypeError, ValueError):
+        return qty
+    rounded = math.floor(qty * 2 + 0.5) / 2
+    if qty > 0 and rounded <= 0:
+        rounded = 0.5
+    return rounded
 
 
 def _latest_plan_id(user_id: str) -> Optional[str]:
@@ -93,6 +112,7 @@ def get_daily_plan(
         timing = (row.get("Timings") or "").strip()
         code = (row.get("Food_Name_desc") or "").strip()
         row["GL"] = gl_by_item.get((timing, code))
+        row["Food_Qty"] = _round_food_qty(row.get("Food_Qty"))
 
         kcal = row.get("Energy_kcal")
         if timing:
