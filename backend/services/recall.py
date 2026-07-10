@@ -53,6 +53,83 @@ def compute_energy_for_quantity(recipe_code: Optional[str], food_qty) -> Optiona
     return int(round(float(recipe["Energy_ENERC_KJ"]) / 4.184 * prop))
 
 
+def _base_gl_map(sb, recipe_codes: List[str]) -> dict:
+    """Base Glycemic Load (per one full portion) for each recipe code.
+
+    GL = GI_Avg * (Carbohydrate_g - Fibre_g) / 100 — same net-of-fibre formula
+    Functions_Base.build_recipe_master() uses to seed the LP optimizer's GL
+    column (see services/lp_optimizer.py), so recall GL stays comparable to
+    the planned GL. GI_Avg is looked up by Recipe_Category against
+    SubCategory_foods_GI_GL, same join build_recipe_master() does.
+    """
+    if not recipe_codes:
+        return {}
+    recipes = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Carbohydrate_g, TotalDietaryFibre_FIBTG_g, Recipe_Category")
+        .in_("Recipe_Code", recipe_codes)
+        .execute()
+        .data
+    ) or []
+
+    categories = list({r["Recipe_Category"] for r in recipes if r.get("Recipe_Category")})
+    gi_map: dict = {}
+    if categories:
+        gi_rows = (
+            sb.table("SubCategory_foods_GI_GL").select("Code, GI_Avg").in_("Code", categories).execute().data
+        ) or []
+        for g in gi_rows:
+            try:
+                gi_map[g["Code"]] = float(g["GI_Avg"])
+            except (TypeError, ValueError):
+                continue
+
+    base_gl: dict = {}
+    for r in recipes:
+        gi = gi_map.get(r.get("Recipe_Category"))
+        if gi is None:
+            continue
+        try:
+            carbs = float(r.get("Carbohydrate_g") or 0)
+            fiber = float(r.get("TotalDietaryFibre_FIBTG_g") or 0)
+        except (TypeError, ValueError):
+            continue
+        base_gl[r["Recipe_Code"]] = gi * max(carbs - fiber, 0.0) / 100.0
+    return base_gl
+
+
+def _portion_map(sb, recipe_codes: List[str]) -> dict:
+    if not recipe_codes:
+        return {}
+    tag_rows = (
+        sb.table("RecipeTagging").select("Recipe_Code, Portion").in_("Recipe_Code", recipe_codes).execute().data
+    ) or []
+    return {t["Recipe_Code"]: t.get("Portion") for t in tag_rows if t.get("Recipe_Code")}
+
+
+def _gl_for_quantity(base_gl: Optional[float], portion, food_qty) -> Optional[float]:
+    if base_gl is None or food_qty is None:
+        return None
+    try:
+        entered_qty = float(food_qty)
+        base_portion = float(portion)
+        prop = (entered_qty / base_portion) if base_portion > 0 else 1.0
+    except (TypeError, ValueError):
+        prop = 1.0
+    return round(base_gl * prop, 2)
+
+
+def compute_gl_for_quantity(recipe_code: Optional[str], food_qty) -> Optional[float]:
+    """Recompute GL for a recipe code + entered quantity — same pattern as
+    compute_energy_for_quantity, used when Food_Qty is edited after the fact."""
+    if not recipe_code or food_qty is None:
+        return None
+    sb = get_supabase()
+    base_gl = _base_gl_map(sb, [recipe_code]).get(recipe_code)
+    portion = _portion_map(sb, [recipe_code]).get(recipe_code)
+    return _gl_for_quantity(base_gl, portion, food_qty)
+
+
 def log_recall(
     user_id: str,
     plan_id: str,
@@ -76,8 +153,14 @@ def log_recall(
                 user_id, plan_id, meal_slot.value, target_date,
             )
 
+        planned_codes = [item.get("Food_Name_desc") for item in planned if item.get("Food_Name_desc")]
+        base_gl_map = _base_gl_map(sb, planned_codes)
+        portion_map = _portion_map(sb, planned_codes)
+
         for item in planned:
             recall_id = str(uuid.uuid4())
+            code = item.get("Food_Name_desc")
+            food_qty = item.get("Food_Qty")
             row = {
                 "ID": recall_id,
                 "user_id": user_id,
@@ -88,10 +171,11 @@ def log_recall(
                 "meal_slot": meal_slot.value,
                 "did_eat_as_planned": True,
                 "Food_Name": item.get("Food_Name"),
-                "Food_Name_desc": item.get("Food_Name_desc"),
-                "Food_Qty": item.get("Food_Qty"),
+                "Food_Name_desc": code,
+                "Food_Qty": food_qty,
                 "R_desc": item.get("R_desc"),
                 "Energy_Kcal": int(round(float(item["Energy_kcal"]))) if item.get("Energy_kcal") is not None else None,
+                "GL": _gl_for_quantity(base_gl_map.get(code), portion_map.get(code), food_qty),
             }
             sb.table("DietRecall").insert(row).execute()
             recall_ids.append(recall_id)
@@ -121,6 +205,7 @@ def log_recall(
 
             tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description, Portion").in_("Recipe_Code", codes_to_log).execute()
             tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
+            base_gl_map = _base_gl_map(sb, codes_to_log)
 
             for i, code in enumerate(codes_to_log):
                 recall_id = str(uuid.uuid4())
@@ -166,6 +251,7 @@ def log_recall(
                     # Store the entered quantity as-is (absolute, same unit as the
                     # "ate as planned" path's Food_Qty) so both paths mean the same thing.
                     row["Food_Qty"] = qty
+                    row["GL"] = _gl_for_quantity(base_gl_map.get(code), tag_info.get("Portion"), qty)
                 sb.table("DietRecall").insert(row).execute()
                 recall_ids.append(recall_id)
 

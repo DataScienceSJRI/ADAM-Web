@@ -1,5 +1,5 @@
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -223,6 +223,130 @@ def build_daily_nutrient_summary(user_id: str, target_date: str) -> list[dict]:
     return rows
 
 
+MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snacks"]
+# DietRecall.meal_slot is lowercase; FinalSummary.Meal_Time is capitalized
+# (same convention as models.schemas.SLOT_TO_TIMINGS).
+_SLOT_TIMINGS_TO_MEAL_SLOT = {"Breakfast": "breakfast", "Lunch": "lunch", "Dinner": "dinner", "Snacks": "snacks"}
+
+# How many days of DietRecall history to weight into the "usual GL for this
+# meal slot" trend figure.
+GL_TREND_WINDOW_DAYS = 14
+
+
+def _planned_gl_by_meal(sb, user_id: str, plan_id: Optional[str], target_date: str) -> dict:
+    """Sum planned GL per meal slot from FinalSummary for one date."""
+    if not plan_id:
+        return {slot: None for slot in MEAL_SLOTS}
+    rows = (
+        sb.table("FinalSummary")
+        .select("Meal_Time, GL")
+        .eq("user_id", user_id)
+        .eq("plan_id", plan_id)
+        .eq("Date", target_date)
+        .execute()
+        .data
+    ) or []
+    totals = {slot: 0.0 for slot in MEAL_SLOTS}
+    seen = {slot: False for slot in MEAL_SLOTS}
+    for r in rows:
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(str(r.get("Meal_Time", "")).strip())
+        if slot is None or r.get("GL") is None:
+            continue
+        totals[slot] += float(r["GL"])
+        seen[slot] = True
+    return {slot: (round(totals[slot], 2) if seen[slot] else None) for slot in MEAL_SLOTS}
+
+
+def _actual_gl_by_meal(sb, user_id: str, target_date: str) -> dict:
+    """Sum actual (DietRecall) GL per meal slot for one date."""
+    rows = (
+        sb.table("DietRecall")
+        .select("meal_slot, GL")
+        .eq("user_id", user_id)
+        .eq("Date", target_date)
+        .execute()
+        .data
+    ) or []
+    totals = {slot: 0.0 for slot in MEAL_SLOTS}
+    seen = {slot: False for slot in MEAL_SLOTS}
+    for r in rows:
+        slot = str(r.get("meal_slot", "")).strip().lower()
+        if slot not in totals or r.get("GL") is None:
+            continue
+        totals[slot] += float(r["GL"])
+        seen[slot] = True
+    return {slot: (round(totals[slot], 2) if seen[slot] else None) for slot in MEAL_SLOTS}
+
+
+def _weighted_avg_gl_by_meal(sb, user_id: str, target_date: str) -> dict:
+    """Energy-weighted average of actual (DietRecall) GL per meal slot, over the
+    GL_TREND_WINDOW_DAYS days before target_date. Each day's GL is weighted by
+    how much energy was actually eaten in that slot that day (weighted_avg =
+    Σ(GL_day * Energy_day) / Σ(Energy_day)) — a day you ate a full meal counts
+    more toward "your typical GL for this slot" than a day you barely ate,
+    since GL's actual impact scales with how much was eaten, not with recency.
+    Falls back to an unweighted mean if no day in the window has energy data."""
+    target = date.fromisoformat(target_date)
+    start = target - timedelta(days=GL_TREND_WINDOW_DAYS)
+    rows = (
+        sb.table("DietRecall")
+        .select("Date, meal_slot, GL, Energy_Kcal")
+        .eq("user_id", user_id)
+        .gte("Date", str(start))
+        .lt("Date", target_date)
+        .execute()
+        .data
+    ) or []
+
+    # Sum GL and Energy per (date, meal_slot) first — a single meal can have
+    # multiple recall rows (e.g. main + side).
+    daily_gl: dict = {}
+    daily_energy: dict = {}
+    for r in rows:
+        d = (r.get("Date") or "")[:10]
+        slot = str(r.get("meal_slot", "")).strip().lower()
+        if not d or slot not in MEAL_SLOTS:
+            continue
+        key = (d, slot)
+        if r.get("GL") is not None:
+            daily_gl[key] = daily_gl.get(key, 0.0) + float(r["GL"])
+        if r.get("Energy_Kcal") is not None:
+            daily_energy[key] = daily_energy.get(key, 0.0) + float(r["Energy_Kcal"])
+
+    result = {}
+    for slot in MEAL_SLOTS:
+        gl_values = [v for (d, s), v in daily_gl.items() if s == slot]
+        if not gl_values:
+            result[slot] = None
+            continue
+        weighted_sum = sum(gl * daily_energy.get((d, s), 0.0) for (d, s), gl in daily_gl.items() if s == slot)
+        weight_total = sum(daily_energy.get((d, s), 0.0) for (d, s) in daily_gl if s == slot)
+        if weight_total > 0:
+            result[slot] = round(weighted_sum / weight_total, 2)
+        else:
+            result[slot] = round(sum(gl_values) / len(gl_values), 2)
+    return result
+
+
+def build_gl_by_meal(user_id: str, target_date: str) -> dict:
+    """Per-meal-slot GL dashboard: today's planned GL (from the menu), today's
+    actual GL (from DietRecall), and an energy-weighted average of actual GL
+    for that same slot over the past GL_TREND_WINDOW_DAYS days."""
+    sb = get_supabase()
+    plan_id = _latest_plan_id(sb, user_id)
+    planned = _planned_gl_by_meal(sb, user_id, plan_id, target_date)
+    actual = _actual_gl_by_meal(sb, user_id, target_date)
+    trend = _weighted_avg_gl_by_meal(sb, user_id, target_date)
+    return {
+        slot: {
+            "planned": planned[slot],
+            "actual": actual[slot],
+            "weighted_avg_past_14d": trend[slot],
+        }
+        for slot in MEAL_SLOTS
+    }
+
+
 def _latest_plan_id(sb, user_id: str) -> Optional[str]:
     resp = (
         sb.table("BE_Onboarding_Sessions")
@@ -256,6 +380,7 @@ def get_kpi(
             "gl_per_day": None,
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
+            "gl_by_meal": build_gl_by_meal(user_id, target_date),
             "message": "No plan found.",
         }
 
@@ -277,6 +402,7 @@ def get_kpi(
             "gl_per_day": None,
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
+            "gl_by_meal": build_gl_by_meal(user_id, target_date),
             "message": "No meals found for this date.",
         }
 
@@ -321,4 +447,5 @@ def get_kpi(
             "fibre_g": round(total_fibre, 1),
         },
         "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
+        "gl_by_meal": build_gl_by_meal(user_id, target_date),
     }

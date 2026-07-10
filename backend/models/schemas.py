@@ -292,6 +292,7 @@ class RecallHistoryItem(BaseModel):
     food_qty: Optional[float] = None
     r_desc: Optional[str] = None
     energy_kcal: Optional[float] = None
+    gl: Optional[float] = None
     notes: Optional[str] = None
 
     model_config = {"extra": "allow"}

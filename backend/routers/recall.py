@@ -18,7 +18,7 @@ from models.schemas import (
     RecallImageResponse,
     RecallLogResponse,
 )
-from services.recall import log_recall, log_recall_image, compute_energy_for_quantity
+from services.recall import log_recall, log_recall_image, compute_energy_for_quantity, compute_gl_for_quantity
 
 logger = logging.getLogger("backend.routers.recall")
 
@@ -71,6 +71,7 @@ def get_recall_history(
             food_qty=r.get("Food_Qty"),
             r_desc=r.get("R_desc"),
             energy_kcal=r.get("Energy_Kcal"),
+            gl=r.get("GL"),
             notes=r.get("notes"),
         )
         for r in (resp.data or [])
@@ -106,6 +107,9 @@ def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = 
         energy = compute_energy_for_quantity(recipe_code, body.food_qty)
         if energy is not None:
             updates["Energy_Kcal"] = energy
+        gl = compute_gl_for_quantity(recipe_code, body.food_qty)
+        if gl is not None:
+            updates["GL"] = gl
 
     resp = sb.table("DietRecall").update(updates).eq("ID", recall_id).eq("user_id", user_id).execute()
     if not resp.data:
@@ -369,6 +373,9 @@ def coordinator_update_recall(
         energy = compute_energy_for_quantity(recipe_code, body.food_qty)
         if energy is not None:
             updates["Energy_Kcal"] = energy
+        gl = compute_gl_for_quantity(recipe_code, body.food_qty)
+        if gl is not None:
+            updates["GL"] = gl
 
     resp = sb.table("DietRecall").update(updates).eq("ID", recall_id).execute()
     if not resp.data:
