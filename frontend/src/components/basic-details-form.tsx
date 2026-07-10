@@ -44,6 +44,7 @@ export const BasicDetailsSchema = z.object({
   dietary_type: z.enum(DIETARY_TYPE_VALUES, "Required"),
   diet_restrictions: z.array(z.string()),
   non_veg_days: z.array(z.string()),
+  millets_preferred: z.boolean(),
   breakfast_time: z.string(),
   lunch_time: z.string(),
   dinner_time: z.string(),
@@ -82,6 +83,7 @@ export function BasicDetailsForm({
       dietary_type: "",
       diet_restrictions: [],
       non_veg_days: [],
+      millets_preferred: false,
       breakfast_time: "",
       lunch_time: "",
       dinner_time: "",
@@ -271,6 +273,26 @@ export function BasicDetailsForm({
             </div>
           </div>
         )}
+
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">Do you prefer millets in your meal plan?</label>
+          <div className="flex gap-2">
+            {(["Yes", "No"] as const).map((opt) => (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => update("millets_preferred", opt === "Yes")}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                  form.millets_preferred === (opt === "Yes")
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-background text-foreground hover:bg-muted"
+                }`}
+              >
+                {opt}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div className="space-y-1.5">
           <label className="text-sm font-medium">Dietary Restrictions</label>
