@@ -24,6 +24,19 @@ logger = logging.getLogger("backend.routers.recall")
 
 router = APIRouter(prefix="/recall", tags=["recall"])
 
+_MEAL_SLOT_ORDER = {"breakfast": 0, "lunch": 1, "dinner": 2, "snacks": 3}
+
+
+def _sort_recall_rows(rows: list) -> list:
+    """Newest Date first; within a date, Breakfast -> Lunch -> Dinner -> Snacks.
+    PostgREST's .order() can't express a custom (non-alphabetical) column
+    order, so this is applied client-side. Python's sort is stable, so sorting
+    by meal_slot first and then by Date (reverse) preserves the meal-slot order
+    within each date."""
+    rows = sorted(rows, key=lambda r: _MEAL_SLOT_ORDER.get(str(r.get("meal_slot", "")).strip().lower(), 99))
+    rows.sort(key=lambda r: r.get("Date") or "", reverse=True)
+    return rows
+
 
 @router.post("/log", response_model=RecallLogResponse)
 def recall_log(body: DietRecallLogRequest, user_id: str = Depends(get_current_user)):
@@ -52,15 +65,19 @@ def get_recall_history(
     offset: int = Query(0, ge=0),
     user_id: str = Depends(get_current_user),
 ):
-    """Return the authenticated user's diet recall history."""
+    """Return the authenticated user's diet recall history: newest date first,
+    and within each date, Breakfast -> Lunch -> Dinner -> Snacks."""
     sb = get_supabase()
     query = sb.table("DietRecall").select("*", count="exact").eq("user_id", user_id)
     if date:
         query = query.eq("Date", date)
     if meal_slot:
         query = query.eq("meal_slot", meal_slot.value)
-    query = query.order("Date", desc=True).order("Time", desc=True).range(offset, offset + limit - 1)
-    resp = query.execute()
+    # Meal-slot ordering isn't expressible via PostgREST's .order(), so fetch a
+    # bounded set of matching rows sorted by Date and re-sort/paginate client-side.
+    resp = query.order("Date", desc=True).limit(2000).execute()
+    sorted_rows = _sort_recall_rows(resp.data or [])
+    page = sorted_rows[offset: offset + limit]
     items = [
         RecallHistoryItem(
             id=r.get("ID"),
@@ -74,9 +91,9 @@ def get_recall_history(
             gl=r.get("GL"),
             notes=r.get("notes"),
         )
-        for r in (resp.data or [])
+        for r in page
     ]
-    return RecallHistoryResponse(items=items, total=resp.count or len(items))
+    return RecallHistoryResponse(items=items, total=resp.count or len(sorted_rows))
 
 @router.put("/{recall_id}")
 def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = Depends(get_current_user)):
@@ -294,16 +311,16 @@ def get_participant_recall_logs(
     user_filter = [participant_id, email]
 
     def fetch_logs():
-        return (
+        rows = (
             sb.table("DietRecall")
             .select("*")
             .in_("user_id", user_filter)
             .order("Date", desc=True)
-            .order("Time", desc=True)
             .limit(500)
             .execute()
             .data
         ) or []
+        return _sort_recall_rows(rows)
 
     def fetch_plan():
         return (

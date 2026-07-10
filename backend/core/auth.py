@@ -8,6 +8,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 
+from core.retry import call_with_retry
+
 load_dotenv()
 
 logger = logging.getLogger("backend.auth")
@@ -33,7 +35,10 @@ def _jwks_client() -> PyJWKClient:
 def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     """Verify Supabase JWT locally via JWKS and return the authenticated user's email."""
     try:
-        signing_key = _jwks_client().get_signing_key_from_jwt(token)
+        signing_key = call_with_retry(
+            lambda: _jwks_client().get_signing_key_from_jwt(token),
+            what="JWKS fetch",
+        )
         payload = jwt.decode(
             token,
             signing_key.key,

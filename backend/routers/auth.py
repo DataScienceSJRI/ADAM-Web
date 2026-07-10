@@ -4,6 +4,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from core.auth import get_current_user, oauth2_scheme
+from core.retry import call_with_retry
 from core.supabase import get_supabase
 from models.schemas import LoginRequest, LoginResponse, RefreshRequest
 
@@ -27,7 +28,15 @@ def _supabase_login(email: str, password: str) -> LoginResponse:
     if "@" not in email:
         email = f"{email}@adam.participant"
     try:
-        resp = sb.auth.sign_in_with_password({"email": email, "password": password})
+        resp = call_with_retry(
+            lambda: sb.auth.sign_in_with_password({"email": email, "password": password}),
+            what="Supabase login",
+        )
+    except (httpx.TransportError, OSError) as exc:
+        # Transient network/SSL failure talking to Supabase, not a rejected
+        # credential — don't tell the user their password is wrong.
+        logger.warning("Login request failed (network) for %s: %s", email, exc)
+        raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable. Please try again.")
     except Exception as exc:
         logger.warning("Login failed for %s: %s", email, exc)
         raise HTTPException(status_code=401, detail=str(exc))
@@ -61,12 +70,15 @@ def refresh(body: RefreshRequest):
     supabase_url = os.environ.get("SUPABASE_URL", "")
     supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "") or os.environ.get("SUPABASE_KEY", "")
     try:
-        res = httpx.post(
-            f"{supabase_url}/auth/v1/token",
-            params={"grant_type": "refresh_token"},
-            json={"refresh_token": body.refresh_token},
-            headers={"apikey": supabase_key, "Content-Type": "application/json"},
-            timeout=10,
+        res = call_with_retry(
+            lambda: httpx.post(
+                f"{supabase_url}/auth/v1/token",
+                params={"grant_type": "refresh_token"},
+                json={"refresh_token": body.refresh_token},
+                headers={"apikey": supabase_key, "Content-Type": "application/json"},
+                timeout=10,
+            ),
+            what="token refresh",
         )
     except Exception as exc:
         logger.warning("Token refresh request failed: %s", exc)
