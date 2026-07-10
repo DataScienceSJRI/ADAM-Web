@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -18,6 +19,113 @@ def _clean(row: dict) -> dict:
 
 _SLOT_COL_MAP = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snacks": "Snack"}
 
+# Safety cap on how many ILIKE matches get pulled back for ranking. PostgREST's
+# .order() can't express "starts with X" > "whole word X" > "substring X"
+# relevance, so a search fetches matches (bounded by this) and ranks them in
+# Python instead of paginating server-side. Comfortably above what any real
+# search term should match in the Recipe table.
+_SEARCH_RANK_FETCH_CAP = 1000
+
+
+def _search_rank_key(name: str, term: str, similarity: float = 0.0) -> tuple:
+    """Rank a recipe name against a search term: prefix match first, then
+    whole-word match, then any other substring match. Within a tier, shorter
+    names (fewer modifiers -> the "plainer" variant, e.g. "Plain Dosa" over
+    "Capsicum Dosa") rank first, alphabetical as the final tiebreak.
+
+    Rows with no substring match at all (only pulled in via search_recipes_fuzzy's
+    trigram similarity — e.g. term "idly" matching name "Idli") sort into a
+    trailing tier 3, ordered by similarity score descending."""
+    name_lower = (name or "").strip().lower()
+    term_lower = term.strip().lower()
+    escaped = re.escape(term_lower)
+    if re.match(rf"{escaped}\b", name_lower):
+        # term is the first whole word (a plain .startswith() would also match
+        # "Dosakaya" for term "dosa", since it's a literal string prefix even
+        # though "dosa" isn't a standalone word there — \b rules that out).
+        tier = 0
+    elif re.search(rf"\b{escaped}\b", name_lower):
+        tier = 1
+    elif term_lower in name_lower:
+        tier = 2
+    else:
+        tier = 3  # fuzzy-only match (no substring at all), rank by similarity desc
+    return (tier, -similarity if tier == 3 else 0.0, len(name_lower), name_lower)
+
+
+def _resolve_allowed_codes(sb, meal_slot: Optional[str]) -> Optional[list]:
+    """meal_slot -> list of Recipe_Codes tagged for that slot in RecipeTagging, or None if no filter."""
+    if not meal_slot:
+        return None
+    slot_col = _SLOT_COL_MAP.get(meal_slot.lower())
+    if not slot_col:
+        return None
+    tag_resp = sb.table("RecipeTagging").select("Recipe_Code").eq(slot_col, "1").execute()
+    return [r["Recipe_Code"] for r in (tag_resp.data or [])]
+
+
+def _fuzzy_search_rows(sb, search_term: str) -> Optional[list]:
+    """Call the search_recipes_fuzzy Postgres function (substring match OR
+    pg_trgm similarity — see migration in routers/recipes.py's search docs)
+    so typos/alt-spellings like "idly" still find "Idli". Returns None if the
+    function isn't installed yet, so the caller can fall back to plain ilike.
+
+    Deliberately doesn't cache "unavailable" across requests: the DB migration
+    can be applied while this process is still running (no code change, so
+    --reload won't restart it), and a failed RPC call is cheap (a fast 404),
+    so there's no good reason to risk fuzzy search staying stuck off."""
+    try:
+        resp = (
+            sb.rpc("search_recipes_fuzzy", {"search_term": search_term})
+            .limit(_SEARCH_RANK_FETCH_CAP)
+            .execute()
+        )
+        return resp.data or []
+    except Exception as exc:
+        logger.warning("search_recipes_fuzzy RPC unavailable, falling back to ilike search: %s", exc)
+        return None
+
+
+def _search_and_paginate(sb, search_term: Optional[str], meal_slot: Optional[str], page: int, page_size: int) -> dict:
+    offset = (page - 1) * page_size
+    allowed_codes = _resolve_allowed_codes(sb, meal_slot)
+    fields = "Recipe_Code, Recipe_Name, Recipe_Category"
+
+    def _base_query(with_count: bool):
+        q = sb.table("Recipe").select(fields, count="exact" if with_count else None, head=with_count)
+        if search_term:
+            q = q.ilike("Recipe_Name", f"%{search_term}%")
+        if allowed_codes is not None:
+            q = q.in_("Recipe_Code", allowed_codes) if allowed_codes else q.eq("Recipe_Code", "__no_match__")
+        return q
+
+    if search_term:
+        rows = _fuzzy_search_rows(sb, search_term)
+        if rows is None:
+            # search_recipes_fuzzy RPC not present yet (migration not run) —
+            # fall back to plain substring search.
+            rows = _base_query(with_count=False).limit(_SEARCH_RANK_FETCH_CAP).execute().data or []
+        if allowed_codes is not None:
+            allowed_set = set(allowed_codes)
+            rows = [r for r in rows if r.get("Recipe_Code") in allowed_set]
+        rows.sort(key=lambda r: _search_rank_key(r.get("Recipe_Name") or "", search_term, r.get("match_similarity") or 0.0))
+        total = len(rows)
+        page_rows = rows[offset: offset + page_size]
+    else:
+        total = (_base_query(with_count=True).execute().count) or 0
+        page_rows = _base_query(with_count=False).range(offset, offset + page_size - 1).execute().data or []
+
+    total_pages = max(1, -(-total // page_size))
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+        "has_prev": page > 1,
+        "has_next": page < total_pages,
+        "recipes": [_clean(r) for r in page_rows],
+    }
+
 
 @router.get("")
 def get_recipes(
@@ -27,40 +135,11 @@ def get_recipes(
     meal_slot: Optional[str] = Query(None, description="Filter by slot: breakfast, lunch, dinner, snacks"),
     user_id: str = Depends(get_current_user),
 ):
-    """Return paginated recipes. Use ?search= for plain-text name search, ?meal_slot= to filter by slot."""
+    """Return paginated recipes. Use ?search= for plain-text name search, ?meal_slot= to filter by slot.
+    When searching, results are ranked: prefix match first, then whole-word match,
+    then any substring match; shorter names rank first within each tier."""
     sb = get_supabase()
-    offset = (page - 1) * page_size
-
-    # Resolve meal_slot → list of allowed Recipe_Codes
-    allowed_codes: Optional[list] = None
-    if meal_slot:
-        slot_col = _SLOT_COL_MAP.get(meal_slot.lower())
-        if slot_col:
-            tag_resp = sb.table("RecipeTagging").select("Recipe_Code").eq(slot_col, "1").execute()
-            allowed_codes = [r["Recipe_Code"] for r in (tag_resp.data or [])]
-
-    def _build_query(with_count: bool):
-        fields = "Recipe_Code, Recipe_Name, Recipe_Category"
-        q = sb.table("Recipe").select(fields, count="exact" if with_count else None, head=with_count)
-        if search:
-            q = q.ilike("Recipe_Name", f"%{search}%")
-        if allowed_codes is not None:
-            q = q.in_("Recipe_Code", allowed_codes) if allowed_codes else q.eq("Recipe_Code", "__no_match__")
-        return q
-
-    total = (_build_query(with_count=True).execute().count) or 0
-    total_pages = max(1, -(-total // page_size))
-    data = _build_query(with_count=False).range(offset, offset + page_size - 1).execute()
-
-    return {
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "total_pages": total_pages,
-        "has_prev": page > 1,
-        "has_next": page < total_pages,
-        "recipes": [_clean(r) for r in (data.data or [])],
-    }
+    return _search_and_paginate(sb, search, meal_slot, page, page_size)
 
 
 @router.get("/search")
@@ -71,38 +150,11 @@ def search_recipes(
     page_size: int = Query(20, ge=1, le=100),
     user_id: str = Depends(get_current_user),
 ):
-    """Search recipes by name. Optionally filter by meal slot."""
+    """Search recipes by name, ranked: prefix match first, then whole-word match,
+    then any other substring match; shorter names rank first within each tier.
+    Optionally filter by meal slot."""
     sb = get_supabase()
-    offset = (page - 1) * page_size
-
-    allowed_codes: Optional[list] = None
-    if meal_slot:
-        slot_col = _SLOT_COL_MAP.get(meal_slot.lower())
-        if slot_col:
-            tag_resp = sb.table("RecipeTagging").select("Recipe_Code").eq(slot_col, "1").execute()
-            allowed_codes = [r["Recipe_Code"] for r in (tag_resp.data or [])]
-
-    def _build_query(with_count: bool):
-        fields = "Recipe_Code, Recipe_Name, Recipe_Category"
-        query = sb.table("Recipe").select(fields, count="exact" if with_count else None, head=with_count)
-        query = query.ilike("Recipe_Name", f"%{q}%")
-        if allowed_codes is not None:
-            query = query.in_("Recipe_Code", allowed_codes) if allowed_codes else query.eq("Recipe_Code", "__no_match__")
-        return query
-
-    total = (_build_query(with_count=True).execute().count) or 0
-    total_pages = max(1, -(-total // page_size))
-    data = _build_query(with_count=False).range(offset, offset + page_size - 1).execute()
-
-    return {
-        "page": page,
-        "page_size": page_size,
-        "total": total,
-        "total_pages": total_pages,
-        "has_prev": page > 1,
-        "has_next": page < total_pages,
-        "recipes": [_clean(r) for r in (data.data or [])],
-    }
+    return _search_and_paginate(sb, q, meal_slot, page, page_size)
 
 
 @router.get("/{recipe_code}")
