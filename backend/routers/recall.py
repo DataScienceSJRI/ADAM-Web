@@ -18,7 +18,7 @@ from models.schemas import (
     RecallImageResponse,
     RecallLogResponse,
 )
-from services.recall import log_recall, log_recall_image
+from services.recall import log_recall, log_recall_image, compute_energy_for_quantity
 
 logger = logging.getLogger("backend.routers.recall")
 
@@ -92,6 +92,21 @@ def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = 
         raise HTTPException(status_code=400, detail="No fields provided to update.")
 
     sb = get_supabase()
+
+    if body.food_qty is not None:
+        existing = (
+            sb.table("DietRecall")
+            .select("Food_Name_desc")
+            .eq("ID", recall_id)
+            .eq("user_id", user_id)
+            .maybe_single()
+            .execute()
+        )
+        recipe_code = (existing.data or {}).get("Food_Name_desc")
+        energy = compute_energy_for_quantity(recipe_code, body.food_qty)
+        if energy is not None:
+            updates["Energy_Kcal"] = energy
+
     resp = sb.table("DietRecall").update(updates).eq("ID", recall_id).eq("user_id", user_id).execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail="Recall entry not found")
@@ -345,6 +360,16 @@ def coordinator_update_recall(
         raise HTTPException(status_code=400, detail="No fields to update.")
 
     sb = get_supabase()
+
+    if body.food_qty is not None:
+        existing = (
+            sb.table("DietRecall").select("Food_Name_desc").eq("ID", recall_id).maybe_single().execute()
+        )
+        recipe_code = (existing.data or {}).get("Food_Name_desc")
+        energy = compute_energy_for_quantity(recipe_code, body.food_qty)
+        if energy is not None:
+            updates["Energy_Kcal"] = energy
+
     resp = sb.table("DietRecall").update(updates).eq("ID", recall_id).execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail="Recall entry not found")

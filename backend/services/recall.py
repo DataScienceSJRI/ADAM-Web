@@ -23,6 +23,36 @@ def _fetch_planned_meals(user_id: str, plan_id: str, meal_slot: MealSlot, date: 
     return resp.data or []
 
 
+def compute_energy_for_quantity(recipe_code: Optional[str], food_qty) -> Optional[int]:
+    """Recompute Energy_Kcal for a recipe code + entered quantity, in the same way
+    log_recall's "changed" path does: entered quantity / RecipeTagging.Portion gives
+    the eaten fraction, which scales the recipe's per-portion energy (Energy_ENERC_KJ).
+
+    Used whenever Food_Qty is edited after the fact (routers/recall.py update
+    endpoints) so Energy_Kcal doesn't go stale relative to the new quantity.
+    """
+    if not recipe_code or food_qty is None:
+        return None
+    sb = get_supabase()
+    recipe = (
+        sb.table("Recipe").select("Energy_ENERC_KJ").eq("Recipe_Code", recipe_code).maybe_single().execute()
+    ).data
+    if not recipe or recipe.get("Energy_ENERC_KJ") is None:
+        return None
+    tag = (
+        sb.table("RecipeTagging").select("Portion").eq("Recipe_Code", recipe_code).maybe_single().execute()
+    ).data
+
+    try:
+        entered_qty = float(food_qty)
+        base_portion = float((tag or {}).get("Portion"))
+        prop = (entered_qty / base_portion) if base_portion > 0 else 1.0
+    except (TypeError, ValueError):
+        prop = 1.0
+
+    return int(round(float(recipe["Energy_ENERC_KJ"]) / 4.184 * prop))
+
+
 def log_recall(
     user_id: str,
     plan_id: str,
