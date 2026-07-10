@@ -70,6 +70,7 @@ function OnboardingFlow() {
       dietary_type,
       diet_restrictions,
       non_veg_days,
+      millets_preferred,
       breakfast_time,
       lunch_time,
       dinner_time,
@@ -106,6 +107,7 @@ function OnboardingFlow() {
           tobacco: healthDetails.tobacco,
           alcohol: healthDetails.alcohol,
           non_veg_days: non_veg_days.length > 0 ? non_veg_days : null,
+          millets_preferred,
         },
       });
     if (pdError) {
