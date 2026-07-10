@@ -35,7 +35,7 @@ def run_lp(
     category_weekly_rep: Optional[int] = 10,
     non_snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
-    time_limit_sec: int = 300,
+    time_limit_sec: int = 500,
     per_meal_gl_cap: int = 30,
     per_day_gl_cap: int = 90,
     per_recipe_max_gl: int = 20,
@@ -616,6 +616,20 @@ def run_lp(
     # Step 3: Track Nutrient Penalties
     # Energy is handled separately as a per-day hard constraint — exclude it here
     weekly_min.pop("Energy_ENERC_Kcal", None)
+
+    # Carb floor: soft weekly target instead of a hard per-day 130g minimum.
+    # A fixed 130g/day floor combined with the hard 45-50% carb-of-energy band
+    # below is only satisfiable when eff_daily >= ~945 kcal (130g*4kcal / 0.50);
+    # BMI/age scaling (up to eff_daily*0.63) routinely pushes overweight/older
+    # profiles under that, making the LP provably infeasible on these three
+    # constraints alone. Capping the target at 45%*eff_daily/4 keeps it
+    # consistent with the band's own lower bound, so it never asks for more
+    # than the band already permits, and shortfalls are penalized, not fatal.
+    daily_carb_floor = 130.0
+    if eff_daily is not None:
+        daily_carb_floor = min(130.0, 0.45 * float(eff_daily) / 4.0)
+    weekly_min["Carbohydrate_g"] = daily_carb_floor * float(n_days)
+
     nutrient_slacks = {}
     penalty_terms = []
     penalty_weight = 100.0
@@ -667,9 +681,6 @@ def run_lp(
         model += lpSum((9.0 * candidates.loc[i, "Fat_g"] - 0.25 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
         model += lpSum((9.0 * candidates.loc[i, "Fat_g"] - 0.35 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
 
-        min_carbs_per_day = 130.0
-        model += lpSum(candidates.loc[i, "Carb_g"] * x[(d, int(i))] for i in candidates.index) >= float(min_carbs_per_day)
-
     candidates["Fiber_g"] = pd.to_numeric(candidates.get("TotalDietaryFibre_FIBTG_g", 0), errors="coerce").fillna(0.0)
     _gender_min = None
     if profile is not None:
@@ -712,18 +723,25 @@ def run_lp(
     if 'Salt_per_serving_g' in candidates.columns:
         model += lpSum(float(candidates.loc[i, 'Salt_per_serving_g']) * x[(d, int(i))] for d in days for i in candidates.index) <= float(salt_limit_per_day_g) * float(n_days)
 
-    # solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec))
-    solver = PULP_CBC_CMD(timeLimit=int(500), gapRel=0.3, threads=6)
+    solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec), gapRel=0.3, threads=6)
     t_lp = time.time()
     _ = model.solve(solver)
     status = str(LpStatus.get(model.status, model.status))
     logger.info("LP solver finished: status=%s [%.1fs]", status, time.time() - t_lp)
-    print(f"Solver Status: {status}")
-    print(f"Solver Status: {status}")
-    print(f"Solver Status: {status}")
+
+    # A "Not Solved" status (time limit hit) can still carry a real, fully
+    # constraint-satisfying incumbent that CBC found before running out of
+    # time — use it instead of discarding all solver work. "Infeasible" is
+    # excluded even when values are present: those are leftover/relaxation
+    # values, not a confirmed feasible integer solution, so they aren't safe
+    # to trust.
+    usable_status = status in ("Optimal", "Not Solved")
+    has_incumbent = usable_status and any(
+        y[(d, int(i))].value() is not None for d in days for i in candidates.index
+    )
 
     selected_rows: List[Dict[str, object]] = []
-    if status == "Optimal":
+    if has_incumbent:
         for d in days:
             for i in candidates.index:
                 if float(y[(d, int(i))].value() or 0) > 0.5:
