@@ -347,6 +347,47 @@ def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     }
 
 
+def _latest_weight(sb, user_id: str) -> Optional[dict]:
+    """Most recent entry from user_weight_log (routers/weight.py), falling back
+    to the onboarding profile's Weight (BE_Basic_Details) if the user has never
+    logged a weight. Includes days_ago (relative to today) either way."""
+    resp = (
+        sb.table("user_weight_log")
+        .select("weight_kg, date")
+        .eq("user_id", user_id)
+        .order("date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if resp.data:
+        weight_kg = resp.data[0].get("weight_kg")
+        log_date = resp.data[0].get("date")
+        source = "weight_log"
+    else:
+        bd_resp = (
+            sb.table("BE_Basic_Details")
+            .select("Weight, created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not bd_resp.data or bd_resp.data[0].get("Weight") is None:
+            return None
+        weight_kg = bd_resp.data[0]["Weight"]
+        log_date = (bd_resp.data[0].get("created_at") or "")[:10] or None
+        source = "profile"
+
+    days_ago = None
+    if log_date:
+        try:
+            days_ago = (date.today() - date.fromisoformat(log_date)).days
+        except ValueError:
+            days_ago = None
+
+    return {"weight_kg": weight_kg, "date": log_date, "days_ago": days_ago, "source": source}
+
+
 def _latest_plan_id(sb, user_id: str) -> Optional[str]:
     resp = (
         sb.table("BE_Onboarding_Sessions")
@@ -372,6 +413,7 @@ def get_kpi(
     sb = get_supabase()
     target_date = plan_date or str(date.today())
     plan_id = _latest_plan_id(sb, user_id)
+    latest_weight = _latest_weight(sb, user_id)
 
     if not plan_id:
         return {
@@ -381,6 +423,7 @@ def get_kpi(
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
             "gl_by_meal": build_gl_by_meal(user_id, target_date),
+            "latest_weight": latest_weight,
             "message": "No plan found.",
         }
 
@@ -403,6 +446,7 @@ def get_kpi(
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
             "gl_by_meal": build_gl_by_meal(user_id, target_date),
+            "latest_weight": latest_weight,
             "message": "No meals found for this date.",
         }
 
@@ -448,4 +492,5 @@ def get_kpi(
         },
         "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
         "gl_by_meal": build_gl_by_meal(user_id, target_date),
+        "latest_weight": latest_weight,
     }
