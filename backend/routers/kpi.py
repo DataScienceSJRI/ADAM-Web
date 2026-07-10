@@ -69,6 +69,11 @@ _NUTRIENT_TO_EAR_NAME = {
     "TotalAscorbicAcid_VITC_mg": "VC",
 }
 
+# Carbohydrate has no direct EAR row in BaseEar — it's conventionally set as a
+# share of total energy rather than an absolute nutrient requirement.
+CARB_ENERGY_FRACTION = 0.5   # 50% of daily energy from carbs
+CARB_KCAL_PER_G = 4.0
+
 _PAL_BY_ACTIVITY_LEVEL = {
     "Sedentary": 1.2,
     "Lightly Active": 1.375,
@@ -120,6 +125,7 @@ def _daily_ear_map(profile: dict) -> dict:
     energy = _daily_energy_requirement(profile)
     if energy is not None:
         daily_min["Energy_ENERC_Kcal"] = energy
+        daily_min["Carbohydrate_g"] = (CARB_ENERGY_FRACTION * energy) / CARB_KCAL_PER_G
 
     return daily_min
 
