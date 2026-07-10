@@ -278,14 +278,11 @@ def _actual_gl_by_meal(sb, user_id: str, target_date: str) -> dict:
     return {slot: (round(totals[slot], 2) if seen[slot] else None) for slot in MEAL_SLOTS}
 
 
-def _weighted_avg_gl_by_meal(sb, user_id: str, target_date: str) -> dict:
-    """Energy-weighted average of actual (DietRecall) GL per meal slot, over the
-    GL_TREND_WINDOW_DAYS days before target_date. Each day's GL is weighted by
-    how much energy was actually eaten in that slot that day (weighted_avg =
-    Σ(GL_day * Energy_day) / Σ(Energy_day)) — a day you ate a full meal counts
-    more toward "your typical GL for this slot" than a day you barely ate,
-    since GL's actual impact scales with how much was eaten, not with recency.
-    Falls back to an unweighted mean if no day in the window has energy data."""
+def _gl_energy_daily_totals(sb, user_id: str, target_date: str) -> tuple:
+    """Sum GL and Energy per (date, meal_slot) over the GL_TREND_WINDOW_DAYS days
+    before target_date. Shared source of truth for both the per-meal-slot and
+    the per-day weighted-average GL figures, so they're derived from the same
+    underlying recall data instead of independent (and inconsistent) queries."""
     target = date.fromisoformat(target_date)
     start = target - timedelta(days=GL_TREND_WINDOW_DAYS)
     rows = (
@@ -312,7 +309,15 @@ def _weighted_avg_gl_by_meal(sb, user_id: str, target_date: str) -> dict:
             daily_gl[key] = daily_gl.get(key, 0.0) + float(r["GL"])
         if r.get("Energy_Kcal") is not None:
             daily_energy[key] = daily_energy.get(key, 0.0) + float(r["Energy_Kcal"])
+    return daily_gl, daily_energy
 
+
+def _weighted_avg_gl_by_meal(daily_gl: dict, daily_energy: dict) -> dict:
+    """Energy-weighted average GL per meal slot from the shared (date, slot)
+    totals: weighted_avg = Σ(GL_day * Energy_day) / Σ(Energy_day) — a day you
+    ate a full meal counts more toward "your typical GL for this slot" than a
+    day you barely ate. Falls back to an unweighted mean if no day has energy
+    data."""
     result = {}
     for slot in MEAL_SLOTS:
         gl_values = [v for (d, s), v in daily_gl.items() if s == slot]
@@ -328,23 +333,78 @@ def _weighted_avg_gl_by_meal(sb, user_id: str, target_date: str) -> dict:
     return result
 
 
+def _weighted_avg_gl_per_day(daily_gl: dict, daily_energy: dict) -> Optional[float]:
+    """Energy-weighted average of each day's TOTAL GL (summed across all meal
+    slots for that day), from the same shared (date, slot) totals. Computed
+    directly from per-day sums — not by averaging the four per-meal-slot
+    weighted averages, since a day logged unevenly across slots (e.g. only
+    breakfast+dinner, no lunch) would otherwise be double-counted or
+    mis-weighted relative to a fully-logged day."""
+    day_gl: dict = {}
+    day_energy: dict = {}
+    for (d, _s), v in daily_gl.items():
+        day_gl[d] = day_gl.get(d, 0.0) + v
+    for (d, _s), v in daily_energy.items():
+        day_energy[d] = day_energy.get(d, 0.0) + v
+
+    if not day_gl:
+        return None
+    weighted_sum = sum(gl * day_energy.get(d, 0.0) for d, gl in day_gl.items())
+    weight_total = sum(day_energy.values())
+    if weight_total > 0:
+        return round(weighted_sum / weight_total, 2)
+    return round(sum(day_gl.values()) / len(day_gl), 2)
+
+
+def _gl_indicator(yesterday_value: Optional[float], avg_value: Optional[float]) -> Optional[str]:
+    """Good = yesterday's GL for this slot was below the recent weighted
+    average (lower GL is better for blood sugar control); Poor = above it."""
+    if yesterday_value is None or avg_value is None:
+        return None
+    if yesterday_value < avg_value:
+        return "Good"
+    if yesterday_value > avg_value:
+        return "Poor"
+    return "Average"
+
+
 def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     """Per-meal-slot GL dashboard: today's planned GL (from the menu), today's
-    actual GL (from DietRecall), and an energy-weighted average of actual GL
-    for that same slot over the past GL_TREND_WINDOW_DAYS days."""
+    actual GL (from DietRecall), an energy-weighted average of actual GL for
+    that same slot over the past GL_TREND_WINDOW_DAYS days, yesterday's actual
+    GL, and a Good/Poor indicator comparing yesterday to that weighted average.
+    Also includes "per_day": an energy-weighted average of total daily GL
+    (all slots combined) over the same window."""
     sb = get_supabase()
     plan_id = _latest_plan_id(sb, user_id)
     planned = _planned_gl_by_meal(sb, user_id, plan_id, target_date)
     actual = _actual_gl_by_meal(sb, user_id, target_date)
-    trend = _weighted_avg_gl_by_meal(sb, user_id, target_date)
-    return {
+
+    yesterday_date = str(date.fromisoformat(target_date) - timedelta(days=1))
+    yesterday = _actual_gl_by_meal(sb, user_id, yesterday_date)
+
+    daily_gl, daily_energy = _gl_energy_daily_totals(sb, user_id, target_date)
+    trend = _weighted_avg_gl_by_meal(daily_gl, daily_energy)
+    per_day_trend = _weighted_avg_gl_per_day(daily_gl, daily_energy)
+
+    result = {
         slot: {
             "planned": planned[slot],
             "actual": actual[slot],
             "weighted_avg_past_14d": trend[slot],
+            "yesterday": yesterday[slot],
+            "indicator": _gl_indicator(yesterday[slot], trend[slot]),
         }
         for slot in MEAL_SLOTS
     }
+    yesterday_slot_values = [v for v in yesterday.values() if v is not None]
+    yesterday_per_day = round(sum(yesterday_slot_values), 2) if yesterday_slot_values else None
+    result["per_day"] = {
+        "weighted_avg_past_14d": per_day_trend,
+        "yesterday": yesterday_per_day,
+        "indicator": _gl_indicator(yesterday_per_day, per_day_trend),
+    }
+    return result
 
 
 def _latest_weight(sb, user_id: str) -> Optional[dict]:
