@@ -68,6 +68,22 @@ def run_auto_next_week_job(user_id: str, onboarding_id: str, week_no: int, start
     )
 
 
+def run_day4_checkin_job(user_id: str) -> None:
+    """
+    Fired at 9am IST on day 4 of a plan. Nudges the user to log their weight and review/update
+    their meal preferences.
+    """
+    from services.push import send_push
+
+    logger.info("Sending day-4 check-in reminder for user_id=%s", user_id)
+    send_push(
+        user_id=user_id,
+        title="Time to check in",
+        body="Log your weight and update your meal preferences if anything's changed.",
+        data={"type": "day4_checkin"},
+    )
+
+
 def _run_worker() -> None:
     logging.basicConfig(
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",

@@ -147,6 +147,35 @@ def _schedule_next_week_job(user_id: str, onboarding_id: str | None, week_no: in
         logger.exception("Failed to schedule next-week auto generation for onboarding_id=%s", onboarding_id)
 
 
+def _schedule_day4_checkin(user_id: str, start_date: date) -> None:
+    """
+    Schedules a day-4 push reminder nudging the user to log their weight and
+    review their meal preferences. Fires at 9am IST on day 4 of the plan
+    (start_date + 3 days).
+    """
+    try:
+        redis = get_redis()
+        trigger_date = start_date + timedelta(days=3)  # Day 4
+        trigger_at_ist = datetime.combine(trigger_date, dt_time(9, 0), tzinfo=_IST)
+        trigger_at_utc = trigger_at_ist.astimezone(timezone.utc)
+
+        queue = Queue(PLAN_QUEUE_NAME, connection=redis, default_timeout=PLAN_JOB_TIMEOUT_SECONDS)
+        job = queue.enqueue_at(
+            trigger_at_utc,
+            "services.plan_worker.run_day4_checkin_job",
+            user_id,
+            job_timeout=PLAN_JOB_TIMEOUT_SECONDS,
+            result_ttl=86400,
+            failure_ttl=604800,
+        )
+        logger.info(
+            "Scheduled day-4 check-in reminder for user_id=%s at %s IST (job=%s)",
+            user_id, trigger_at_ist.isoformat(), job.id,
+        )
+    except Exception:
+        logger.exception("Failed to schedule day-4 check-in reminder for user_id=%s", user_id)
+
+
 def _run_plan_background(
     user_id: str,
     body: GeneratePlanRequest,
@@ -279,6 +308,7 @@ def _run_plan_background(
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
     _schedule_next_week_job(user_id, body.onboarding_id, body.week_no, effective_start_date)
+    _schedule_day4_checkin(user_id, effective_start_date)
 
     try:
         from services.push import send_push
