@@ -324,9 +324,9 @@ class WebReactionType(str, Enum):
 
 
 class LikedRecipeItem(BaseModel):
-    recipe_code: str
-    recipe_name: Optional[str] = None
-    recipe_category: Optional[str] = None
+    Recipe_Code: str
+    Recipe_Name: Optional[str] = None
+    Recipe_Category: Optional[str] = None
 
     model_config = {"extra": "allow"}
 

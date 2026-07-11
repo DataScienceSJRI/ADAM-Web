@@ -8,7 +8,7 @@ from models.schemas import (
     WebMealReactionRequest, WebReactionItem, WebReactionsListResponse,
     RecipeReactionRequest,
 )
-from services.reaction import save_reaction
+from services.reaction import save_reaction, upsert_recipes_lu
 
 logger = logging.getLogger("backend.routers.reaction")
 
@@ -120,6 +120,7 @@ def log_recipe_reaction(body: RecipeReactionRequest, user_id: str = Depends(get_
     resp = query.execute()
     if not resp.data:
         raise HTTPException(status_code=404, detail="No matching recipe found in plan")
+    upsert_recipes_lu(user_id, [body.recipe_code], body.reaction)
     logger.info("Recipe reaction saved: user=%s recipe=%s reaction=%s", user_id, body.recipe_code, body.reaction.value)
     return ReactionResponse(status="ok")
 

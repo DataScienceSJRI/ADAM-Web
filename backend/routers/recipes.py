@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.auth import get_current_user
 from core.supabase import get_supabase
-from models.schemas import LikedRecipesResponse, ReactionResponse
+from models.schemas import LikedRecipesResponse, ReactionResponse, ReactionType
 
 logger = logging.getLogger("backend.routers.recipes")
 
@@ -158,23 +158,52 @@ def search_recipes(
     return _search_and_paginate(sb, q, meal_slot, page, page_size)
 
 
-def _list_reaction_recipes(sb, user_id: str, interaction: str) -> dict:
-    """Recipes the user has liked/disliked, joined against Recipe for name/category."""
-    lu_resp = sb.table("Recipes_LU").select("Recipe_Code").eq("UID", user_id).eq("Interaction", interaction).execute()
-    codes = [r["Recipe_Code"] for r in (lu_resp.data or [])]
+def _lu_recipe_codes(sb, user_id: str, lu_code: str) -> set:
+    """Recipe codes the user liked/disliked via the standalone recipes page (Recipes_LU)."""
+    resp = sb.table("Recipes_LU").select("Recipe_Code").eq("UID", user_id).eq("Interaction", lu_code).execute()
+    return {r["Recipe_Code"] for r in (resp.data or []) if r.get("Recipe_Code")}
+
+
+def _mobile_reaction_recipe_codes(sb, user_id: str, reaction_value: str) -> set:
+    """Recipe codes the user liked/disliked from the mobile app's meal-plan reactions,
+    which write directly to Recommendation.Reaction (per-recipe) / Combo_Reaction (whole slot)."""
+    codes: set = set()
+    per_recipe_resp = (
+        sb.table("Recommendation").select("Food_Name_desc")
+        .eq("user_id", user_id).eq("Reaction", reaction_value).execute()
+    )
+    codes.update(r["Food_Name_desc"] for r in (per_recipe_resp.data or []) if r.get("Food_Name_desc"))
+
+    combo_resp = (
+        sb.table("Recommendation").select("Food_Name_desc")
+        .eq("user_id", user_id).eq("Combo_Reaction", reaction_value).execute()
+    )
+    codes.update(r["Food_Name_desc"] for r in (combo_resp.data or []) if r.get("Food_Name_desc"))
+
+    return codes
+
+
+def _list_reaction_recipes(sb, user_id: str, lu_code: str, mobile_reaction_value: str) -> dict:
+    """Recipes the user has liked/disliked, merging the standalone recipes page (Recipes_LU)
+    with the mobile app's meal-plan reactions (Recommendation.Reaction / Combo_Reaction),
+    joined against Recipe for name/category."""
+    codes = (
+        _lu_recipe_codes(sb, user_id, lu_code)
+        | _mobile_reaction_recipe_codes(sb, user_id, mobile_reaction_value)
+    )
     if not codes:
         return {"items": [], "total": 0}
     recipe_resp = (
         sb.table("Recipe")
         .select("Recipe_Code, Recipe_Name, Recipe_Category")
-        .in_("Recipe_Code", codes)
+        .in_("Recipe_Code", list(codes))
         .execute()
     )
     items = [
         {
-            "recipe_code": r["Recipe_Code"],
-            "recipe_name": r.get("Recipe_Name"),
-            "recipe_category": r.get("Recipe_Category"),
+            "Recipe_Code": r["Recipe_Code"],
+            "Recipe_Name": r.get("Recipe_Name"),
+            "Recipe_Category": r.get("Recipe_Category"),
         }
         for r in (recipe_resp.data or [])
     ]
@@ -183,16 +212,16 @@ def _list_reaction_recipes(sb, user_id: str, interaction: str) -> dict:
 
 @router.get("/like", response_model=LikedRecipesResponse)
 def get_liked_recipes(user_id: str = Depends(get_current_user)):
-    """List recipes the current user has liked."""
+    """List recipes the current user has liked, from the recipes page or the mobile app's meal-plan reactions."""
     sb = get_supabase()
-    return _list_reaction_recipes(sb, user_id, "like")
+    return _list_reaction_recipes(sb, user_id, "L", ReactionType.LIKE.value)
 
 
 @router.get("/dislike", response_model=LikedRecipesResponse)
 def get_disliked_recipes(user_id: str = Depends(get_current_user)):
-    """List recipes the current user has disliked."""
+    """List recipes the current user has disliked, from the recipes page or the mobile app's meal-plan reactions."""
     sb = get_supabase()
-    return _list_reaction_recipes(sb, user_id, "dislike")
+    return _list_reaction_recipes(sb, user_id, "U", ReactionType.DISLIKE.value)
 
 
 @router.get("/{recipe_code}")
@@ -228,11 +257,11 @@ def _set_recipe_reaction(sb, recipe_code: str, user_id: str, interaction: str) -
 def like_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
     """Like a recipe"""
     sb = get_supabase()
-    return _set_recipe_reaction(sb, recipe_code, user_id, "like")
+    return _set_recipe_reaction(sb, recipe_code, user_id, "L")
 
 
 @router.post("/{recipe_code}/dislike", response_model=ReactionResponse)
 def dislike_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
     """Dislike a recipe"""
     sb = get_supabase()
-    return _set_recipe_reaction(sb, recipe_code, user_id, "dislike")
+    return _set_recipe_reaction(sb, recipe_code, user_id, "U")
