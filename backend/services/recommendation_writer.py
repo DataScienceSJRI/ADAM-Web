@@ -129,6 +129,14 @@ def write_recommendations(
         except Exception:
             logger.exception("Failed to log supabase insert response")
 
+    # Immutable snapshot of the plan for debugging / audit purposes. If this fails, we still want the main Recommendation write to succeed.
+    try:
+        for i in range(0, len(rows), batch_size):
+            supabase.table("RecommendationsBackup").insert(rows[i : i + batch_size]).execute()
+        logger.info("Inserted %d rows to RecommendationsBackup for plan_id=%s", len(rows), plan_id)
+    except Exception:
+        logger.exception("Failed to write RecommendationsBackup for plan_id=%s (Recommendation write unaffected)", plan_id)
+
     return len(rows), plan_id
 
 
