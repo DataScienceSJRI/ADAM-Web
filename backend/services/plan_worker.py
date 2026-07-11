@@ -2,6 +2,7 @@ import argparse
 import logging
 import multiprocessing
 import os
+from datetime import date
 
 from rq import Queue, Worker
 
@@ -27,6 +28,46 @@ def run_plan_job(user_id: str, body: dict, profile: dict) -> None:
     _run_plan_background(user_id=user_id, body=request, profile=profile)
 
 
+def run_auto_next_week_job(user_id: str, onboarding_id: str, week_no: int, start_date_iso: str) -> None:
+    """
+    Fired at 9pm IST on day 6 of the previous week's plan (scheduled by _schedule_next_week_job in
+    routers/plan.py). Notifies the user that generation has started, then runs
+    the same plan pipeline used for manual generation, anchored to start_date
+    so this week continues immediately after the previous one.
+    """
+    from routers.plan import _run_plan_background
+    from services.profile_builder import build_profile
+    from services.push import send_push
+
+    logger.info(
+        "Auto-generating week %d plan for user_id=%s onboarding_id=%s",
+        week_no, user_id, onboarding_id,
+    )
+
+    send_push(
+        user_id=user_id,
+        title="Next week's plan is on its way",
+        body="We're generating your meal plan for next week. You'll get a notification when it's ready.",
+        data={"type": "plan_auto_generating", "week_no": week_no},
+    )
+
+    profile = build_profile(user_id, onboarding_id=onboarding_id)
+    if profile is None:
+        logger.warning(
+            "Auto plan generation skipped: no profile found for user_id=%s onboarding_id=%s",
+            user_id, onboarding_id,
+        )
+        return
+
+    request = GeneratePlanRequest(week_no=week_no, onboarding_id=onboarding_id)
+    _run_plan_background(
+        user_id=user_id,
+        body=request,
+        profile=profile,
+        start_date=date.fromisoformat(start_date_iso),
+    )
+
+
 def _run_worker() -> None:
     logging.basicConfig(
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
@@ -39,7 +80,7 @@ def _run_worker() -> None:
         default_timeout=PLAN_JOB_TIMEOUT_SECONDS,
     )
     worker = Worker([queue], connection=redis)
-    worker.work(with_scheduler=False)
+    worker.work(with_scheduler=True)
 
 
 def main() -> None:

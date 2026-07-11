@@ -4,12 +4,14 @@ import os
 import time
 import tempfile
 import json
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from rq import Queue
+from rq.job import Job
 from core.redis_client import PLAN_JOB_TIMEOUT_SECONDS, PLAN_QUEUE_NAME, get_redis
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
@@ -22,6 +24,9 @@ from services.recommendation_writer import (
     get_plan_status,
 )
 import logging
+
+# Times stored in DB are IST (UTC+5:30); the day-6 auto-generation trigger fires at 9pm IST.
+_IST = timezone(timedelta(hours=5, minutes=30))
 
 
 logger = logging.getLogger("backend.routers.plan")
@@ -81,9 +86,76 @@ class ModelOptimiser(ADAMPersonalizationModel):
         return run_lp(self, meal_choices, ds, age_group_col, **kwargs)
 
 
-def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict) -> None:
+def _schedule_next_week_job(user_id: str, onboarding_id: str | None, week_no: int, start_date: date) -> None:
+    """
+    Schedules automatic generation of week `week_no + 1`'s plan for 9pm IST on
+    day 6 of the plan that just finished (start_date + 5 days), continuing
+    the following week from the day after this plan's last day.
+    Any previously scheduled auto-job for this onboarding session is cancelled
+    first so re-generating a plan never leaves a stale/duplicate job behind.(just in case for future)
+    """
+    if not onboarding_id:
+        logger.info("Skipping auto-generation scheduling: no onboarding_id for user_id=%s", user_id)
+        return
+    try:
+        from core.supabase import get_supabase
+
+        redis = get_redis()
+        supabase = get_supabase()
+
+        existing = (
+            supabase.table("BE_Onboarding_Sessions")
+            .select("next_plan_job_id")
+            .eq("onboarding_id", onboarding_id)
+            .limit(1)
+            .execute()
+        )
+        old_job_id = existing.data[0].get("next_plan_job_id") if existing.data else None
+        if old_job_id:
+            try:
+                Job.fetch(old_job_id, connection=redis).cancel()
+            except Exception:
+                logger.info("Could not cancel previous auto-job %s (likely already run/expired)", old_job_id)
+
+        trigger_date = start_date + timedelta(days=5)  # Day 6 of this plan
+        trigger_at_ist = datetime.combine(trigger_date, dt_time(21, 0), tzinfo=_IST)
+        trigger_at_utc = trigger_at_ist.astimezone(timezone.utc)
+
+        next_week_no = week_no + 1
+        next_start_date = start_date + timedelta(days=7)  # day after this plan's last day (Day 7)
+
+        queue = Queue(PLAN_QUEUE_NAME, connection=redis, default_timeout=PLAN_JOB_TIMEOUT_SECONDS)
+        job = queue.enqueue_at(
+            trigger_at_utc,
+            "services.plan_worker.run_auto_next_week_job",
+            user_id,
+            onboarding_id,
+            next_week_no,
+            next_start_date.isoformat(),
+            job_timeout=PLAN_JOB_TIMEOUT_SECONDS,
+            result_ttl=86400,
+            failure_ttl=604800,
+        )
+        supabase.table("BE_Onboarding_Sessions").update(
+            {"next_plan_job_id": job.id}
+        ).eq("onboarding_id", onboarding_id).execute()
+        logger.info(
+            "Scheduled auto-generation of week %d for onboarding_id=%s at %s IST (job=%s)",
+            next_week_no, onboarding_id, trigger_at_ist.isoformat(), job.id,
+        )
+    except Exception:
+        logger.exception("Failed to schedule next-week auto generation for onboarding_id=%s", onboarding_id)
+
+
+def _run_plan_background(
+    user_id: str,
+    body: GeneratePlanRequest,
+    profile: dict,
+    start_date: date | None = None,
+) -> None:
     """Runs the model in the RQ worker and writes results."""
     t0 = time.time()
+    effective_start_date = start_date or (date.today() + timedelta(days=1))
     _write_plan_status(body.onboarding_id, "generating")
 
     finall_summary = None
@@ -191,6 +263,7 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
             weekly_menu=weekly_menu,
             week_no=body.week_no,
             onboarding_id=body.onboarding_id,
+            start_date=effective_start_date,
         )
         logger.info("Write completed: rows_written=%d, plan_id=%s, user_id=%s", rows_written, plan_id, user_id)
     except Exception as e:
@@ -199,12 +272,13 @@ def _run_plan_background(user_id: str, body: GeneratePlanRequest, profile: dict)
         return
 
     try:
-        write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary)
+        write_final_summary(user_id=user_id, plan_id=plan_id, final_summary_df=finall_summary, start_date=effective_start_date)
         write_final_nutrient_summary(user_id=user_id, plan_id=plan_id, nutrient_summary_df=final_nut_summary)
     except Exception as e:
         logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
+    _schedule_next_week_job(user_id, body.onboarding_id, body.week_no, effective_start_date)
 
     try:
         from services.push import send_push
@@ -285,7 +359,28 @@ async def plan_status(user_id: str = Depends(get_current_user)):
 @router.delete("")
 async def delete_plan(user_id: str = Depends(get_current_user)):
     from core.supabase import get_supabase
-    get_supabase().table("Recommendation").delete().eq("user_id", user_id).execute()
+    supabase = get_supabase()
+
+    sessions = (
+        supabase.table("BE_Onboarding_Sessions")
+        .select("onboarding_id, next_plan_job_id")
+        .eq("user_id", user_id)
+        .not_.is_("next_plan_job_id", "null")
+        .execute()
+    )
+    if sessions.data:
+        redis = get_redis()
+        for s in sessions.data:
+            job_id = s.get("next_plan_job_id")
+            try:
+                Job.fetch(job_id, connection=redis).cancel()
+            except Exception:
+                logger.info("Could not cancel auto-job %s (likely already run/expired)", job_id)
+        supabase.table("BE_Onboarding_Sessions").update(
+            {"next_plan_job_id": None}
+        ).eq("user_id", user_id).execute()
+
+    supabase.table("Recommendation").delete().eq("user_id", user_id).execute()
     return {"status": "deleted", "user_id": user_id}
 
 
