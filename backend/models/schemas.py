@@ -323,6 +323,19 @@ class WebReactionType(str, Enum):
     DISLIKED = "disliked"
 
 
+class LikedRecipeItem(BaseModel):
+    recipe_code: str
+    recipe_name: Optional[str] = None
+    recipe_category: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class LikedRecipesResponse(BaseModel):
+    items: List[LikedRecipeItem]
+    total: int
+
+
 class RecipeReactionRequest(BaseModel):
     plan_id: str
     recipe_code: str

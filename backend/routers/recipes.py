@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.auth import get_current_user
 from core.supabase import get_supabase
+from models.schemas import LikedRecipesResponse, ReactionResponse
 
 logger = logging.getLogger("backend.routers.recipes")
 
@@ -157,6 +158,43 @@ def search_recipes(
     return _search_and_paginate(sb, q, meal_slot, page, page_size)
 
 
+def _list_reaction_recipes(sb, user_id: str, interaction: str) -> dict:
+    """Recipes the user has liked/disliked, joined against Recipe for name/category."""
+    lu_resp = sb.table("Recipes_LU").select("Recipe_Code").eq("UID", user_id).eq("Interaction", interaction).execute()
+    codes = [r["Recipe_Code"] for r in (lu_resp.data or [])]
+    if not codes:
+        return {"items": [], "total": 0}
+    recipe_resp = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Name, Recipe_Category")
+        .in_("Recipe_Code", codes)
+        .execute()
+    )
+    items = [
+        {
+            "recipe_code": r["Recipe_Code"],
+            "recipe_name": r.get("Recipe_Name"),
+            "recipe_category": r.get("Recipe_Category"),
+        }
+        for r in (recipe_resp.data or [])
+    ]
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/like", response_model=LikedRecipesResponse)
+def get_liked_recipes(user_id: str = Depends(get_current_user)):
+    """List recipes the current user has liked."""
+    sb = get_supabase()
+    return _list_reaction_recipes(sb, user_id, "like")
+
+
+@router.get("/dislike", response_model=LikedRecipesResponse)
+def get_disliked_recipes(user_id: str = Depends(get_current_user)):
+    """List recipes the current user has disliked."""
+    sb = get_supabase()
+    return _list_reaction_recipes(sb, user_id, "dislike")
+
+
 @router.get("/{recipe_code}")
 def get_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
     """Return full detail for a single recipe including RecipeTagging metadata."""
@@ -175,3 +213,26 @@ def get_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
         data["tagging"] = _clean(tag_resp.data[0])
 
     return data
+
+
+def _set_recipe_reaction(sb, recipe_code: str, user_id: str, interaction: str) -> dict:
+    """Upsert into Recipes_LU keyed on (UID, Recipe_Code), so re-reacting overwrites the prior value."""
+    sb.table("Recipes_LU").upsert(
+        {"UID": user_id, "Recipe_Code": recipe_code, "Interaction": interaction},
+        on_conflict="UID,Recipe_Code",
+    ).execute()
+    return {"status": "ok"}
+
+
+@router.post("/{recipe_code}/like", response_model=ReactionResponse)
+def like_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
+    """Like a recipe"""
+    sb = get_supabase()
+    return _set_recipe_reaction(sb, recipe_code, user_id, "like")
+
+
+@router.post("/{recipe_code}/dislike", response_model=ReactionResponse)
+def dislike_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
+    """Dislike a recipe"""
+    sb = get_supabase()
+    return _set_recipe_reaction(sb, recipe_code, user_id, "dislike")
