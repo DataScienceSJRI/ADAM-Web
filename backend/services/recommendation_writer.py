@@ -61,11 +61,11 @@ def write_recommendations(
         except Exception:
             pass
 
-    today = date.today()
+    start_date = date.today() + timedelta(days=1)
     rows = []
     for _, row in weekly_menu.iterrows():
         day_num = int(row.get("Day", 1))
-        meal_date = (today + timedelta(days=day_num - 1)).isoformat()
+        meal_date = (start_date + timedelta(days=day_num - 1)).isoformat()
 
         energy = row.get("Energy_ENERC_Kcal")
         try:
@@ -183,12 +183,12 @@ def write_final_summary(
         return 0
 
     supabase = get_supabase()
-    today = date.today()
+    start_date = date.today() + timedelta(days=1)
     rows = []
 
     for _, row in final_summary_df.iterrows():
         try:
-            meal_date = (today + timedelta(days=int(row.get("Day", 1)) - 1)).isoformat()
+            meal_date = (start_date + timedelta(days=int(row.get("Day", 1)) - 1)).isoformat()
         except (TypeError, ValueError):
             meal_date = None
 
