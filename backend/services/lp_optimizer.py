@@ -35,10 +35,11 @@ def run_lp(
     category_weekly_rep: Optional[int] = 10,
     non_snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
-    time_limit_sec: int = 500,
+    time_limit_sec: int = 600,
     per_meal_gl_cap: int = 30,
     per_day_gl_cap: int = 90,
     per_recipe_max_gl: int = 20,
+    liked_recipe_bonus: float = 2000.0,
     recipe_ing_df: Optional[pd.DataFrame] = None,
     main1_main2_mapping: Optional[pd.DataFrame] = None,
     ear_100: Optional[pd.DataFrame] = None,
@@ -155,6 +156,19 @@ def run_lp(
         + 0.3 * candidates["Avg_TimeAbove160_pct_z"]
         + 0.2 * candidates["Avg_Delta_Glucose_z"]
     )
+
+    # Give the user's explicitly-liked recipes (ds["liked_recipe_codes"], set by
+    # services/data_loader.py) a discount on their objective score, so the LP
+    # actually prefers them over an equally-valid alternative in the same slot
+    # instead of just making them eligible candidates. Sized to flip a choice
+    # between recipes of similar GL (a handful of GL units, at 500/unit) without
+    # overriding a much-healthier option — GL still wins in extreme cases, since
+    # this is a diabetes meal planner and preference shouldn't trump safety.
+    liked_codes = {str(c).strip().upper() for c in (ds.get("liked_recipe_codes") or set())}
+    if liked_codes and liked_recipe_bonus:
+        is_liked = candidates["Recipe_Code"].astype(str).str.strip().str.upper().isin(liked_codes)
+        candidates.loc[is_liked, "Weighted_Objective_Score"] -= float(liked_recipe_bonus)
+
     objective_metric_col = "Weighted_Objective_Score"
 
     required_slots = (
@@ -790,7 +804,7 @@ def run_lp(
         "status": status,
         "objective": float(value(model.objective)) if model.objective is not None else np.nan,
         "objective_metric": objective_metric_col,
-        "objective_formula": "0.5*z(GL) + 0.3*z(Avg_TimeAbove160_pct) + 0.2*z(Avg_Delta_Glucose)",
+        "objective_formula": "0.5*z(GL) + 0.3*z(Avg_TimeAbove160_pct) + 0.2*z(Avg_Delta_Glucose) - liked_recipe_bonus",
         "category_weekly_rep": int(category_weekly_rep) if category_weekly_rep is not None else None,
         "rows": int(len(weekly_menu)),
         "days": int(n_days),

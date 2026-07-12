@@ -280,25 +280,74 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     except Exception:
         logger.exception("Vegetarian recipe filtering failed for user_id=%s — serving unfiltered recipes", user_id)
 
-    # Exclude recipes the user has explicitly disliked in previous plans
+    # Exclude recipes the user has explicitly disliked — from the standalone
+    # recipes page (Recipes_LU, Interaction="U") and from mobile meal-plan
+    # reactions (Recommendation.Reaction / Combo_Reaction == "dislike"), so
+    # disliked recipes never enter personalization scoring to begin with.
+    # (Recommendation.Reaction stores ReactionType.DISLIKE.value == "dislike",
+    # not "disliked" — a prior version of this filter used the wrong string
+    # and silently never matched anything.)
     try:
-        disliked = _fetch("Recommendation", {"user_id": user_id, "Reaction": "disliked"})
-        if not disliked.empty and "Food_Name_desc" in disliked.columns:
-            disliked_codes = set(
-                disliked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+        disliked_codes: set = set()
+
+        lu_disliked = _fetch("Recipes_LU", {"UID": user_id, "Interaction": "U"})
+        if not lu_disliked.empty and "Recipe_Code" in lu_disliked.columns:
+            disliked_codes.update(
+                lu_disliked["Recipe_Code"].dropna().astype(str).str.strip().str.upper().unique()
             )
-            if disliked_codes:
-                if "Recipe_Code" in ds["recipes"].columns:
-                    ds["recipes"] = ds["recipes"][
-                        ~ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(disliked_codes)
-                    ].copy()
-                rt = ds.get("recipe_tag", pd.DataFrame())
-                if not rt.empty and "Recipe_Code" in rt.columns:
-                    ds["recipe_tag"] = rt[
-                        ~rt["Recipe_Code"].astype(str).str.strip().str.upper().isin(disliked_codes)
-                    ].copy()
+
+        reaction_disliked = _fetch("Recommendation", {"user_id": user_id, "Reaction": "dislike"})
+        if not reaction_disliked.empty and "Food_Name_desc" in reaction_disliked.columns:
+            disliked_codes.update(
+                reaction_disliked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+
+        combo_disliked = _fetch("Recommendation", {"user_id": user_id, "Combo_Reaction": "dislike"})
+        if not combo_disliked.empty and "Food_Name_desc" in combo_disliked.columns:
+            disliked_codes.update(
+                combo_disliked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+
+        if disliked_codes:
+            if "Recipe_Code" in ds["recipes"].columns:
+                ds["recipes"] = ds["recipes"][
+                    ~ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(disliked_codes)
+                ].copy()
+            rt = ds.get("recipe_tag", pd.DataFrame())
+            if not rt.empty and "Recipe_Code" in rt.columns:
+                ds["recipe_tag"] = rt[
+                    ~rt["Recipe_Code"].astype(str).str.strip().str.upper().isin(disliked_codes)
+                ].copy()
     except Exception:
         logger.exception("Disliked recipe exclusion failed for user_id=%s — disliked recipes may reappear", user_id)
+
+    # Collect liked recipes (same two sources) so run() can force them into the
+    # LP's candidate pool even if they didn't score high enough naturally.
+    try:
+        liked_codes: set = set()
+
+        lu_liked = _fetch("Recipes_LU", {"UID": user_id, "Interaction": "L"})
+        if not lu_liked.empty and "Recipe_Code" in lu_liked.columns:
+            liked_codes.update(
+                lu_liked["Recipe_Code"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+
+        reaction_liked = _fetch("Recommendation", {"user_id": user_id, "Reaction": "like"})
+        if not reaction_liked.empty and "Food_Name_desc" in reaction_liked.columns:
+            liked_codes.update(
+                reaction_liked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+
+        combo_liked = _fetch("Recommendation", {"user_id": user_id, "Combo_Reaction": "like"})
+        if not combo_liked.empty and "Food_Name_desc" in combo_liked.columns:
+            liked_codes.update(
+                combo_liked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+
+        ds["liked_recipe_codes"] = liked_codes
+    except Exception:
+        logger.exception("Liked recipe lookup failed for user_id=%s — liked recipes won't be force-included", user_id)
+        ds["liked_recipe_codes"] = set()
 
     return ds
 

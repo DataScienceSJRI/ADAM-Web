@@ -1510,6 +1510,125 @@ class ADAMPersonalizationModel:
 
 		return pd.DataFrame(rows).reset_index(drop=True)
 
+	def _inject_liked_recipes(self, top_choices: pd.DataFrame, scored: pd.DataFrame, ds: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+		"""Force the user's explicitly-liked recipes (ds["liked_recipe_codes"],
+		set by services/data_loader.py from Recipes_LU + Recommendation.Reaction/
+		Combo_Reaction) into the LP's candidate pool, even if they didn't score
+		high enough in personalization to be pulled in naturally.
+
+		Primary path: a liked recipe with subcategory code S (its own
+		Recipe_Category) is added as an extra alternative to every EXISTING
+		(Meal_Time, Dish_Type, Preference_Row_ID) combination in top_choices
+		that's already tagged Preferred_SubCategory_code == S — whatever
+		Dish_Type that combination already is (Main, Main 2, Main 3, Optional,
+		Snacks...). E.g. if a Dinner/Main-2/pref-row-5 slot already offers
+		subcategory "A1A" via some other recipe, and the liked recipe is also
+		"A1A", it becomes a second option for that exact slot — the LP can now
+		pick either. Because it's inserted into an already-consistent
+		preference group, existing Main/Main2/Main3 pairing constraints in
+		lp_optimizer.py are automatically respected: it's just one more choice
+		within a group that's already properly paired.
+
+		Fallback: if a liked recipe's subcategory doesn't appear in ANY
+		existing combination (nothing currently wants that subcategory at
+		all), it's added as a new, standalone "Main" candidate (or "Snacks" if
+		only tagged for the Snacks slot) instead, so it isn't silently
+		dropped — same as before, with its own fresh Preference_Row_ID so a
+		lone, unpaired "Main" can't violate any pairing constraint.
+
+		Recipes no longer present in `scored` (e.g. filtered out upstream by
+		diet-type or the dislike exclusion) are skipped rather than force-added,
+		so this never bypasses those filters."""
+		liked_codes = ds.get("liked_recipe_codes") or set()
+		if not liked_codes or scored.empty:
+			return top_choices
+
+		recipe_tag = ds.get("recipe_tag", pd.DataFrame())
+		has_tagging = not recipe_tag.empty and "Recipe_Code" in recipe_tag.columns
+
+		existing_slots: set = set()
+		combos_by_subcat: dict = {}
+		if not top_choices.empty and {"Recipe_Code", "Meal_Time", "Dish_Type", "Preference_Row_ID", "Preferred_SubCategory_code"}.issubset(top_choices.columns):
+			existing_slots = set(
+				zip(
+					top_choices["Recipe_Code"].astype(str).str.strip().str.upper(),
+					top_choices["Meal_Time"].astype(str).str.strip(),
+					top_choices["Dish_Type"].astype(str).str.strip(),
+					top_choices["Preference_Row_ID"],
+				)
+			)
+			combo_cols = ["Preferred_SubCategory_code", "Meal_Time", "Dish_Type", "Preference_Row_ID"]
+			for _, combo in top_choices[combo_cols].drop_duplicates().iterrows():
+				subcat = str(combo["Preferred_SubCategory_code"]).strip().upper()
+				combos_by_subcat.setdefault(subcat, []).append(
+					(combo["Meal_Time"], combo["Dish_Type"], combo["Preference_Row_ID"])
+				)
+
+		next_pref_row_id = 1
+		if not top_choices.empty and "Preference_Row_ID" in top_choices.columns:
+			existing_ids = pd.to_numeric(top_choices["Preference_Row_ID"], errors="coerce").dropna()
+			if not existing_ids.empty:
+				next_pref_row_id = int(existing_ids.max()) + 1
+
+		slot_cols = {"Breakfast": "Breakfast", "Lunch": "Lunch", "Dinner": "Dinner", "Snacks": "Snack"}
+		new_rows = []
+		for code in liked_codes:
+			code_u = str(code).strip().upper()
+			recipe_rows = scored[scored["Recipe_Code"].astype(str).str.strip().str.upper() == code_u]
+			if recipe_rows.empty:
+				continue
+			base_row = recipe_rows.iloc[0]
+			subcat = str(base_row.get("Recipe_Category", "")).strip().upper()
+
+			tag_row = None
+			if has_tagging:
+				tag_rows = recipe_tag[recipe_tag["Recipe_Code"].astype(str).str.strip().str.upper() == code_u]
+				if not tag_rows.empty:
+					tag_row = tag_rows.iloc[0]
+
+			matching_combos = combos_by_subcat.get(subcat, [])
+			if matching_combos:
+				for meal_time, dish_type, pref_row_id in matching_combos:
+					meal_time_s = str(meal_time).strip()
+					dish_type_s = str(dish_type).strip()
+					# Still respect RecipeTagging's own meal-time eligibility where available
+					# (e.g. don't slot a breakfast-only liked recipe into a Dinner combination).
+					col = slot_cols.get(meal_time_s)
+					if tag_row is not None and col is not None and col in tag_row.index and str(tag_row.get(col)).strip() != "1":
+						continue
+					if (code_u, meal_time_s, dish_type_s, pref_row_id) in existing_slots:
+						continue
+					new_row = base_row.copy()
+					new_row["Preferred_SubCategory_code"] = subcat
+					new_row["Meal_Time"] = meal_time
+					new_row["Dish_Type"] = dish_type
+					new_row["Preference_Row_ID"] = pref_row_id
+					new_rows.append(new_row)
+				continue  # matched into existing combinations — skip the standalone fallback
+
+			if tag_row is None:
+				continue  # no existing combo wants this subcategory, and no tagging to place it standalone either
+
+			for meal_time, col in slot_cols.items():
+				if col not in tag_row.index or str(tag_row.get(col)).strip() != "1":
+					continue
+				if (code_u, meal_time, "Main", next_pref_row_id) in existing_slots:
+					continue
+
+				new_row = base_row.copy()
+				new_row["Preferred_SubCategory_code"] = subcat
+				new_row["Dish_Type"] = "Snacks" if meal_time == "Snacks" else "Main"
+				new_row["Meal_Time"] = meal_time
+				new_row["Preference_Row_ID"] = next_pref_row_id
+				next_pref_row_id += 1
+				new_rows.append(new_row)
+
+		if not new_rows:
+			return top_choices
+
+		injected = pd.DataFrame(new_rows)
+		return pd.concat([top_choices, injected], ignore_index=True) if not top_choices.empty else injected
+
 	def run(
 		self,
 		uid: Optional[str],
@@ -1724,6 +1843,7 @@ class ADAMPersonalizationModel:
 				top_choices = top_choices.loc[:, top_choices.columns != top_choices.columns[0]]
 		
 		top_choices = top_choices[(top_choices["Dish_Type"]!="SIDE") & (top_choices["Dish_Type"]!="Beverages")  ].copy()
+		top_choices = self._inject_liked_recipes(top_choices, scored, ds)
 		# Save intermediate outputs as soon as they are ready
 		pd.DataFrame(prefs).to_csv("preferences_used.csv", index=False)
 		pd.DataFrame(scored).to_csv("personalization_scored_recipes.csv", index=False)
