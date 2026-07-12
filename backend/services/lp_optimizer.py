@@ -664,13 +664,38 @@ def run_lp(
         model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for d in days for i in candidates.index) + slack >= float(req)
         penalty_terms.append(penalty_weight * slack)
 
-
+    # Millet-recipe soft-forced inclusion: require at least 1 (or 2, if more
+    # than 4 millet candidate slots exist) millet selections across the week,
+    # absorbed by a heavily-penalized slack if that's genuinely infeasible
+    # alongside every other hard constraint — so the plan still solves, just
+    # without a millet recipe, rather than failing to generate at all.
+    # Separate from liked_recipe_bonus (an objective discount that applies to
+    # every liked recipe, millets included) — this stronger requirement is
+    # millet-only, driven by ds["millet_recipe_codes"] (services/data_loader.py).
+    millet_penalty_terms = []
+    millet_codes = {str(c).strip().upper() for c in (ds.get("millet_recipe_codes") or set())}
+    if millet_codes:
+        millet_ids = [
+            int(i) for i in candidates.index
+            if str(candidates.loc[i, "Recipe_Code"]).strip().upper() in millet_codes
+        ]
+        if millet_ids:
+            required_millet_count = 2 if len(millet_ids) > 4 else 1
+            millet_shortfall = LpVariable("millet_inclusion_shortfall", lowBound=0)
+            model += (
+                lpSum(y[(d, i)] for d in days for i in millet_ids) + millet_shortfall
+                >= required_millet_count
+            )
+            millet_penalty_weight = 1_000_000.0
+            millet_penalty_terms.append(millet_penalty_weight * millet_shortfall)
 
     # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
     if variety_penalties:
         model.objective += lpSum(variety_penalties)
     if penalty_terms:
         model.objective += lpSum(penalty_terms)
+    if millet_penalty_terms:
+        model.objective += lpSum(millet_penalty_terms)
 
 
 

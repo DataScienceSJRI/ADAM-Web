@@ -22,7 +22,7 @@ _STATIC_TABLES = {
     "Recipe", "RecipeTagging", "SubCategory", "SubCategory_Onboarding",
     "DataModelling", "BaseEar", "BaseTul", "Main1_Main2_Mapping Subcategory",
     "Rec_ADAM_yes_no", "SubCategory_foods_GI_GL", "RecipeINGDBFormat",
-    "USER_Recipes_name_changed",
+    "USER_Recipes_name_changed", "Millet_Recipes",
 }
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
@@ -344,10 +344,26 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                 combo_liked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
             )
 
+        # Millet-based recipes are always treated as liked for every user
+        # (not tied to any actual reaction), so _inject_liked_recipes gives
+        # them the same candidate-pool/objective-bonus treatment.
+        millet_recipes = _fetch_cached("Millet_Recipes")
+        millet_codes: set = set()
+        if not millet_recipes.empty and "Recipe_Code" in millet_recipes.columns:
+            millet_codes = set(
+                millet_recipes["Recipe_Code"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+            liked_codes.update(millet_codes)
+
         ds["liked_recipe_codes"] = liked_codes
+        # Kept separate from liked_recipe_codes: services/lp_optimizer.py uses
+        # this set for a stronger, millet-only soft-forced-inclusion
+        # constraint, not applied to ordinary liked recipes.
+        ds["millet_recipe_codes"] = millet_codes
     except Exception:
         logger.exception("Liked recipe lookup failed for user_id=%s — liked recipes won't be force-included", user_id)
         ds["liked_recipe_codes"] = set()
+        ds["millet_recipe_codes"] = set()
 
     return ds
 
