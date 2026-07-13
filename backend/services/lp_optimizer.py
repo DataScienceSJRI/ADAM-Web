@@ -262,6 +262,7 @@ def run_lp(
         if not sugars.empty:
             sug_df = sugars.reset_index()
             candidates = candidates.merge(sug_df, on='Recipe_Code', how='left')
+            candidates['Sugar_per_serving_g'] = candidates['Sugar_per_serving_g'].fillna(0.0)
         else:
             candidates['Sugar_per_serving_g'] = 0.0
 
@@ -284,6 +285,7 @@ def run_lp(
         if not salt_series.empty:
             salt_df = salt_series.reset_index()
             candidates = candidates.merge(salt_df, on='Recipe_Code', how='left')
+            candidates['Salt_per_serving_g'] = candidates['Salt_per_serving_g'].fillna(0.0)
         else:
             candidates['Salt_per_serving_g'] = 0.0
     else:
