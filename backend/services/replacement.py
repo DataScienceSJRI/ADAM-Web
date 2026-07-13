@@ -18,21 +18,6 @@ _ENERGY_TARGET_KCAL: dict = {
     MealSlot.SNACK: 200.0,
 }
 
-_SLOT_TAG_COL: dict = {
-    MealSlot.BREAKFAST: "Breakfast",
-    MealSlot.LUNCH: "Lunch",
-    MealSlot.DINNER: "Dinner",
-    MealSlot.SNACK: "Snack",
-}
-
-
-def _is_tagged(row: dict, slot_col: str) -> bool:
-    """Return True when a RecipeTagging row's slot column equals 1 (handles float strings like '1.0')."""
-    try:
-        return int(float(row.get(slot_col) or 0)) == 1
-    except (TypeError, ValueError):
-        return False
-
 
 def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
     """
@@ -154,17 +139,20 @@ def get_preapproved_replacements(
     recipe_quantities: List[float] | None = None,
 ) -> ReplacementsResponse:
     """
-    For each recipe in the combination, find up to 3 same-subcategory alternatives
-    that are tagged for the given meal slot, ranked by GL proximity to the original.
-    Transpose into up to 3 alternate combinations (one pick per position).
-    Returns original_gl (total meal GL at given quantities) alongside alternatives.
+    For each recipe in the combination, find up to 3 same-subcategory alternatives,
+    ranked by GL proximity to the original. Transpose into up to 3 alternate
+    combinations (one pick per position). Returns original_gl (total meal GL at
+    given quantities) alongside alternatives.
+
+    Matching is by Recipe_Category only — no meal-slot tag filter — since that tag
+    is inconsistently populated in RecipeTagging (e.g. some egg dishes are tagged
+    for no slot at all) and would otherwise hide valid same-subcategory swaps.
 
     recipe_codes may contain a single recipe (a single-dish swap) or several
     (a whole-slot combination) — the ranking and quantity logic is identical
     either way.
     """
     sb = get_supabase()
-    slot_col = _SLOT_TAG_COL.get(meal_slot)
 
     # Pad/default quantities to 1.0 per recipe
     quantities: list[float] = list(recipe_quantities or [])
@@ -195,7 +183,7 @@ def get_preapproved_replacements(
         original_gl = _compute_gl_map(sb, [row0]).get(rc, 0.0)
         total_original_gl += original_gl * qty
 
-        # Fetch a larger pool of same-subcategory candidates for slot filtering + GL ranking
+        # Fetch a larger pool of same-subcategory candidates for GL ranking
         candidate_resp = (
             sb.table("Recipe")
             .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
@@ -206,17 +194,22 @@ def get_preapproved_replacements(
         )
         candidates = candidate_resp.data or []
 
-        # Filter candidates by meal-slot tag using Python-side parsing (column stores "1.0"/"0.0" strings)
-        if slot_col and candidates:
+        # Pick up Description here (the recipe's real portion unit, e.g. "2 pieces",
+        # "1 cup" — same column services/recall.py uses) so results don't all just say "serving".
+        desc_map: dict = {}
+        if candidates:
             cand_codes = [row["Recipe_Code"] for row in candidates]
             tag_resp = (
                 sb.table("RecipeTagging")
-                .select(f"Recipe_Code, {slot_col}")
+                .select("Recipe_Code, Description")
                 .in_("Recipe_Code", cand_codes)
                 .execute()
             )
-            tagged_codes = {row["Recipe_Code"] for row in (tag_resp.data or []) if _is_tagged(row, slot_col)}
-            candidates = [row for row in candidates if row["Recipe_Code"] in tagged_codes]
+            desc_map = {
+                row["Recipe_Code"]: str(row["Description"]).strip()
+                for row in (tag_resp.data or [])
+                if row.get("Description") and str(row["Description"]).strip().lower() not in ("nan", "none", "")
+            }
 
         # Compute GL for all candidates in one batch GI lookup, then rank by proximity to original
         gl_map = _compute_gl_map(sb, candidates)
@@ -227,7 +220,7 @@ def get_preapproved_replacements(
                 "recipe_code": row["Recipe_Code"],
                 "recipe_name": row.get("Recipe_Name") or "",
                 "quantity": qty,
-                "unit": "serving",
+                "unit": desc_map.get(row["Recipe_Code"], "serving"),
                 "gl": round(gl_map.get(str(row["Recipe_Code"]), 0.0) * qty, 2),
             }
             for row in candidates[:3]
@@ -284,24 +277,22 @@ def request_on_demand_replacement(
         logger.info("on_demand: possible=False — recipes not found: %s", missing)
         return OnDemandReplacementResponse(possible=False)
 
-    # Check meal-slot tag — every proposed recipe must be tagged for this slot
-    slot_col = _SLOT_TAG_COL.get(meal_slot)
-    if slot_col:
-        tag_resp = (
-            sb.table("RecipeTagging")
-            .select(f"Recipe_Code, {slot_col}")
-            .in_("Recipe_Code", recipe_codes)
-            .execute()
-        )
-        logger.info("on_demand: tagging rows=%s", tag_resp.data)
-        tag_map = {row["Recipe_Code"]: row for row in (tag_resp.data or [])}
-        for rc in recipe_codes:
-            if rc not in tag_map:
-                logger.info("on_demand: possible=False — %s has no RecipeTagging row", rc)
-                return OnDemandReplacementResponse(possible=False)
-            if not _is_tagged(tag_map[rc], slot_col):
-                logger.info("on_demand: possible=False — %s not tagged for %s", rc, slot_col)
-                return OnDemandReplacementResponse(possible=False)
+    # Pick up Description here (the recipe's real portion unit, e.g. "2 pieces",
+    # "1 cup" — same column services/recall.py uses) so results don't all just say "serving".
+    # No meal-slot tag check — that tag is inconsistently populated in RecipeTagging
+    # (e.g. some egg dishes are tagged for no slot at all) and would otherwise reject
+    # valid same-subcategory swaps.
+    tag_resp = (
+        sb.table("RecipeTagging")
+        .select("Recipe_Code, Description")
+        .in_("Recipe_Code", recipe_codes)
+        .execute()
+    )
+    desc_map = {
+        row["Recipe_Code"]: str(row["Description"]).strip()
+        for row in (tag_resp.data or [])
+        if row.get("Description") and str(row["Description"]).strip().lower() not in ("nan", "none", "")
+    }
 
     # Fetch current slot rows for plan metadata (plan_id, WeekNo etc.) and original recipes' GL
     _, all_slot_rows = _fetch_slot_gl(sb, user_id, date, meal_slot)
@@ -358,7 +349,7 @@ def request_on_demand_replacement(
                 recipe_code=rc,
                 recipe_name=str(row.get("Recipe_Name") or ""),
                 quantity=qty,
-                unit="serving",
+                unit=desc_map.get(rc, "serving"),
                 gl=round(gl_map.get(rc, 0.0) * qty, 2),
             )
         )
