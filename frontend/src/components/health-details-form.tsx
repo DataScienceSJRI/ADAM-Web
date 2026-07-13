@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { AllergySearch, type AllergyFood } from "@/components/allergy-search";
 
 const CO_MORBIDITIES = [
   "Hypertension",
@@ -26,6 +27,7 @@ export type HealthDetails = {
   co_morbidities: string[];
   medications: string;
   allergies_dislikes: string;
+  allergy_foods: AllergyFood[];
   smoking: string;
   tobacco: string;
   alcohol: string;
@@ -35,6 +37,7 @@ export const HEALTH_DETAILS_DEFAULT: HealthDetails = {
   co_morbidities: [],
   medications: "",
   allergies_dislikes: "",
+  allergy_foods: [],
   smoking: "None",
   tobacco: "None",
   alcohol: "None",
@@ -139,13 +142,28 @@ export function HealthDetailsForm({
         {/* Allergies / Dislikes */}
         <div className="space-y-1.5">
           <label className="text-sm font-medium">
-            Allergies or Food Dislikes{" "}
+            Allergies{" "}
             <span className="font-normal text-muted-foreground">(optional)</span>
+          </label>
+          <p className="text-xs text-muted-foreground">
+            Search and select foods you&apos;re allergic to — these will never be recommended in your meal plan.
+          </p>
+          <AllergySearch
+            selected={form.allergy_foods}
+            onChange={(next) => setForm((prev) => ({ ...prev, allergy_foods: next }))}
+          />
+        </div>
+
+        {/* Other dislikes (notes only — not used to filter the meal plan) */}
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium">
+            Other Food Dislikes{" "}
+            <span className="font-normal text-muted-foreground">(optional, notes only)</span>
           </label>
           <textarea
             value={form.allergies_dislikes}
             onChange={(e) => setForm((prev) => ({ ...prev, allergies_dislikes: e.target.value }))}
-            placeholder="e.g. Peanuts, Shellfish, Bitter gourd…"
+            placeholder="e.g. Bitter gourd…"
             rows={2}
             className="w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none"
           />

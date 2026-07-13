@@ -154,7 +154,15 @@ export function ReviewStep({
               <dd className="font-medium">{healthDetails.medications || "None"}</dd>
             </div>
             <div>
-              <dt className="text-xs text-muted-foreground">Allergies / Dislikes</dt>
+              <dt className="text-xs text-muted-foreground">Allergies</dt>
+              <dd className="font-medium">
+                {healthDetails.allergy_foods.length > 0
+                  ? healthDetails.allergy_foods.map((f) => f.food_name).join(", ")
+                  : "None"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Other Food Dislikes</dt>
               <dd className="font-medium">{healthDetails.allergies_dislikes || "None"}</dd>
             </div>
             <div>

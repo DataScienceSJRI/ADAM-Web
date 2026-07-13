@@ -103,6 +103,7 @@ function OnboardingFlow() {
           co_morbidities: healthDetails.co_morbidities,
           medications: healthDetails.medications || null,
           allergies_dislikes: healthDetails.allergies_dislikes || null,
+          allergy_food_codes: healthDetails.allergy_foods.map((f) => f.food_code),
           smoking: healthDetails.smoking,
           tobacco: healthDetails.tobacco,
           alcohol: healthDetails.alcohol,
