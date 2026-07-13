@@ -29,19 +29,16 @@ _SEARCH_RANK_FETCH_CAP = 1000
 
 
 def _search_rank_key(name: str, term: str, similarity: float = 0.0, relevance: Optional[float] = None) -> tuple:
-    """Rank a recipe name against a search term. Recipes with a curated
-    Recipe_order."Relevance order" value sort first, min to max; everything
-    without one falls after, ordered by the substring-match tiers below.
+    """Rank a recipe name against a search term: whole-word match (prefix or
+    not) first, then any other substring match, then fuzzy-only matches
+    (ranked by similarity score descending) last.
 
-    Substring tiers: whole-word match (prefix or not) first, then any other
-    substring match. Within a tier, shorter names (fewer modifiers -> the
-    "plainer" variant, e.g. "Plain Rice" over "Rice Manu") rank first, so a
-    bare-word match doesn't get pushed behind every name that merely happens
-    to start with the term — alphabetical is the final tiebreak.
-
-    Rows with no substring match at all (only pulled in via search_recipes_fuzzy's
-    trigram similarity — e.g. term "idly" matching name "Idli") sort into a
-    trailing tier, ordered by similarity score descending."""
+    Within a tier, recipes with a curated Recipe_order."Relevance order" value
+    sort first, min to max; recipes without one fall after. Within that,
+    shorter names (fewer modifiers -> the "plainer" variant, e.g. "Plain Rice"
+    over "Rice Manu") rank first, so a bare-word match doesn't get pushed
+    behind every name that merely happens to start with the term — alphabetical
+    is the final tiebreak."""
     name_lower = (name or "").strip().lower()
     term_lower = term.strip().lower()
     escaped = re.escape(term_lower)
@@ -55,9 +52,15 @@ def _search_rank_key(name: str, term: str, similarity: float = 0.0, relevance: O
         tier = 1
     else:
         tier = 2  # fuzzy-only match (no substring at all), rank by similarity desc
-    substring_key = (tier, -similarity if tier == 2 else 0.0, len(name_lower), name_lower)
     has_relevance = relevance is not None
-    return (0 if has_relevance else 1, relevance if has_relevance else 0.0) + substring_key
+    return (
+        tier,
+        -similarity if tier == 2 else 0.0,
+        0 if has_relevance else 1,
+        relevance if has_relevance else 0.0,
+        len(name_lower),
+        name_lower,
+    )
 
 
 def _resolve_allowed_codes(sb, meal_slot: Optional[str]) -> Optional[list]:
