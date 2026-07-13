@@ -28,30 +28,36 @@ _SLOT_COL_MAP = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner",
 _SEARCH_RANK_FETCH_CAP = 1000
 
 
-def _search_rank_key(name: str, term: str, similarity: float = 0.0) -> tuple:
-    """Rank a recipe name against a search term: prefix match first, then
-    whole-word match, then any other substring match. Within a tier, shorter
-    names (fewer modifiers -> the "plainer" variant, e.g. "Plain Dosa" over
-    "Capsicum Dosa") rank first, alphabetical as the final tiebreak.
+def _search_rank_key(name: str, term: str, similarity: float = 0.0, relevance: Optional[float] = None) -> tuple:
+    """Rank a recipe name against a search term. Recipes with a curated
+    Recipe_order."Relevance order" value sort first, min to max; everything
+    without one falls after, ordered by the substring-match tiers below.
+
+    Substring tiers: whole-word match (prefix or not) first, then any other
+    substring match. Within a tier, shorter names (fewer modifiers -> the
+    "plainer" variant, e.g. "Plain Rice" over "Rice Manu") rank first, so a
+    bare-word match doesn't get pushed behind every name that merely happens
+    to start with the term — alphabetical is the final tiebreak.
 
     Rows with no substring match at all (only pulled in via search_recipes_fuzzy's
     trigram similarity — e.g. term "idly" matching name "Idli") sort into a
-    trailing tier 3, ordered by similarity score descending."""
+    trailing tier, ordered by similarity score descending."""
     name_lower = (name or "").strip().lower()
     term_lower = term.strip().lower()
     escaped = re.escape(term_lower)
-    if re.match(rf"{escaped}\b", name_lower):
-        # term is the first whole word (a plain .startswith() would also match
-        # "Dosakaya" for term "dosa", since it's a literal string prefix even
-        # though "dosa" isn't a standalone word there — \b rules that out).
+    if re.search(rf"\b{escaped}\b", name_lower):
+        # whole-word match, whether or not it's the first word (a plain
+        # .startswith() would also match "Dosakaya" for term "dosa", since
+        # it's a literal string prefix even though "dosa" isn't a standalone
+        # word there — \b rules that out).
         tier = 0
-    elif re.search(rf"\b{escaped}\b", name_lower):
-        tier = 1
     elif term_lower in name_lower:
-        tier = 2
+        tier = 1
     else:
-        tier = 3  # fuzzy-only match (no substring at all), rank by similarity desc
-    return (tier, -similarity if tier == 3 else 0.0, len(name_lower), name_lower)
+        tier = 2  # fuzzy-only match (no substring at all), rank by similarity desc
+    substring_key = (tier, -similarity if tier == 2 else 0.0, len(name_lower), name_lower)
+    has_relevance = relevance is not None
+    return (0 if has_relevance else 1, relevance if has_relevance else 0.0) + substring_key
 
 
 def _resolve_allowed_codes(sb, meal_slot: Optional[str]) -> Optional[list]:
@@ -87,6 +93,31 @@ def _fuzzy_search_rows(sb, search_term: str) -> Optional[list]:
         return None
 
 
+def _fetch_relevance_order(sb, codes: list) -> dict:
+    """Recipe_Code -> "Relevance order" (as float) for the given codes, from the
+    curated Recipe_order table. Recipes missing a row there, or with a null
+    order, are simply absent from the returned map — callers treat that as
+    "no override", falling back to substring-match ranking."""
+    if not codes:
+        return {}
+    resp = (
+        sb.table("Recipe_order")
+        .select('Recipe_Code, "Relevance order"')
+        .in_("Recipe_Code", codes)
+        .execute()
+    )
+    result = {}
+    for r in resp.data or []:
+        raw = r.get("Relevance order")
+        if raw is None:
+            continue
+        try:
+            result[r["Recipe_Code"]] = float(raw)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def _search_and_paginate(sb, search_term: Optional[str], meal_slot: Optional[str], page: int, page_size: int) -> dict:
     offset = (page - 1) * page_size
     allowed_codes = _resolve_allowed_codes(sb, meal_slot)
@@ -109,7 +140,15 @@ def _search_and_paginate(sb, search_term: Optional[str], meal_slot: Optional[str
         if allowed_codes is not None:
             allowed_set = set(allowed_codes)
             rows = [r for r in rows if r.get("Recipe_Code") in allowed_set]
-        rows.sort(key=lambda r: _search_rank_key(r.get("Recipe_Name") or "", search_term, r.get("match_similarity") or 0.0))
+        relevance_map = _fetch_relevance_order(sb, [r.get("Recipe_Code") for r in rows if r.get("Recipe_Code")])
+        rows.sort(
+            key=lambda r: _search_rank_key(
+                r.get("Recipe_Name") or "",
+                search_term,
+                r.get("match_similarity") or 0.0,
+                relevance_map.get(r.get("Recipe_Code")),
+            )
+        )
         total = len(rows)
         page_rows = rows[offset: offset + page_size]
     else:
