@@ -21,7 +21,7 @@ _CACHE_TTL = 3600
 _STATIC_TABLES = {
     "Recipe", "RecipeTagging", "SubCategory", "SubCategory_Onboarding",
     "DataModelling", "BaseEar", "BaseTul", "Main1_Main2_Mapping Subcategory",
-    "Rec_ADAM_yes_no", "SubCategory_foods_GI_GL", "RecipeINGDBFormat",
+    "Rec_ADAM_yes_no", "SubCategory_foods_GI_GL", "Recipes_ingredient",
     "USER_Recipes_name_changed", "Millet_Recipes",
 }
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
@@ -143,7 +143,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["ear_100"] = static.get("BaseEar", pd.DataFrame())
     ds["tul"] = static.get("BaseTul", pd.DataFrame())
     ds["model"] = static.get("DataModelling", pd.DataFrame())
-    ds["recipe_ingredients"] = static.get("RecipeINGDBFormat", pd.DataFrame())
+    ds["recipe_ingredients"] = static.get("Recipes_ingredient", pd.DataFrame())
     ds["sub_category_gi_gl"] = static.get("SubCategory_foods_GI_GL", pd.DataFrame())
     ds["recipe_name_changed"] = static.get("USER_Recipes_name_changed", pd.DataFrame())
 
@@ -320,6 +320,50 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                 ].copy()
     except Exception:
         logger.exception("Disliked recipe exclusion failed for user_id=%s — disliked recipes may reappear", user_id)
+
+    # Exclude recipes built from an ingredient the user is allergic to, per
+    # BE_Preference_onboarding_details.health_details.allergy_food_codes (a list
+    # of ingredient codes matching Recipes_ingredient.Ing_Id). Same hard-exclude
+    # shape as the disliked-recipe filter above — allergen recipes should never
+    # reach personalization scoring.
+    try:
+        health_filters: dict = {"user_id": user_id}
+        if onboarding_id:
+            health_filters["onboarding_id"] = onboarding_id
+        health_rows = _fetch("BE_Preference_onboarding_details", health_filters)
+
+        allergy_codes: set = set()
+        if not health_rows.empty and "health_details" in health_rows.columns:
+            for details in health_rows["health_details"].dropna():
+                if isinstance(details, dict):
+                    allergy_codes.update(
+                        str(c).strip() for c in (details.get("allergy_food_codes") or []) if c is not None
+                    )
+
+        if allergy_codes:
+            ing_resp = (
+                get_supabase()
+                .table("Recipes_ingredient")
+                .select("Recipe_Code, Ing_Id")
+                .in_("Ing_Id", list(allergy_codes))
+                .execute()
+            )
+            allergy_recipe_codes = {
+                str(r["Recipe_Code"]).strip().upper() for r in (ing_resp.data or []) if r.get("Recipe_Code")
+            }
+
+            if allergy_recipe_codes:
+                if "Recipe_Code" in ds["recipes"].columns:
+                    ds["recipes"] = ds["recipes"][
+                        ~ds["recipes"]["Recipe_Code"].astype(str).str.strip().str.upper().isin(allergy_recipe_codes)
+                    ].copy()
+                rt = ds.get("recipe_tag", pd.DataFrame())
+                if not rt.empty and "Recipe_Code" in rt.columns:
+                    ds["recipe_tag"] = rt[
+                        ~rt["Recipe_Code"].astype(str).str.strip().str.upper().isin(allergy_recipe_codes)
+                    ].copy()
+    except Exception:
+        logger.exception("Allergy recipe exclusion failed for user_id=%s — allergen recipes may reappear", user_id)
 
     # Collect liked recipes (same two sources) so run() can force them into the
     # LP's candidate pool even if they didn't score high enough naturally.

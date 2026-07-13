@@ -250,11 +250,11 @@ def run_lp(
 
     if not rig_df.empty:
         rig_df['Ing_raw_amounts_g'] = pd.to_numeric(rig_df.get('Ing_raw_amounts_g', 0), errors='coerce')
-        rig_valid = rig_df.dropna(subset=['Ing_raw_amounts_g', 'Food Group']).copy()
-        rig_valid['Food Group'] = rig_valid['Food Group'].astype(str).str.strip().str.lower()
+        rig_valid = rig_df.dropna(subset=['Ing_raw_amounts_g', 'Food_Group']).copy()
+        rig_valid['Food_Group'] = rig_valid['Food_Group'].astype(str).str.strip().str.lower()
         
         sugars = (
-            rig_valid.loc[rig_valid['Food Group'] == 'sugars']
+            rig_valid.loc[rig_valid['Food_Group'] == 'sugars']
             .groupby('Recipe_Code', dropna=False)['Ing_raw_amounts_g']
             .sum()
             .rename('Sugar_per_serving_g')
@@ -274,7 +274,7 @@ def run_lp(
                 .rename('Salt_per_serving_g')
             )
         else:
-            mask_salt = rig_valid['Food Group'].astype(str).str.contains('salt', case=False, na=False)
+            mask_salt = rig_valid['Food_Group'].astype(str).str.contains('salt', case=False, na=False)
             salt_series = (
                 rig_valid.loc[mask_salt]
                 .groupby('Recipe_Code', dropna=False)['Ing_raw_amounts_g']
