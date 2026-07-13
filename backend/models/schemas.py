@@ -145,6 +145,7 @@ class RecipeWithQty(BaseModel):
     recipe_name: Optional[str] = None
     quantity: float
     unit: str = "serving"
+    gl: Optional[float] = None
 
 
 class OnDemandReplacementRequest(BaseModel):
@@ -244,6 +245,7 @@ class ReplacementsResponse(BaseModel):
     date: str
     day: int
     meal_slot: MealSlot
+    original_gl: Optional[float] = None
     alternatives: List[List[RecipeWithQty]]
 
 

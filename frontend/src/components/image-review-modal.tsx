@@ -101,16 +101,39 @@ function initPickers(foods: FoodItem[]): PickerEntry[] {
   );
 }
 
-function serializePickers(pickers: PickerEntry[]): string {
+type ConfirmedFood = {
+  recipe_code: string | null;
+  recipe_name: string;
+  quantity: number | null;
+  unit: string;
+};
+
+function serializePickers(pickers: PickerEntry[]): ConfirmedFood[] {
   return pickers
     .filter((p) => (p.selected?.name ?? p.query).trim())
-    .map((p) => {
-      const name = p.selected?.name ?? p.query.trim();
-      const unit = p.unit === "__custom__" ? "" : p.unit;
-      if (!p.qty || !unit) return name;
-      return unit === "g" ? `${name} (${p.qty}g)` : `${name} (${p.qty} ${unit})`;
-    })
-    .join("; ");
+    .map((p) => ({
+      recipe_code: p.selected?.code || null,
+      recipe_name: p.selected?.name ?? p.query.trim(),
+      quantity: p.qty ? parseFloat(p.qty) : null,
+      unit: p.unit === "__custom__" ? "" : p.unit,
+    }));
+}
+
+function formatConfirmedFood(f: ConfirmedFood): string {
+  if (!f.quantity || !f.unit) return f.recipe_name;
+  return f.unit === "g" ? `${f.recipe_name} (${f.quantity}g)` : `${f.recipe_name} (${f.quantity} ${f.unit})`;
+}
+
+/** review.reviewed_foods_by_human is now JSON (ConfirmedFood[]); older rows
+ * written before this format existed are a plain display string — show as-is. */
+function displayReviewedFoods(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as ConfirmedFood[];
+    if (Array.isArray(parsed)) return parsed.map(formatConfirmedFood).join("; ");
+  } catch {
+    /* legacy plain-string value */
+  }
+  return raw;
 }
 
 const PRESET_UNITS = ["g", "srv", "cup", "bowl", "piece", "tsp", "tbsp"];
@@ -481,8 +504,10 @@ export function ImageReviewModal({
 
   function handleApprove() {
     const usePickers = parsed.status === "structured" || parsed.status === "none";
-    const human = usePickers ? serializePickers(pickers) : manualText.trim();
-    doAction("approve", { reviewed_foods_by_human: human || null });
+    const human = usePickers
+      ? JSON.stringify(serializePickers(pickers))
+      : manualText.trim();
+    doAction("approve", { reviewed_foods_by_human: human && human !== "[]" ? human : null });
   }
 
   const approved = review.review_status === "approved";
@@ -651,7 +676,7 @@ export function ImageReviewModal({
               {review.reviewed_foods_by_human && (
                 <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3.5 py-3 space-y-1">
                   <p className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Verified record</p>
-                  <p className="text-xs whitespace-pre-wrap">{review.reviewed_foods_by_human}</p>
+                  <p className="text-xs whitespace-pre-wrap">{displayReviewedFoods(review.reviewed_foods_by_human)}</p>
                   {review.reviewed_at && (
                     <p className="text-[10px] text-muted-foreground">{new Date(review.reviewed_at).toLocaleString("en-IN")}</p>
                   )}

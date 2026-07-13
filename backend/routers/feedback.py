@@ -208,6 +208,9 @@ def update_review(
                 raise HTTPException(status_code=500, detail="Failed to queue food identification job")
 
     elif body.action in ("approve", "reject"):
+        if review.get("review_status") in ("approved", "rejected"):
+            raise HTTPException(status_code=409, detail=f"Review already {review['review_status']}")
+
         now_iso = datetime.now(timezone.utc).isoformat()
         update = {
             "review_status": "approved" if body.action == "approve" else "rejected",
@@ -216,6 +219,21 @@ def update_review(
         }
         if body.reviewed_foods_by_human is not None:
             update["reviewed_foods_by_human"] = body.reviewed_foods_by_human
+
+        from services.recall import approve_review_diet_recall, reject_review_diet_recall, resolve_confirmed_foods
+
+        if body.action == "approve":
+            confirmed_foods = resolve_confirmed_foods(
+                body.reviewed_foods_by_human, review.get("tracked_foods_by_ai")
+            )
+            if not confirmed_foods:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No confirmed foods to approve — run food identification or select foods before approving.",
+                )
+            approve_review_diet_recall(review["diet_recall_id"], confirmed_foods)
+        else:
+            reject_review_diet_recall(review["diet_recall_id"])
 
         _write_review_log(
             sb=sb,

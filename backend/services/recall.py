@@ -1,3 +1,4 @@
+import json
 import logging
 import uuid
 from datetime import datetime, timezone, date as date_type
@@ -256,6 +257,163 @@ def log_recall(
                 recall_ids.append(recall_id)
 
     return recall_ids
+
+
+def build_diet_recall_food_rows(confirmed_foods: List[dict]) -> List[dict]:
+    """Compute DietRecall field values (Food_Name, Food_Name_desc, R_desc, Food_Qty,
+    Energy_Kcal, GL) for a list of {"recipe_code", "quantity", "unit"} entries —
+    same Recipe/RecipeTagging/GL lookups log_recall()'s "changed" path uses.
+
+    unit == "srv" means quantity is already the eaten fraction (servings); any
+    other unit is treated as a raw amount in the recipe's own portion unit (the
+    log_recall() convention), converted to a fraction via RecipeTagging.Portion.
+    Entries missing a recipe_code are skipped.
+    """
+    sb = get_supabase()
+    codes = [f["recipe_code"] for f in confirmed_foods if f.get("recipe_code")]
+    if not codes:
+        return []
+
+    recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes).execute()
+    recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
+
+    tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description, Portion").in_("Recipe_Code", codes).execute()
+    tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
+
+    base_gl_map = _base_gl_map(sb, codes)
+
+    rows = []
+    for f in confirmed_foods:
+        code = f.get("recipe_code")
+        if not code:
+            continue
+        qty = f.get("quantity")
+        unit = str(f.get("unit") or "").strip().lower()
+        tag_info = tag_map.get(code, {})
+        recipe = recipe_map.get(code)
+        portion = tag_info.get("Portion")
+
+        try:
+            if unit == "srv" and qty is not None:
+                prop = float(qty)
+                food_qty = round(prop * float(portion), 1) if portion else None
+            elif qty is not None:
+                food_qty = float(qty)
+                base_portion = float(portion) if portion else None
+                prop = (food_qty / base_portion) if base_portion else 1.0
+            else:
+                food_qty, prop = None, 1.0
+        except (TypeError, ValueError):
+            food_qty, prop = None, 1.0
+
+        row: dict = {
+            "Food_Name": (recipe.get("Recipe_Name") if recipe else None) or code,
+            "Food_Name_desc": code,
+        }
+        desc = tag_info.get("Description")
+        if desc and str(desc).strip().lower() not in ("nan", "none", ""):
+            row["R_desc"] = str(desc).strip()
+        if recipe and recipe.get("Energy_ENERC_KJ"):
+            row["Energy_Kcal"] = int(round(float(recipe["Energy_ENERC_KJ"]) / 4.184 * prop))
+        if food_qty is not None:
+            row["Food_Qty"] = food_qty
+        base_gl = base_gl_map.get(code)
+        if base_gl is not None:
+            row["GL"] = round(base_gl * prop, 2)
+        rows.append(row)
+    return rows
+
+
+def resolve_confirmed_foods(reviewed_foods_by_human: Optional[str], tracked_foods_by_ai: Optional[str]) -> List[dict]:
+    """Resolve the coordinator-confirmed food list for a review, in priority order:
+
+    1. reviewed_foods_by_human — structured JSON written by the coordinator's recipe
+       pickers, e.g. [{"recipe_code": "A001745", "recipe_name": "Idli", "quantity": 2, "unit": "srv"}].
+       Rows from before this JSON format existed are a plain display string and
+       parse-fail here, so they fall through to (2).
+    2. tracked_foods_by_ai, only the "identify" action's structured shape
+       ({"foods": [{"match": {"matched": {"recipe_code": ...}}, "quantity": {...}}]}) —
+       the "analyse" action's shape is free-form text with no recipe_code to use.
+
+    Returns [] if nothing structured is available.
+    """
+    if reviewed_foods_by_human:
+        try:
+            parsed = json.loads(reviewed_foods_by_human)
+            if isinstance(parsed, list):
+                foods = [
+                    {"recipe_code": f.get("recipe_code"), "quantity": f.get("quantity"), "unit": f.get("unit")}
+                    for f in parsed if isinstance(f, dict) and f.get("recipe_code")
+                ]
+                if foods:
+                    return foods
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    if tracked_foods_by_ai and tracked_foods_by_ai not in ("__processing__", "__failed__"):
+        try:
+            ai = json.loads(tracked_foods_by_ai)
+            foods = []
+            for fr in ai.get("foods", []):
+                matched = (fr.get("match") or {}).get("matched") or {}
+                code = matched.get("recipe_code")
+                if not code:
+                    continue
+                quantity = fr.get("quantity") or {}
+                foods.append({"recipe_code": code, "quantity": quantity.get("quantity_g"), "unit": "g"})
+            if foods:
+                return foods
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
+
+    return []
+
+
+def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict]) -> bool:
+    """Write the coordinator-confirmed foods into DietRecall. A placeholder row
+    (no food data) already exists for this review from photo-upload time
+    (log_recall_image) — update it with the first confirmed food, then insert
+    one additional row per remaining food (a meal can be more than one dish),
+    mirroring how log_recall()'s text-only path creates one row per recipe_code.
+    Every written row is marked verified_by_coordinator=True.
+    Returns False (no-op) if confirmed_foods resolves to nothing usable.
+    """
+    field_rows = build_diet_recall_food_rows(confirmed_foods)
+    if not field_rows:
+        return False
+
+    sb = get_supabase()
+    first, *rest = field_rows
+    sb.table("DietRecall").update({
+        **first,
+        "did_eat_as_planned": False,
+        "notes": "verified",
+        "verified_by_coordinator": True,
+    }).eq("ID", diet_recall_id).execute()
+
+    if rest:
+        base_resp = sb.table("DietRecall").select("user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post").eq("ID", diet_recall_id).limit(1).execute()
+        base_row = base_resp.data[0] if base_resp.data else {}
+        for fields in rest:
+            sb.table("DietRecall").insert({
+                "ID": str(uuid.uuid4()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "did_eat_as_planned": False,
+                "notes": "verified",
+                "verified_by_coordinator": True,
+                **base_row,
+                **fields,
+            }).execute()
+
+    return True
+
+
+def reject_review_diet_recall(diet_recall_id: str) -> None:
+    """Leave DietRecall's food fields empty on reject, but note it so the
+    user/coordinator can see it needs resubmitting."""
+    get_supabase().table("DietRecall").update({
+        "notes": "Image review rejected — please resubmit",
+    }).eq("ID", diet_recall_id).execute()
 
 
 def log_recall_image(
