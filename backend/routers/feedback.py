@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -150,9 +150,10 @@ def get_review(
 
 
 class ReviewUpdateRequest(BaseModel):
-    action: str  # "approve" | "reject" | "analyse" | "identify"
+    action: str  # "approve" | "reject" | "analyse" | "identify" | "check_consumption"
     reviewed_foods_by_human: Optional[str] = None
     vlm_backend: Optional[str] = None  # "openai" | "ollama" — only used with action="identify"
+    image: Literal["pre", "post"] = "pre"  # only used with action="identify"
 
 
 @router.patch("/reviews/{review_id}")
@@ -179,9 +180,10 @@ def update_review(
         update: dict = {"tracked_foods_by_ai": analysis}
 
     elif body.action == "identify":
-        pre_url = review.get("pre_image_id")
-        if not pre_url:
-            raise HTTPException(status_code=400, detail="No pre-meal image to identify")
+        target_field = "tracked_foods_by_ai" if body.image == "pre" else "tracked_foods_by_ai_post"
+        image_url = review.get("pre_image_id" if body.image == "pre" else "post_image_id")
+        if not image_url:
+            raise HTTPException(status_code=400, detail=f"No {body.image}-meal image to identify")
         backend = body.vlm_backend or os.environ.get("VLM_BACKEND", "ollama")
         if backend not in ("openai", "ollama"):
             raise HTTPException(status_code=400, detail="vlm_backend must be 'openai' or 'ollama'")
@@ -190,8 +192,8 @@ def update_review(
             try:
                 import json
                 from services.food_id import identify_image_from_url_sync
-                result = identify_image_from_url_sync(pre_url, vlm_backend="openai")
-                update = {"tracked_foods_by_ai": json.dumps(result)}
+                result = identify_image_from_url_sync(image_url, vlm_backend="openai")
+                update = {target_field: json.dumps(result)}
             except RuntimeError as exc:
                 raise HTTPException(status_code=503, detail=str(exc))
             except Exception:
@@ -200,12 +202,28 @@ def update_review(
         else:
             # Ollama is slow (~5 min) — enqueue and return immediately with processing sentinel.
             try:
-                from services.food_id_worker import PROCESSING_SENTINEL, enqueue_food_id_job
-                enqueue_food_id_job(review_id, pre_url, vlm_backend=backend)
-                update = {"tracked_foods_by_ai": PROCESSING_SENTINEL}
+                from services.food_id_worker import (
+                    PROCESSING_SENTINEL,
+                    enqueue_food_id_job,
+                    enqueue_food_id_job_post,
+                )
+                enqueue = enqueue_food_id_job if body.image == "pre" else enqueue_food_id_job_post
+                enqueue(review_id, image_url, vlm_backend=backend)
+                update = {target_field: PROCESSING_SENTINEL}
             except Exception:
                 logger.exception("Failed to enqueue food ID job for review %s", review_id)
                 raise HTTPException(status_code=500, detail="Failed to queue food identification job")
+
+    elif body.action == "check_consumption":
+        from services.recall import compute_consumption
+        merged = compute_consumption(review.get("tracked_foods_by_ai"), review.get("tracked_foods_by_ai_post"))
+        if merged is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Both pre-meal and post-meal identification must complete before checking consumption.",
+            )
+        import json
+        update = {"consumption_result": json.dumps(merged)}
 
     elif body.action in ("approve", "reject"):
         if review.get("review_status") in ("approved", "rejected"):
@@ -224,7 +242,10 @@ def update_review(
 
         if body.action == "approve":
             confirmed_foods = resolve_confirmed_foods(
-                body.reviewed_foods_by_human, review.get("tracked_foods_by_ai")
+                body.reviewed_foods_by_human,
+                review.get("tracked_foods_by_ai"),
+                review.get("tracked_foods_by_ai_post"),
+                review.get("consumption_result"),
             )
             if not confirmed_foods:
                 raise HTTPException(
@@ -246,7 +267,10 @@ def update_review(
         )
 
     else:
-        raise HTTPException(status_code=400, detail="action must be 'approve', 'reject', 'analyse', or 'identify'")
+        raise HTTPException(
+            status_code=400,
+            detail="action must be 'approve', 'reject', 'analyse', 'identify', or 'check_consumption'",
+        )
 
     updated = sb.table("MealImageReview").update(update).eq("id", review_id).execute()
     if not updated.data:

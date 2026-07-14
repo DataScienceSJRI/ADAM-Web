@@ -76,7 +76,26 @@ def get_recall_history(
     # Meal-slot ordering isn't expressible via PostgREST's .order(), so fetch a
     # bounded set of matching rows sorted by Date and re-sort/paginate client-side.
     resp = query.order("Date", desc=True).limit(2000).execute()
-    sorted_rows = _sort_recall_rows(resp.data or [])
+    rows = resp.data or []
+
+    # Image-derived rows stay invisible until a coordinator has approved them
+    # (pending/rejected reviews are hidden from the participant's own history too).
+    recall_ids = [r["ID"] for r in rows if r.get("ID")]
+    if recall_ids:
+        review_rows = (
+            sb.table("MealImageReview")
+            .select("diet_recall_id, review_status")
+            .in_("diet_recall_id", recall_ids)
+            .execute()
+            .data
+        ) or []
+        hidden_ids = {
+            r["diet_recall_id"] for r in review_rows
+            if r.get("review_status") != "approved"
+        }
+        rows = [r for r in rows if r["ID"] not in hidden_ids]
+
+    sorted_rows = _sort_recall_rows(rows)
     page = sorted_rows[offset: offset + limit]
     items = [
         RecallHistoryItem(
@@ -93,7 +112,7 @@ def get_recall_history(
         )
         for r in page
     ]
-    return RecallHistoryResponse(items=items, total=resp.count or len(sorted_rows))
+    return RecallHistoryResponse(items=items, total=len(sorted_rows))
 
 @router.put("/{recall_id}")
 def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = Depends(get_current_user)):
@@ -243,13 +262,30 @@ def list_coordinator_participants(
     since = str(date_type.today() - timedelta(days=90))
     recalls = (
         sb.table("DietRecall")
-        .select("user_id, Date, meal_slot, did_eat_as_planned")
+        .select("ID, user_id, Date, meal_slot, did_eat_as_planned")
         .in_("user_id", lookup_ids)
         .gte("Date", since)
         .limit(5000)
         .execute()
         .data
     ) or []
+
+    # Exclude image-derived rows that haven't been approved by a coordinator
+    # yet — a pending/rejected photo shouldn't count as a logged meal.
+    recall_ids = [r["ID"] for r in recalls if r.get("ID")]
+    if recall_ids:
+        review_rows = (
+            sb.table("MealImageReview")
+            .select("diet_recall_id, review_status")
+            .in_("diet_recall_id", recall_ids)
+            .execute()
+            .data
+        ) or []
+        hidden_ids = {
+            r["diet_recall_id"] for r in review_rows
+            if r.get("review_status") != "approved"
+        }
+        recalls = [r for r in recalls if r["ID"] not in hidden_ids]
 
     recall_by_user: dict = {}
     for r in recalls:
@@ -320,6 +356,25 @@ def get_participant_recall_logs(
             .execute()
             .data
         ) or []
+
+        # Image-derived rows stay invisible in the log view until the
+        # coordinator has explicitly approved them (pending/rejected reviews
+        # are hidden — only reviewed via the Image Review queue).
+        recall_ids = [r["ID"] for r in rows if r.get("ID")]
+        if recall_ids:
+            review_rows = (
+                sb.table("MealImageReview")
+                .select("diet_recall_id, review_status")
+                .in_("diet_recall_id", recall_ids)
+                .execute()
+                .data
+            ) or []
+            hidden_ids = {
+                r["diet_recall_id"] for r in review_rows
+                if r.get("review_status") != "approved"
+            }
+            rows = [r for r in rows if r["ID"] not in hidden_ids]
+
         return _sort_recall_rows(rows)
 
     def fetch_plan():
