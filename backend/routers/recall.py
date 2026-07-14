@@ -77,6 +77,22 @@ def get_recall_history(
     # bounded set of matching rows sorted by Date and re-sort/paginate client-side.
     resp = query.order("Date", desc=True).limit(2000).execute()
     sorted_rows = _sort_recall_rows(resp.data or [])
+
+    # A meal-photo upload (POST /recall/image) inserts a DietRecall placeholder
+    # with no Food_Name until a coordinator approves the matching MealImageReview
+    # Hide it from history entirely until it's confirmed (approved -> Food_Name
+    # gets filled in) so callers never have to special-case it: an unreviewed or
+    # rejected photo simply doesn't show up as "logged" yet.
+    def _is_confirmed(r: dict) -> bool:
+        if r.get("Food_Name"):
+            return True
+        if r.get("did_eat_as_planned"):
+            return True
+        if r.get("image_url_pre") or r.get("image_url_post"):
+            return False
+        return True  # e.g. a "skipped" row — no food data, no photo, still a real entry
+
+    sorted_rows = [r for r in sorted_rows if _is_confirmed(r)]
     page = sorted_rows[offset: offset + limit]
     items = [
         RecallHistoryItem(
@@ -93,7 +109,7 @@ def get_recall_history(
         )
         for r in page
     ]
-    return RecallHistoryResponse(items=items, total=resp.count or len(sorted_rows))
+    return RecallHistoryResponse(items=items, total=len(sorted_rows))
 
 @router.put("/{recall_id}")
 def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = Depends(get_current_user)):
