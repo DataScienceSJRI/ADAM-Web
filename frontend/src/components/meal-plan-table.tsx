@@ -4,6 +4,7 @@ import { useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { ThumbsUp, ThumbsDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { formatIST } from "@/lib/utils";
 import type { Recommendation } from "./meal-card";
 export type Comment = {
   id: number;
@@ -262,7 +263,7 @@ export function MealPlanTable({
                         <span className="text-[10px] rounded-full bg-primary/10 text-primary px-1.5 py-0.5 font-medium shrink-0">you</span>
                       )}
                       <span className="ml-auto text-[11px] text-muted-foreground shrink-0">
-                        {new Date(c.created_at).toLocaleString("en-GB", { dateStyle: "short", timeStyle: "short" })}
+                        {formatIST(c.created_at, { dateStyle: "short", timeStyle: "short" })}
                       </span>
                     </div>
                     <p className="text-sm text-foreground leading-relaxed">{c.comment}</p>

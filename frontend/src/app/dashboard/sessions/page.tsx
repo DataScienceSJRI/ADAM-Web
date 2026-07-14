@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { formatIST } from "@/lib/utils";
 
 type SessionRow = {
   onboarding_id: string;
@@ -16,7 +17,7 @@ type SessionRow = {
 };
 
 function fmtDate(iso: string) {
-  return new Date(iso).toLocaleDateString("en-IN", {
+  return formatIST(iso, {
     day: "numeric", month: "short", year: "numeric",
     hour: "2-digit", minute: "2-digit",
   });

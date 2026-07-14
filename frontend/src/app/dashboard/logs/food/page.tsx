@@ -15,6 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { type MealImageReview } from "@/components/image-review-modal";
+import { formatIST } from "@/lib/utils";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -253,7 +254,7 @@ function EditModal({
   const visibleLogs = state.logs.filter((l) => !deletedIds.has(l.ID));
 
   const slotMeta = SLOT_META[state.slot] ?? SLOT_META.breakfast;
-  const dateLabel = new Date(state.date).toLocaleDateString("en-IN", {
+  const dateLabel = formatIST(state.date, {
     weekday: "long", day: "numeric", month: "long", year: "numeric",
   });
 
@@ -627,7 +628,7 @@ function ParticipantCombobox({
                   )}
                   {p.last_logged_date && (
                     <p className="text-muted-foreground text-[10px] mt-0.5">
-                      {new Date(p.last_logged_date).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+                      {formatIST(p.last_logged_date, { day: "numeric", month: "short" })}
                     </p>
                   )}
                 </div>
@@ -858,7 +859,7 @@ export default function FoodLogsPage() {
                       </button>
                       <div className="text-center">
                         <p className="text-sm font-semibold">
-                          {new Date(currentDate).toLocaleDateString("en-IN", {
+                          {formatIST(currentDate, {
                             weekday: "long", day: "numeric", month: "long", year: "numeric",
                           })}
                         </p>

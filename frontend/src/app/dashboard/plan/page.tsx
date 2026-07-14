@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { CheckCircle, Clock, AlertCircle, Users } from "lucide-react";
+import { formatIST } from "@/lib/utils";
 
 type Participant = {
   user_id: string;
@@ -27,7 +28,7 @@ function statusLabel(status: string | null): { label: string; className: string 
 
 function fmtDate(iso: string | null) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleDateString("en-IN", {
+  return formatIST(iso, {
     day: "numeric", month: "short", year: "numeric",
   });
 }

@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { formatIST } from "@/lib/utils";
 
 const MEAL_TIMES = ["Breakfast", "Lunch", "Dinner", "Snacks"] as const;
 
@@ -202,7 +203,7 @@ function PreferencesContent() {
             {sessions.map((s, i) => (
               <option key={s.onboarding_id} value={s.onboarding_id}>
                 #{sessions.length - i} —{" "}
-                {new Date(s.created_at).toLocaleDateString("en-IN", {
+                {formatIST(s.created_at, {
                   day: "numeric", month: "short", year: "numeric",
                 })}
               </option>

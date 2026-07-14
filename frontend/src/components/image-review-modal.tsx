@@ -5,6 +5,7 @@ import {
   X, RefreshCw, Check, Loader2, AlertTriangle,
   ExternalLink, ChevronLeft, ChevronRight, Search, Plus, Trash2,
 } from "lucide-react";
+import { formatIST } from "@/lib/utils";
 
 const PROCESSING = "__processing__";
 const FAILED = "__failed__";
@@ -37,6 +38,7 @@ interface MatchCandidate {
 interface FoodItem {
   description?: string;
   recipe_name?: string;
+  recipe_code?: string;
   quantity_g?: number;
   quantity_g_min?: number;
   quantity_g_max?: number;
@@ -91,7 +93,7 @@ function initPickers(foods: FoodItem[]): PickerEntry[] {
     newEntry({
       query: f.recipe_name ?? f.description ?? "",
       selected: (f.recipe_name || f.description)
-        ? { code: "", name: f.recipe_name ?? f.description ?? "" }
+        ? { code: f.recipe_code ?? "", name: f.recipe_name ?? f.description ?? "" }
         : null,
       qty: f.consumption
         ? String(Math.round(f.consumption.consumed_g))
@@ -393,6 +395,7 @@ function flattenFoodResult(f: Record<string, unknown>): FoodItem {
     .filter((c) => c.recipe_code !== matchedCode);
   return {
     ...f,
+    recipe_code: (matchedCode ?? f.recipe_code) as string | undefined,
     recipe_name: (matched?.recipe_name ?? f.recipe_name) as string | undefined,
     description: (matched?.recipe_description ?? f.description) as string | undefined,
     quantity_g: (quantity?.quantity_g ?? f.quantity_g) as number | undefined,
@@ -744,7 +747,7 @@ export function ImageReviewModal({
                 <p className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Verified record</p>
                 <p className="text-xs whitespace-pre-wrap">{displayReviewedFoods(review.reviewed_foods_by_human)}</p>
                 {review.reviewed_at && (
-                  <p className="text-[10px] text-muted-foreground">{new Date(review.reviewed_at).toLocaleString("en-IN")}</p>
+                  <p className="text-[10px] text-muted-foreground">{formatIST(review.reviewed_at)}</p>
                 )}
               </div>
             )}

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { CheckCircle, Clock, AlertCircle, Users, Search } from "lucide-react";
+import { formatIST } from "@/lib/utils";
 
 type Participant = {
   user_id: string;
@@ -51,7 +52,7 @@ function StatCard({ icon, label, value, accent = "text-foreground" }: {
 
 function fmtDate(iso: string | null, opts?: Intl.DateTimeFormatOptions) {
   if (!iso) return "—";
-  return new Date(iso).toLocaleDateString("en-IN", opts ?? { day: "numeric", month: "short", year: "numeric" });
+  return formatIST(iso, opts ?? { day: "numeric", month: "short", year: "numeric" });
 }
 
 export default function UsersPage() {

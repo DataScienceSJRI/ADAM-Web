@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { ThumbsUp, ThumbsDown, MessageCircle, Send, X } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { formatIST } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -415,7 +416,7 @@ export default function RecommendationsPage() {
               {visiblePlans.map((plan, i) => {
                 const label = i === 0 ? "Latest Plan" : `Plan ${visiblePlans.length - i}`;
                 const date = plan.created_at
-                  ? new Date(plan.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+                  ? formatIST(plan.created_at, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
                   : plan.start_date ?? "";
                 return (
                   <option key={plan.plan_id} value={plan.plan_id}>
@@ -750,7 +751,7 @@ function MealDetailPanel({
                           {profile?.display_name ?? c.user_id.split("@")[0]}
                         </span>
                         <span className="text-[10px] text-muted-foreground">
-                          {new Date(c.created_at).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                          {formatIST(c.created_at, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
                         </span>
                       </div>
                       <p className="text-sm leading-relaxed">{c.comment}</p>

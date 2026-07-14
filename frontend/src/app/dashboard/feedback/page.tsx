@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { AlertTriangle, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
 import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
+import { formatIST } from "@/lib/utils";
 
 type Review = {
   id: string;
@@ -355,7 +356,7 @@ export default function FeedbackPage() {
     setModalState({
       reviews: mealGroupToReviews(g),
       slotLabel: g.meal_slot ?? "Meal",
-      dateLabel: new Date(g.date).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "long", year: "numeric" }),
+      dateLabel: formatIST(g.date, { weekday: "short", day: "numeric", month: "long", year: "numeric" }),
     });
   }
 
@@ -509,7 +510,7 @@ export default function FeedbackPage() {
                       </button>
                       <div className="text-center">
                         <p className="text-sm font-semibold">
-                          {new Date(currentDateStr).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "long", year: "numeric" })}
+                          {formatIST(currentDateStr, { weekday: "short", day: "numeric", month: "long", year: "numeric" })}
                         </p>
                         <p className="text-[10px] text-muted-foreground mt-0.5">
                           {dateIndex + 1} of {uniqueDates.length} days · Wk {isoWeek(currentDateStr)}
