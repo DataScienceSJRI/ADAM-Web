@@ -134,10 +134,13 @@ def list_reviews(
     # Enrich with meal_slot from DietRecall
     recall_ids = [r["diet_recall_id"] for r in reviews if r.get("diet_recall_id")]
     if recall_ids:
-        recall_data = (
-            sb.table("DietRecall").select("ID, meal_slot").in_("ID", recall_ids).execute().data
-        ) or []
-        meal_slot_map = {r["ID"]: r.get("meal_slot") for r in recall_data}
+        meal_slot_map: dict = {}
+        for i in range(0, len(recall_ids), 100):
+            batch = recall_ids[i:i + 100]
+            recall_data = (
+                sb.table("DietRecall").select("ID, meal_slot").in_("ID", batch).execute().data
+            ) or []
+            meal_slot_map.update({r["ID"]: r.get("meal_slot") for r in recall_data})
         for r in reviews:
             r["meal_slot"] = meal_slot_map.get(r.get("diet_recall_id"))
 

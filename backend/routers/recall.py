@@ -269,19 +269,17 @@ def list_coordinator_participants(
 
     # Exclude image-derived rows that haven't been approved by a coordinator
     # yet — a pending/rejected photo shouldn't count as a logged meal.
-    recall_ids = [r["ID"] for r in recalls if r.get("ID")]
-    if recall_ids:
+    if recalls:
         review_rows = (
             sb.table("MealImageReview")
             .select("diet_recall_id, review_status")
-            .in_("diet_recall_id", recall_ids)
+            .in_("user_id", lookup_ids)
+            .neq("review_status", "approved")
+            .limit(5000)
             .execute()
             .data
         ) or []
-        hidden_ids = {
-            r["diet_recall_id"] for r in review_rows
-            if r.get("review_status") != "approved"
-        }
+        hidden_ids = {r["diet_recall_id"] for r in review_rows if r.get("diet_recall_id")}
         recalls = [r for r in recalls if r["ID"] not in hidden_ids]
 
     recall_by_user: dict = {}
@@ -357,19 +355,17 @@ def get_participant_recall_logs(
         # Image-derived rows stay invisible in the log view until the
         # coordinator has explicitly approved them (pending/rejected reviews
         # are hidden — only reviewed via the Image Review queue).
-        recall_ids = [r["ID"] for r in rows if r.get("ID")]
-        if recall_ids:
+        if rows:
             review_rows = (
                 sb.table("MealImageReview")
                 .select("diet_recall_id, review_status")
-                .in_("diet_recall_id", recall_ids)
+                .in_("user_id", user_filter)
+                .neq("review_status", "approved")
+                .limit(5000)
                 .execute()
                 .data
             ) or []
-            hidden_ids = {
-                r["diet_recall_id"] for r in review_rows
-                if r.get("review_status") != "approved"
-            }
+            hidden_ids = {r["diet_recall_id"] for r in review_rows if r.get("diet_recall_id")}
             rows = [r for r in rows if r["ID"] not in hidden_ids]
 
         return _sort_recall_rows(rows)
