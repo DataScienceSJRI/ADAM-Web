@@ -66,6 +66,35 @@ def _write_review_log(*, sb, review: dict, review_id: str, coordinator_id: str,
         logger.exception("Failed to write FoodReviewLog for review %s", review_id)
 
 
+def _notify_participant_review_result(sb, review: dict, action: str) -> None:
+    """Push a notification to the participant once a coordinator approves
+    or rejects their meal-photo review."""
+    try:
+        from services.push import send_push
+
+        diet_recall_id = review.get("diet_recall_id")
+        meal_slot = None
+        if diet_recall_id:
+            rc = sb.table("DietRecall").select("meal_slot").eq("ID", diet_recall_id).limit(1).execute()
+            if rc.data:
+                meal_slot = rc.data[0].get("meal_slot")
+        label = (meal_slot or "meal").capitalize()
+
+        if action == "approve":
+            title, body_text, event = "Meal log approved", f"Your {label} log has been reviewed and confirmed.", "review_approved"
+        else:
+            title, body_text, event = "Meal log needs resubmission", f"Your {label} photo needs to be retaken and resubmitted.", "review_rejected"
+
+        send_push(
+            user_id=review["user_id"],
+            title=title,
+            body=body_text,
+            data={"type": event, "review_id": review.get("id"), "diet_recall_id": diet_recall_id},
+        )
+    except Exception:
+        logger.exception("Failed to send review-result push for review %s", review.get("id"))
+
+
 @router.get("/reviews")
 def list_reviews(
     user_id: str = Depends(get_current_user),
@@ -255,6 +284,8 @@ def update_review(
             approve_review_diet_recall(review["diet_recall_id"], confirmed_foods)
         else:
             reject_review_diet_recall(review["diet_recall_id"])
+
+        _notify_participant_review_result(sb, review, body.action)
 
         _write_review_log(
             sb=sb,
