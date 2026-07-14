@@ -264,9 +264,12 @@ def build_diet_recall_food_rows(confirmed_foods: List[dict]) -> List[dict]:
     Energy_Kcal, GL) for a list of {"recipe_code", "quantity", "unit"} entries —
     same Recipe/RecipeTagging/GL lookups log_recall()'s "changed" path uses.
 
-    unit == "srv" means quantity is already the eaten fraction (servings); any
-    other unit is treated as a raw amount in the recipe's own portion unit (the
-    log_recall() convention), converted to a fraction via RecipeTagging.Portion.
+    unit == "srv" means quantity is already the eaten fraction (servings).
+    unit == "g" means quantity is grams (the food_id_agent VLM pipeline's native
+    unit) — converted via RecipeTagging's Portion / "Portion weight (g)".
+    Any other unit is treated as a raw amount already in the recipe's own
+    portion unit (the log_recall() convention, e.g. a coordinator typing "2"
+    for a recipe tagged in "piece"), converted to a fraction via Portion alone.
     Entries missing a recipe_code are skipped.
     """
     sb = get_supabase()
@@ -277,7 +280,9 @@ def build_diet_recall_food_rows(confirmed_foods: List[dict]) -> List[dict]:
     recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes).execute()
     recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
 
-    tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description, Portion").in_("Recipe_Code", codes).execute()
+    # select("*") rather than named columns — "Portion weight (g)" has spaces/
+    # parens that aren't safe in a supabase-py select() column list.
+    tag_resp = sb.table("RecipeTagging").select("*").in_("Recipe_Code", codes).execute()
     tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
 
     base_gl_map = _base_gl_map(sb, codes)
@@ -297,6 +302,14 @@ def build_diet_recall_food_rows(confirmed_foods: List[dict]) -> List[dict]:
             if unit == "srv" and qty is not None:
                 prop = float(qty)
                 food_qty = round(prop * float(portion), 1) if portion else None
+            elif unit == "g" and qty is not None and tag_info.get("Portion weight (g)"):
+                # AI-estimated quantities (food_id_agent) are always grams — convert
+                # to the recipe's own portion unit via Portion weight (g), same as the
+                # "srv" branch does, rather than treating the gram number as if it were
+                # already a native-unit count.
+                portion_weight_g = float(tag_info["Portion weight (g)"])
+                prop = float(qty) / portion_weight_g
+                food_qty = round(prop * float(portion), 2) if portion else round(float(qty), 2)
             elif qty is not None:
                 food_qty = float(qty)
                 base_portion = float(portion) if portion else None
