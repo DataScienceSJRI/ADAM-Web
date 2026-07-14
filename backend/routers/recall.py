@@ -88,9 +88,9 @@ def get_recall_history(
             return True
         if r.get("did_eat_as_planned"):
             return True
-        if r.get("image_url_pre") or r.get("image_url_post"):
-            return False
-        return True  # e.g. a "skipped" row — no food data, no photo, still a real entry
+        if r.get("notes") == "skipped":
+            return True
+        return False
 
     sorted_rows = [r for r in sorted_rows if _is_confirmed(r)]
     page = sorted_rows[offset: offset + limit]
