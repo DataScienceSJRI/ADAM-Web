@@ -17,6 +17,8 @@ export type MealImageReview = {
   post_image_id: string | null;
   review_status: "pending" | "approved" | "rejected";
   tracked_foods_by_ai: string | null;
+  tracked_foods_by_ai_post: string | null;
+  consumption_result: string | null;
   reviewed_foods_by_human: string | null;
   reviewed_by: string | null;
   reviewed_at: string | null;
@@ -43,6 +45,7 @@ interface FoodItem {
   quantity_method?: string;
   match_status?: string;
   candidates?: MatchCandidate[];
+  consumption?: { pre_quantity_g: number; post_quantity_g: number; consumed_g: number };
   [key: string]: unknown;
 }
 
@@ -90,15 +93,22 @@ function initPickers(foods: FoodItem[]): PickerEntry[] {
       selected: (f.recipe_name || f.description)
         ? { code: "", name: f.recipe_name ?? f.description ?? "" }
         : null,
-      qty: f.serving_multiplier != null
-        ? String(parseFloat(f.serving_multiplier.toFixed(2)))
-        : f.quantity_g != null
-          ? String(Math.round(f.quantity_g))
-          : "",
-      unit: f.serving_multiplier != null ? "srv" : "g",
+      qty: f.consumption
+        ? String(Math.round(f.consumption.consumed_g))
+        : f.serving_multiplier != null
+          ? String(parseFloat(f.serving_multiplier.toFixed(2)))
+          : f.quantity_g != null
+            ? String(Math.round(f.quantity_g))
+            : "",
+      unit: f.consumption ? "g" : f.serving_multiplier != null ? "srv" : "g",
       candidates: f.candidates ?? [],
     })
   );
+}
+function pickerSourceFoods(review: MealImageReview): FoodItem[] {
+  const consumption = parseAi(review.consumption_result);
+  if (consumption.status === "structured") return consumption.foods;
+  return parseAi(review.tracked_foods_by_ai).foods;
 }
 
 type ConfirmedFood = {
@@ -417,6 +427,102 @@ const CONF: Record<string, string> = {
   low: "text-red-500 bg-red-50 dark:bg-red-950/40",
 };
 
+function FoodCard({ f, index }: { f: FoodItem; index: number }) {
+  const name = f.recipe_name ?? f.description ?? "Unknown food";
+  const desc = f.recipe_name && f.description && f.recipe_name !== f.description ? f.description : null;
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-xl border px-3.5 py-3 text-sm">
+      <div className="min-w-0 space-y-0.5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] text-muted-foreground tabular-nums bg-muted px-1.5 py-0.5 rounded font-mono">{index + 1}</span>
+          <p className="font-medium text-sm truncate">{name}</p>
+        </div>
+        {desc && <p className="text-xs text-muted-foreground pl-7 truncate">{desc}</p>}
+        {f.match_status && <p className="text-[10px] text-muted-foreground pl-7 capitalize">{f.match_status}</p>}
+      </div>
+      <div className="shrink-0 text-right space-y-1">
+        {f.consumption ? (
+          <>
+            <p className="font-semibold text-sm tabular-nums">{Math.round(f.consumption.consumed_g)} g eaten</p>
+            <p className="text-[11px] text-muted-foreground tabular-nums">
+              Served {Math.round(f.consumption.pre_quantity_g)}g → Left {Math.round(f.consumption.post_quantity_g)}g
+            </p>
+          </>
+        ) : f.serving_multiplier != null ? (
+          <>
+            <p className="font-semibold text-sm tabular-nums">
+              {parseFloat(f.serving_multiplier.toFixed(2))} srv
+            </p>
+            {f.quantity_g != null && (
+              <p className="text-[11px] text-muted-foreground tabular-nums">
+                {Math.round(f.quantity_g)} g
+              </p>
+            )}
+          </>
+        ) : f.quantity_g != null ? (
+          <>
+            <p className="font-semibold text-sm tabular-nums">{Math.round(f.quantity_g)} g</p>
+            {f.quantity_g_min != null && f.quantity_g_max != null && (
+              <p className="text-[10px] text-muted-foreground tabular-nums">
+                {Math.round(f.quantity_g_min)}–{Math.round(f.quantity_g_max)} g
+              </p>
+            )}
+          </>
+        ) : null}
+        {f.quantity_confidence && (
+          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${CONF[f.quantity_confidence] ?? "bg-muted text-muted-foreground"}`}>
+            {f.quantity_confidence}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AiResultsSection({ label, parsed, emptyText }: { label: string; parsed: ParsedAi; emptyText: string }) {
+  return (
+    <div className="space-y-2.5">
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">{label}</p>
+        {parsed.status === "structured" && <span className="flex items-center gap-1 text-[10px] text-emerald-600"><Check className="h-3 w-3" /> Complete</span>}
+        {parsed.status === "processing" && <span className="flex items-center gap-1 text-[10px] text-blue-600"><Loader2 className="h-3 w-3 animate-spin" /> Processing…</span>}
+        {parsed.status === "failed" && <span className="flex items-center gap-1 text-[10px] text-red-500"><AlertTriangle className="h-3 w-3" /> Failed</span>}
+      </div>
+
+      {parsed.status === "none" && (
+        <p className="text-xs text-muted-foreground italic">{emptyText}</p>
+      )}
+      {parsed.status === "processing" && (
+        <div className="flex items-center gap-3 py-6 justify-center text-muted-foreground">
+          <Loader2 className="h-6 w-6 animate-spin text-blue-400 shrink-0" />
+          <div>
+            <p className="text-sm font-medium">Identifying foods…</p>
+            <p className="text-xs">Results will appear automatically.</p>
+          </div>
+        </div>
+      )}
+      {parsed.status === "failed" && (
+        <div className="flex items-center gap-3 py-4 text-muted-foreground">
+          <AlertTriangle className="h-5 w-5 text-red-400 shrink-0" />
+          <p className="text-sm">Identification failed. Re-run from the panel on the right.</p>
+        </div>
+      )}
+
+      {parsed.status === "structured" && (
+        <div className="space-y-2">
+          {parsed.foods.map((f, i) => <FoodCard key={i} f={f} index={i} />)}
+        </div>
+      )}
+
+      {parsed.status === "text" && parsed.text && (
+        <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/30 rounded-lg p-3 max-h-48 overflow-auto">
+          {parsed.text}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 // ─── Main modal ───────────────────────────────────────────────────────────────
 
 export function ImageReviewModal({
@@ -435,8 +541,10 @@ export function ImageReviewModal({
   const [error, setError] = useState<string | null>(null);
 
   const parsed = parseAi(review.tracked_foods_by_ai);
+  const parsedPost = parseAi(review.tracked_foods_by_ai_post);
+  const parsedConsumption = parseAi(review.consumption_result);
 
-  const [pickers, setPickers] = useState<PickerEntry[]>(() => initPickers(parsed.foods));
+  const [pickers, setPickers] = useState<PickerEntry[]>(() => initPickers(pickerSourceFoods(review)));
   const [manualText, setManualText] = useState(review.reviewed_foods_by_human ?? "");
 
   function updatePicker(id: string, partial: Partial<PickerEntry>) {
@@ -458,13 +566,12 @@ export function ImageReviewModal({
     setReview(r);
     setManualText(r.reviewed_foods_by_human ?? "");
     setError(null);
-    const p = parseAi(r.tracked_foods_by_ai);
-    setPickers(initPickers(p.foods));
+    setPickers(initPickers(pickerSourceFoods(r)));
   }
 
   const handlePoll = useCallback((u: MealImageReview) => {
     setReview(u);
-    setPickers(initPickers(parseAi(u.tracked_foods_by_ai).foods));
+    setPickers(initPickers(pickerSourceFoods(u)));
     onUpdated(u);
   }, [onUpdated]);
 
@@ -483,8 +590,23 @@ export function ImageReviewModal({
     return () => clearInterval(t);
   }, [review.id, parsed.status, token, handlePoll]);
 
-  async function doAction(act: string, extra: Record<string, unknown> = {}) {
-    setBusy(act); setError(null);
+  useEffect(() => {
+    if (parsedPost.status !== "processing") return;
+    const t = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/feedback/reviews/${review.id}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const u = (await res.json()) as MealImageReview;
+        if (u.tracked_foods_by_ai_post !== PROCESSING) { clearInterval(t); handlePoll(u); }
+      } catch { /* ignore */ }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [review.id, parsedPost.status, token, handlePoll]);
+
+  async function doAction(act: string, extra: Record<string, unknown> = {}, busyKey: string = act) {
+    setBusy(busyKey); setError(null);
     try {
       const res = await fetch(`/api/feedback/reviews/${review.id}`, {
         method: "PATCH",
@@ -514,6 +636,7 @@ export function ImageReviewModal({
   const rejected = review.review_status === "rejected";
   const pending = !approved && !rejected;
   const usePickers = parsed.status === "structured" || parsed.status === "none";
+  const canCheckConsumption = parsed.status === "structured" && parsedPost.status === "structured";
 
   return (
     <div
@@ -590,99 +713,41 @@ export function ImageReviewModal({
 
             <div className="border-t" />
 
-            {/* AI results */}
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">AI Identification</p>
-                {parsed.status === "structured" && <span className="flex items-center gap-1 text-[10px] text-emerald-600"><Check className="h-3 w-3" /> Complete</span>}
-                {parsed.status === "processing" && <span className="flex items-center gap-1 text-[10px] text-blue-600"><Loader2 className="h-3 w-3 animate-spin" /> Processing…</span>}
-                {parsed.status === "failed" && <span className="flex items-center gap-1 text-[10px] text-red-500"><AlertTriangle className="h-3 w-3" /> Failed</span>}
+            {/* AI results — pre, post, and (once checked) consumption */}
+            <AiResultsSection
+              label="AI Identification — Pre-meal"
+              parsed={parsed}
+              emptyText="No analysis yet — re-run from the panel on the right."
+            />
+
+            <div className="border-t" />
+
+            <AiResultsSection
+              label="AI Identification — Post-meal"
+              parsed={parsedPost}
+              emptyText={review.post_image_id ? "No analysis yet — re-run from the panel on the right." : "No post-meal photo uploaded yet."}
+            />
+
+            {parsedConsumption.status === "structured" && (
+              <>
+                <div className="border-t" />
+                <AiResultsSection
+                  label="Consumption (Pre − Post)"
+                  parsed={parsedConsumption}
+                  emptyText=""
+                />
+              </>
+            )}
+
+            {review.reviewed_foods_by_human && (
+              <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3.5 py-3 space-y-1">
+                <p className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Verified record</p>
+                <p className="text-xs whitespace-pre-wrap">{displayReviewedFoods(review.reviewed_foods_by_human)}</p>
+                {review.reviewed_at && (
+                  <p className="text-[10px] text-muted-foreground">{new Date(review.reviewed_at).toLocaleString("en-IN")}</p>
+                )}
               </div>
-
-              {parsed.status === "none" && (
-                <p className="text-xs text-muted-foreground italic">No analysis yet — re-run from the panel on the right.</p>
-              )}
-              {parsed.status === "processing" && (
-                <div className="flex items-center gap-3 py-6 justify-center text-muted-foreground">
-                  <Loader2 className="h-6 w-6 animate-spin text-blue-400 shrink-0" />
-                  <div>
-                    <p className="text-sm font-medium">Identifying foods…</p>
-                    <p className="text-xs">Results will appear automatically.</p>
-                  </div>
-                </div>
-              )}
-              {parsed.status === "failed" && (
-                <div className="flex items-center gap-3 py-4 text-muted-foreground">
-                  <AlertTriangle className="h-5 w-5 text-red-400 shrink-0" />
-                  <p className="text-sm">Identification failed. Re-run from the panel on the right.</p>
-                </div>
-              )}
-
-              {parsed.status === "structured" && (
-                <div className="space-y-2">
-                  {parsed.foods.map((f, i) => {
-                    const name = f.recipe_name ?? f.description ?? "Unknown food";
-                    const desc = f.recipe_name && f.description && f.recipe_name !== f.description ? f.description : null;
-                    return (
-                      <div key={i} className="flex items-start justify-between gap-3 rounded-xl border px-3.5 py-3 text-sm">
-                        <div className="min-w-0 space-y-0.5">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-[10px] text-muted-foreground tabular-nums bg-muted px-1.5 py-0.5 rounded font-mono">{i + 1}</span>
-                            <p className="font-medium text-sm truncate">{name}</p>
-                          </div>
-                          {desc && <p className="text-xs text-muted-foreground pl-7 truncate">{desc}</p>}
-                          {f.match_status && <p className="text-[10px] text-muted-foreground pl-7 capitalize">{f.match_status}</p>}
-                        </div>
-                        <div className="shrink-0 text-right space-y-1">
-                          {f.serving_multiplier != null ? (
-                            <>
-                              <p className="font-semibold text-sm tabular-nums">
-                                {parseFloat(f.serving_multiplier.toFixed(2))} srv
-                              </p>
-                              {f.quantity_g != null && (
-                                <p className="text-[11px] text-muted-foreground tabular-nums">
-                                  {Math.round(f.quantity_g)} g
-                                </p>
-                              )}
-                            </>
-                          ) : f.quantity_g != null ? (
-                            <>
-                              <p className="font-semibold text-sm tabular-nums">{Math.round(f.quantity_g)} g</p>
-                              {f.quantity_g_min != null && f.quantity_g_max != null && (
-                                <p className="text-[10px] text-muted-foreground tabular-nums">
-                                  {Math.round(f.quantity_g_min)}–{Math.round(f.quantity_g_max)} g
-                                </p>
-                              )}
-                            </>
-                          ) : null}
-                          {f.quantity_confidence && (
-                            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${CONF[f.quantity_confidence] ?? "bg-muted text-muted-foreground"}`}>
-                              {f.quantity_confidence}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {parsed.status === "text" && parsed.text && (
-                <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/30 rounded-lg p-3 max-h-48 overflow-auto">
-                  {parsed.text}
-                </pre>
-              )}
-
-              {review.reviewed_foods_by_human && (
-                <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/20 px-3.5 py-3 space-y-1">
-                  <p className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 uppercase tracking-wide">Verified record</p>
-                  <p className="text-xs whitespace-pre-wrap">{displayReviewedFoods(review.reviewed_foods_by_human)}</p>
-                  {review.reviewed_at && (
-                    <p className="text-[10px] text-muted-foreground">{new Date(review.reviewed_at).toLocaleString("en-IN")}</p>
-                  )}
-                </div>
-              )}
-            </div>
+            )}
           </div>
 
           {/* Right — Coordinator panel */}
@@ -743,15 +808,41 @@ export function ImageReviewModal({
               {error && <p className="text-xs text-red-500 text-center">{error}</p>}
 
               {pending && (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => doAction("identify", { vlm_backend: "openai", image: "pre" }, "identify-pre")}
+                    disabled={!!busy || parsed.status === "processing"}
+                    className="flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
+                  >
+                    {busy === "identify-pre"
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : <RefreshCw className="h-3.5 w-3.5" />}
+                    Re-run pre
+                  </button>
+                  <button
+                    onClick={() => doAction("identify", { vlm_backend: "openai", image: "post" }, "identify-post")}
+                    disabled={!!busy || !review.post_image_id || parsedPost.status === "processing"}
+                    className="flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
+                  >
+                    {busy === "identify-post"
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : <RefreshCw className="h-3.5 w-3.5" />}
+                    Re-run post
+                  </button>
+                </div>
+              )}
+
+              {pending && (
                 <button
-                  onClick={() => doAction("identify", { vlm_backend: "openai" })}
-                  disabled={!!busy || parsed.status === "processing"}
-                  className="w-full flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
+                  onClick={() => doAction("check_consumption")}
+                  disabled={!!busy || !canCheckConsumption}
+                  title={canCheckConsumption ? undefined : "Both pre and post identification must complete first"}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-lg border border-blue-200 text-blue-700 dark:text-blue-400 dark:border-blue-800 py-2 text-xs font-semibold hover:bg-blue-50 dark:hover:bg-blue-950/30 transition-colors disabled:opacity-50"
                 >
-                  {busy === "identify"
+                  {busy === "check_consumption"
                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    : <RefreshCw className="h-3.5 w-3.5" />}
-                  Re-run with OpenAI
+                    : <Check className="h-3.5 w-3.5" />}
+                  Check Consumption
                 </button>
               )}
 

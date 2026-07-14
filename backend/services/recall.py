@@ -324,16 +324,101 @@ def build_diet_recall_food_rows(confirmed_foods: List[dict]) -> List[dict]:
     return rows
 
 
-def resolve_confirmed_foods(reviewed_foods_by_human: Optional[str], tracked_foods_by_ai: Optional[str]) -> List[dict]:
+def _parse_structured_ai(raw: Optional[str]) -> Optional[dict]:
+    """Parse a MealImageReview AI-result column into its structured {"foods": [...]}
+    dict, or None if it's a sentinel, unparseable, or the "analyse" action's
+    free-form text (no "foods" list)."""
+    if not raw or raw in ("__processing__", "__failed__"):
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("foods"), list):
+        return None
+    return parsed
+
+
+def compute_consumption(tracked_foods_by_ai: Optional[str], tracked_foods_by_ai_post: Optional[str]) -> Optional[dict]:
+    """Match dishes between the pre-meal and post-meal structured AI results by
+    recipe_code and compute how much of each was actually eaten.
+
+    Returns None if either side isn't a ready, structured result (still
+    processing, failed, missing, or unparseable) — callers treat that as "not
+    ready to check consumption yet".
+
+    Otherwise returns {"foods": [...], "flags": [...]} — pre's food list, each
+    entry carrying its original match/quantity plus a "consumption" block
+    ({"pre_quantity_g", "post_quantity_g", "consumed_g"}) wherever a recipe_code
+    + quantity was available. A dish present in pre but absent from post is
+    treated as fully eaten. Dishes seen only in post are noted in "flags", not
+    merged in as foods (there's nothing to subtract from).
+    """
+    pre = _parse_structured_ai(tracked_foods_by_ai)
+    post = _parse_structured_ai(tracked_foods_by_ai_post)
+    if pre is None or post is None:
+        return None
+
+    post_by_code: dict[str, list[float]] = {}
+    for fr in post.get("foods", []):
+        matched = (fr.get("match") or {}).get("matched") or {}
+        code = matched.get("recipe_code")
+        quantity = fr.get("quantity") or {}
+        qty_g = quantity.get("quantity_g")
+        if code and qty_g is not None:
+            post_by_code.setdefault(code, []).append(float(qty_g))
+
+    merged_foods = []
+    for fr in pre.get("foods", []):
+        entry = dict(fr)
+        matched = (fr.get("match") or {}).get("matched") or {}
+        code = matched.get("recipe_code")
+        quantity = fr.get("quantity") or {}
+        pre_qty_g = quantity.get("quantity_g")
+
+        if code and pre_qty_g is not None:
+            pre_qty_g = float(pre_qty_g)
+            bucket = post_by_code.get(code)
+            if bucket:
+                post_qty_g = bucket.pop(0)
+            else:
+                post_qty_g = 0.0
+            consumed_g = max(pre_qty_g - post_qty_g, 0.0)
+            entry["consumption"] = {
+                "pre_quantity_g": pre_qty_g,
+                "post_quantity_g": post_qty_g,
+                "consumed_g": consumed_g,
+            }
+        merged_foods.append(entry)
+
+    flags = list(pre.get("flags", []))
+    leftover_codes = [code for code, bucket in post_by_code.items() if bucket]
+    if leftover_codes:
+        flags.append(f"{len(leftover_codes)} food(s) found in post-meal image with no matching pre-meal dish")
+
+    return {"foods": merged_foods, "flags": flags}
+
+
+def resolve_confirmed_foods(
+    reviewed_foods_by_human: Optional[str],
+    tracked_foods_by_ai: Optional[str],
+    tracked_foods_by_ai_post: Optional[str] = None,
+    consumption_result: Optional[str] = None,
+) -> List[dict]:
     """Resolve the coordinator-confirmed food list for a review, in priority order:
 
     1. reviewed_foods_by_human — structured JSON written by the coordinator's recipe
        pickers, e.g. [{"recipe_code": "A001745", "recipe_name": "Idli", "quantity": 2, "unit": "srv"}].
        Rows from before this JSON format existed are a plain display string and
        parse-fail here, so they fall through to (2).
-    2. tracked_foods_by_ai, only the "identify" action's structured shape
-       ({"foods": [{"match": {"matched": {"recipe_code": ...}}, "quantity": {...}}]}) —
-       the "analyse" action's shape is free-form text with no recipe_code to use.
+    2. consumption_result — the stored output of the coordinator's explicit "Check
+       Consumption" step (compute_consumption, run via action="check_consumption").
+       Uses each food's consumption.consumed_g.
+    3. Safety net: if consumption_result wasn't computed but both tracked_foods_by_ai
+       and tracked_foods_by_ai_post are ready structured results, compute it on the
+       fly (covers approving without clicking "Check Consumption" first).
+    4. tracked_foods_by_ai alone, quantity.quantity_g — today's original fallback,
+       used when there's no usable post-meal result at all.
 
     Returns [] if nothing structured is available.
     """
@@ -350,21 +435,34 @@ def resolve_confirmed_foods(reviewed_foods_by_human: Optional[str], tracked_food
         except (json.JSONDecodeError, TypeError):
             pass
 
-    if tracked_foods_by_ai and tracked_foods_by_ai not in ("__processing__", "__failed__"):
-        try:
-            ai = json.loads(tracked_foods_by_ai)
-            foods = []
-            for fr in ai.get("foods", []):
-                matched = (fr.get("match") or {}).get("matched") or {}
-                code = matched.get("recipe_code")
-                if not code:
-                    continue
-                quantity = fr.get("quantity") or {}
-                foods.append({"recipe_code": code, "quantity": quantity.get("quantity_g"), "unit": "g"})
-            if foods:
-                return foods
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            pass
+    merged = _parse_structured_ai(consumption_result) or compute_consumption(
+        tracked_foods_by_ai, tracked_foods_by_ai_post
+    )
+    if merged:
+        foods = []
+        for fr in merged.get("foods", []):
+            matched = (fr.get("match") or {}).get("matched") or {}
+            code = matched.get("recipe_code")
+            if not code:
+                continue
+            consumption = fr.get("consumption")
+            qty_g = consumption["consumed_g"] if consumption else (fr.get("quantity") or {}).get("quantity_g")
+            foods.append({"recipe_code": code, "quantity": qty_g, "unit": "g"})
+        if foods:
+            return foods
+
+    ai = _parse_structured_ai(tracked_foods_by_ai)
+    if ai:
+        foods = []
+        for fr in ai.get("foods", []):
+            matched = (fr.get("match") or {}).get("matched") or {}
+            code = matched.get("recipe_code")
+            if not code:
+                continue
+            quantity = fr.get("quantity") or {}
+            foods.append({"recipe_code": code, "quantity": quantity.get("quantity_g"), "unit": "g"})
+        if foods:
+            return foods
 
     return []
 
@@ -447,7 +545,7 @@ def log_recall_image(
             sb.table("DietRecall").update({"image_url_post": image_url_post}).eq("ID", recall_id).execute()
             existing_review = (
                 sb.table("MealImageReview")
-                .select("id")
+                .select("id, review_status")
                 .eq("diet_recall_id", recall_id)
                 .limit(1)
                 .execute()
@@ -456,6 +554,8 @@ def log_recall_image(
             if existing_review:
                 review_id = existing_review[0]["id"]
                 sb.table("MealImageReview").update({"post_image_id": image_url_post}).eq("id", review_id).execute()
+                if existing_review[0].get("review_status") == "pending":
+                    _enqueue_post_identification(sb, review_id, image_url_post)
                 return recall_id, review_id
 
     # Default: insert a new DietRecall + MealImageReview row (pre-only or both together).
@@ -495,4 +595,21 @@ def log_recall_image(
         except Exception:
             logger.warning("Could not enqueue food ID job for review %s", review_id)
 
+    # Auto-enqueue food identification when a post-meal image is present. Fully
+    # independent of the pre-image job above — used later by the coordinator's
+    # explicit "Check Consumption" step, never auto-merged into tracked_foods_by_ai.
+    if image_url_post:
+        _enqueue_post_identification(sb, review_id, image_url_post)
+
     return recall_id, review_id
+
+
+def _enqueue_post_identification(sb, review_id: str, image_url_post: str) -> None:
+    try:
+        from services.food_id_worker import PROCESSING_SENTINEL, enqueue_food_id_job_post
+        sb.table("MealImageReview").update(
+            {"tracked_foods_by_ai_post": PROCESSING_SENTINEL}
+        ).eq("id", review_id).execute()
+        enqueue_food_id_job_post(review_id, image_url_post)
+    except Exception:
+        logger.warning("Could not enqueue post-meal food ID job for review %s", review_id)
