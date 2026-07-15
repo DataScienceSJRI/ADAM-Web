@@ -57,7 +57,7 @@ def compute_energy_for_quantity(recipe_code: Optional[str], food_qty) -> Optiona
 def _base_gl_map(sb, recipe_codes: List[str]) -> dict:
     """Base Glycemic Load (per one full portion) for each recipe code.
 
-    GL = GI_Avg * (Carbohydrate_g - Fibre_g) / 100 — same net-of-fibre formula
+    GL = GI_Avg * Carbohydrate_g / 100 — same formula
     Functions_Base.build_recipe_master() uses to seed the LP optimizer's GL
     column (see services/lp_optimizer.py), so recall GL stays comparable to
     the planned GL. GI_Avg is looked up by Recipe_Category against
@@ -95,7 +95,8 @@ def _base_gl_map(sb, recipe_codes: List[str]) -> dict:
             fiber = float(r.get("TotalDietaryFibre_FIBTG_g") or 0)
         except (TypeError, ValueError):
             continue
-        base_gl[r["Recipe_Code"]] = gi * max(carbs - fiber, 0.0) / 100.0
+        # base_gl[r["Recipe_Code"]] = gi * max(carbs - fiber, 0.0) / 100.0
+        base_gl[r["Recipe_Code"]] = gi * carbs / 100.0
     return base_gl
 
 

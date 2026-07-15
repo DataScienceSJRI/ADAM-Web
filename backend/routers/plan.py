@@ -537,9 +537,8 @@ def Recomendation_formatting(weekly_menu_df):
                     final_df["_gi"] = pd.to_numeric(final_df.get("GI_Avg"), errors="coerce")
                     final_df["_fiber_for_gl"] = pd.to_numeric(final_df["TotalDietaryFibre_FIBTG_g"], errors="coerce").fillna(0.0)
 
-                    # compute GL at optimal serving: GI * ((Carbs - fiber)) / 100
-                    carb_minus_fiber = final_df["_carb_g"].fillna(0.0) #### for USDA recipes we need to subract the fiber "_fiber_for_gl" 
-                    final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber)) / 100.0
+                    # compute GL at optimal serving: GI * Carbs / 100 (fiber intentionally not subtracted)
+                    final_df["GL"] = (final_df["_gi"].fillna(np.nan) * final_df["_carb_g"].fillna(0.0)) / 100.0
                     # if GI or carbs missing, leave GL as NaN
                 else:
                     # recipes file missing — set GL to NaN
@@ -719,21 +718,14 @@ def find_closest_recipe_standalone(
     # 3. Pull Glycemic Index matrix and calculate the target item's dynamic baseline GL
     gi_gl_df_full = _fetch_cached("SubCategory_foods_GI_GL")
     gi_gl_df_full["Code"] = gi_gl_df_full["Code"].astype(str).str.strip()
-    print(subcat)
-    ### subcat came like  Recipe_Category    E1B
-    ### need only the value 
-    print(subcat)
-    print(gi_gl_df_full)
-    gi_gl_df_full.to_csv("gi_gl_df_full.csv", index=False)
     gi_match = gi_gl_df_full[gi_gl_df_full["Code"] == subcat]
-    print(gi_match)
 
     if len(gi_match) == 0:
         print(f"[WARN] No GI/GL mapping data found for subcategory code {subcat}.")
         return None, {"error": "gi_gl_mapping_missing"}
-        
+
     gi_row = gi_match.iloc[0]
-    gi_val = float(gi_row.get("GI_AVG") or gi_row.get("Glycemic_Index") or 50.0)
+    gi_val = float(gi_row.get("GI_Avg") or 50.0)
 
 
     # Calculate dynamic target values scaled to the serving size

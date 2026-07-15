@@ -323,7 +323,8 @@ class ADAMPersonalizationModel:
 		else:
 			fiber_col = 0
 
-		recipe_master["GL"] = (recipe_master["GI"] * (recipe_master["Carbohydrate_g"] - fiber_col)) / 100.0
+		# recipe_master["GL"] = (recipe_master["GI"] * (recipe_master["Carbohydrate_g"] - fiber_col)) / 100.0
+		recipe_master["GL"] = (recipe_master["GI"] * recipe_master["Carbohydrate_g"]) / 100.0
 
 		if not model.empty and {"Subcategories", "Delta_Glucose", "TimeAbove160_pct"}.issubset(set(model.columns)):
 			metrics = model[["Subcategories", "Delta_Glucose", "TimeAbove160_pct"]].copy()
@@ -2134,9 +2135,10 @@ class ADAMPersonalizationModel:
 							final_df["_gi"] = pd.to_numeric(final_df.get("GI_Avg"), errors="coerce")
 							final_df["_opt_prop"] = pd.to_numeric(final_df.get("Optimal proportion"), errors="coerce").fillna(0.0)
 
-							# compute GL at optimal serving: GI * ((Carbs - fiber) * optimal_prop) / 100
-							carb_minus_fiber = (final_df["_carb_g"].fillna(0.0) - final_df["_fiber_for_gl"].fillna(0.0)).clip(lower=0.0)
-							final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber * final_df["_opt_prop"])) / 100.0
+							# compute GL at optimal serving: GI * (Carbs * optimal_prop) / 100
+							# carb_minus_fiber = (final_df["_carb_g"].fillna(0.0) - final_df["_fiber_for_gl"].fillna(0.0)).clip(lower=0.0)
+							# final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (carb_minus_fiber * final_df["_opt_prop"])) / 100.0
+							final_df["GL"] = (final_df["_gi"].fillna(np.nan) * (final_df["_carb_g"].fillna(0.0) * final_df["_opt_prop"])) / 100.0
 							# if GI or carbs missing, leave GL as NaN
 						else:
 							# recipes file missing — set GL to NaN

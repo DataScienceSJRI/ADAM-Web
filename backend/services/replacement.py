@@ -22,7 +22,7 @@ _ENERGY_TARGET_KCAL: dict = {
 def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
     """
     Compute GL for a list of recipe rows.
-    GL = GI * max(0, Carbohydrate_g - TotalDietaryFibre_FIBTG_g) / 100
+    GL = GI * Carbohydrate_g / 100
     GI is fetched from SubCategory_foods_GI_GL keyed by Recipe_Category (stored as Code).
     Returns {Recipe_Code: GL}.
     """
@@ -48,7 +48,8 @@ def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
         gi = gi_map.get(str(row.get("Recipe_Category") or "").strip(), 0.0)
         carb = float(row.get("Carbohydrate_g") or 0)
         fiber = float(row.get("TotalDietaryFibre_FIBTG_g") or 0)
-        result[str(row["Recipe_Code"])] = gi * max(0.0, carb - fiber) / 100.0
+        # result[str(row["Recipe_Code"])] = gi * max(0.0, carb - fiber) / 100.0
+        result[str(row["Recipe_Code"])] = gi * carb / 100.0
 
     return result
 
