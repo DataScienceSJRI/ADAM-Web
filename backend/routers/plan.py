@@ -23,6 +23,7 @@ from services.recommendation_writer import (
     write_final_nutrient_summary,
     get_plan_status,
 )
+from services.replacement import VALID_QUANTITIES
 import logging
 
 # Times stored in DB are IST (UTC+5:30); the day-6 auto-generation trigger fires at 9pm IST.
@@ -176,6 +177,72 @@ def _schedule_day4_checkin(user_id: str, start_date: date) -> None:
         logger.exception("Failed to schedule day-4 check-in reminder for user_id=%s", user_id)
 
 
+def _round_to_valid_quantity(value: float) -> float:
+    """Snap a raw recipe quantity to the nearest step in VALID_QUANTITIES
+    (0.5 / 1.0 / 1.5 / 2.0 — the same fixed set the replacement/swap flow uses,
+    see services/replacement.py)."""
+    return min(VALID_QUANTITIES, key=lambda q: abs(q - value))
+
+
+def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
+    """
+    Correct the LP's raw `Serving` proportion so every downstream nutrient
+    calculation (Energy, Carbs, Fibre, GL) matches a user-friendly recipe
+    quantity instead of the LP's continuous fraction.
+
+    RecipeTagging.Portion is the reference quantity the Recipe table's
+    nutrient values were computed for (e.g. Portion=1.2). The LP's `Serving`
+    is a raw proportion of that reference (e.g. 0.8). Naively scaling
+    nutrients by 0.8 corresponds to an oddly precise real-world quantity
+    (1.2 * 0.8 = 0.96 units) that no one would actually serve.
+
+    Instead:
+      1. actual_quantity = Portion * Serving        (e.g. 1.2 * 0.8 = 0.96)
+      2. rounded_quantity = nearest of VALID_QUANTITIES (e.g. 0.96 -> 1.0)
+      3. corrected_proportion = rounded_quantity / Portion (e.g. 1.0 / 1.2 = 0.833)
+
+    `Serving` is overwritten with the corrected_proportion so every place
+    that reads it downstream (Recomendation_formatting, the Energy_ENERC_Kcal
+    scaling below, and write_recommendations' Food_Qty) stays consistent with
+    the same rounded, human-friendly quantity. Rows the LP didn't select
+    (Serving <= 0) are left untouched.
+    """
+    if weekly_menu is None or weekly_menu.empty or "Recipe_Code" not in weekly_menu.columns:
+        return weekly_menu
+
+    weekly_menu = weekly_menu.copy()
+    weekly_menu["Serving"] = pd.to_numeric(weekly_menu.get("Serving", 0.0), errors="coerce").fillna(0.0)
+
+    recipe_codes = weekly_menu["Recipe_Code"].dropna().unique().tolist()
+    tag_df = _fetch_cached("RecipeTagging")
+    tag_df = tag_df[tag_df["Recipe_Code"].astype(str).str.strip().isin(
+        {str(c).strip() for c in recipe_codes}
+    )][["Recipe_Code", "Portion"]].copy()
+    tag_df["Portion"] = pd.to_numeric(tag_df["Portion"], errors="coerce")
+    tag_df = tag_df.dropna(subset=["Portion"]).drop_duplicates(subset=["Recipe_Code"])
+    portion_map = dict(zip(tag_df["Recipe_Code"], tag_df["Portion"]))
+
+    weekly_menu["_tagging_portion"] = weekly_menu["Recipe_Code"].map(portion_map)
+
+    selectable = (weekly_menu["Serving"] > 0) & weekly_menu["_tagging_portion"].notna() & (weekly_menu["_tagging_portion"] > 0)
+
+    raw_quantity = weekly_menu["_tagging_portion"] * weekly_menu["Serving"]
+    rounded_quantity = raw_quantity.apply(_round_to_valid_quantity)
+    corrected_proportion = rounded_quantity / weekly_menu["_tagging_portion"]
+
+    weekly_menu.loc[selectable, "Serving"] = corrected_proportion[selectable]
+
+    unmatched = int(((weekly_menu["Serving"] > 0) & ~selectable).sum())
+    if unmatched:
+        logger.warning(
+            "_apply_rounded_quantity: %d selected rows had no RecipeTagging.Portion match; "
+            "left their Serving proportion uncorrected",
+            unmatched,
+        )
+
+    return weekly_menu.drop(columns=["_tagging_portion"])
+
+
 def _run_plan_background(
     user_id: str,
     body: GeneratePlanRequest,
@@ -209,6 +276,7 @@ def _run_plan_background(
             logger.info("model.run completed for user_id=%s [%.1fs]", user_id, time.time() - t0)
 
             weekly_menu = output_paths.get("weekly_menu")
+            weekly_menu = _apply_rounded_quantity(weekly_menu)
             recipe_name_changed = _fetch_cached("USER_Recipes_name_changed")
 
             name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))

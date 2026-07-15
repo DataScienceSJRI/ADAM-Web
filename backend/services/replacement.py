@@ -5,7 +5,7 @@ from typing import List
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
 
-_VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
+VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
 _GL_TOLERANCE = 0.20   # ±20% band around original meal GL
 _GL_FLOOR = 1.0        # minimum absolute tolerance when original GL is near zero
 
@@ -109,7 +109,7 @@ def _best_qty_combo(
     fixed_gl: float,
 ) -> list[float] | None:
     """
-    Enumerate all combinations of _VALID_QUANTITIES for each recipe.
+    Enumerate all combinations of VALID_QUANTITIES for each recipe.
     Return the quantity list whose (fixed_gl + combo_gl) is closest to target_gl
     and falls within the ±_GL_TOLERANCE band, or None if no valid combo exists.
     """
@@ -120,7 +120,7 @@ def _best_qty_combo(
     best_combo: list[float] | None = None
     best_delta = float("inf")
 
-    for qtys in itertools.product(_VALID_QUANTITIES, repeat=len(gl_per_recipe)):
+    for qtys in itertools.product(VALID_QUANTITIES, repeat=len(gl_per_recipe)):
         combo_gl = sum(g * q for g, q in zip(gl_per_recipe, qtys))
         total_gl = fixed_gl + combo_gl
         if lo <= total_gl <= hi:
