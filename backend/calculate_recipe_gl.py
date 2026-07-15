@@ -10,8 +10,11 @@ plan.py / lp_optimizer.py):
 GI_Avg is looked up from SubCategory_foods_GI_GL via Recipe.Recipe_Category == Code
 (NOT RecipeTagging.Subcategories — that's a separate code and not what the model joins on).
 
-Output columns: Recipe_Code, Recipe_Name, Energy_Kcal, Portion, Recipe_Weight_g, Description, GL, Ingredients
-`Ingredients` is a dict of {ingredient_name: "qty unit"} sourced from Recipes_ingredient.
+Output columns: Recipe_Code, Recipe_Name, Recipe_Category, Category_Name, Energy_Kcal,
+Carbohydrate_g, Fibre_g, Portion, Recipe_Weight_g, Description, GL, Ingredients
+`Ingredients` is a dict of {ingredient_name: Ing_raw_amounts_g}, sourced from
+Recipes_ingredient and sorted high to low by raw amount (g).
+Category_Name is looked up from SubCategory via Recipe_Category == Code.
 """
 
 import pandas as pd
@@ -45,19 +48,12 @@ def fetch_all(table: str, columns: str = "*") -> pd.DataFrame:
 
 def build_ingredient_dicts(ing_df: pd.DataFrame, codes: set[str]) -> dict[str, dict]:
     ing_df = ing_df[ing_df["Recipe_Code"].astype(str).str.strip().isin(codes)].copy()
-
-    def fmt_qty(row) -> str:
-        qty = row.get("Qty")
-        unit = row.get("Unit")
-        qty_str = "" if pd.isna(qty) else str(qty)
-        unit_str = "" if pd.isna(unit) or not str(unit).strip() else str(unit).strip()
-        return f"{qty_str} {unit_str}".strip()
-
-    ing_df["quantity"] = ing_df.apply(fmt_qty, axis=1)
+    ing_df["Ing_raw_amounts_g"] = pd.to_numeric(ing_df["Ing_raw_amounts_g"], errors="coerce").fillna(0.0)
 
     result: dict[str, dict] = {}
     for code, group in ing_df.groupby("Recipe_Code"):
-        result[code] = dict(zip(group["Ingredients"], group["quantity"]))
+        group = group.sort_values("Ing_raw_amounts_g", ascending=False)
+        result[code] = dict(zip(group["Ingredients"], group["Ing_raw_amounts_g"]))
     return result
 
 
@@ -87,6 +83,7 @@ def main() -> None:
     for col in ["Energy_ENERC_KJ", "Carbohydrate_g", "TotalDietaryFibre_FIBTG_g"]:
         recipe_df[col] = pd.to_numeric(recipe_df[col], errors="coerce")
     recipe_df["TotalDietaryFibre_FIBTG_g"] = recipe_df["TotalDietaryFibre_FIBTG_g"].fillna(0)
+    recipe_df = recipe_df.rename(columns={"TotalDietaryFibre_FIBTG_g": "Fibre_g"})
 
     # 4. GI lookup by subcategory code
     gi_df = fetch_all("SubCategory_foods_GI_GL", "Code,GI_Avg")
@@ -96,6 +93,12 @@ def main() -> None:
 
     recipe_df = recipe_df.merge(gi_df, on="Recipe_Category", how="left")
 
+    # 4b. Category name lookup (Recipe_Category -> SubCategory name)
+    subcat_df = fetch_all("SubCategory", "Code,SubCategory")
+    subcat_df = subcat_df.rename(columns={"Code": "Recipe_Category", "SubCategory": "Category_Name"})
+    subcat_df = subcat_df.drop_duplicates(subset=["Recipe_Category"])
+    recipe_df = recipe_df.merge(subcat_df, on="Recipe_Category", how="left")
+
     # 5. Compute Energy_Kcal and GL
     recipe_df["Energy_Kcal"] = recipe_df["Energy_ENERC_KJ"] / 4.184
     # recipe_df["GL"] = (
@@ -104,12 +107,24 @@ def main() -> None:
     recipe_df["GL"] = (recipe_df["GI"] * recipe_df["Carbohydrate_g"]) / 100.0
 
     # 6. Ingredient dicts
-    ing_df = fetch_all("Recipes_ingredient", "Recipe_Code,Ingredients,Qty,Unit")
+    ing_df = fetch_all("Recipes_ingredient", "Recipe_Code,Ingredients,Ing_raw_amounts_g")
     ing_map = build_ingredient_dicts(ing_df, codes)
 
     # 7. Assemble final dataframe
     final_df = tag_df.merge(
-        recipe_df[["Recipe_Code", "Energy_Kcal", "GL"]], on="Recipe_Code", how="left"
+        recipe_df[
+            [
+                "Recipe_Code",
+                "Recipe_Category",
+                "Category_Name",
+                "Energy_Kcal",
+                "Carbohydrate_g",
+                "Fibre_g",
+                "GL",
+            ]
+        ],
+        on="Recipe_Code",
+        how="left",
     )
     final_df["Ingredients"] = final_df["Recipe_Code"].map(ing_map)
 
@@ -117,7 +132,11 @@ def main() -> None:
         [
             "Recipe_Code",
             "Recipe_Name",
+            "Recipe_Category",
+            "Category_Name",
             "Energy_Kcal",
+            "Carbohydrate_g",
+            "Fibre_g",
             "Portion",
             "Recipe_Weight_g",
             "Description",
