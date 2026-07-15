@@ -84,6 +84,11 @@ def get_recall_history(
     # gets filled in) so callers never have to special-case it: an unreviewed or
     # rejected photo simply doesn't show up as "logged" yet.
     def _is_confirmed(r: dict) -> bool:
+        # Photo rows may carry the participant's upload-time did_eat_as_planned
+        # answer before review, so for them only a filled-in Food_Name (set at
+        # approval) counts as confirmed.
+        if r.get("image_url_pre") or r.get("image_url_post"):
+            return bool(r.get("Food_Name"))
         if r.get("Food_Name"):
             return True
         if r.get("did_eat_as_planned"):
@@ -169,6 +174,7 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         meal_slot=body.meal_slot,
         image_url_pre=body.image_url_pre,
         image_url_post=body.image_url_post,
+        did_eat_as_planned=body.did_eat_as_planned,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
 

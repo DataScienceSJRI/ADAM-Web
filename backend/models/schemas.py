@@ -136,8 +136,12 @@ class DietRecallImageRequest(BaseModel):
     meal_slot: MealSlot
     image_url_pre: Optional[str] = None
     image_url_post: Optional[str] = None
+    # Participant's own answer to "did you eat as planned?", captured at upload
+    # time. Stored on the placeholder DietRecall row and preserved when the
+    # coordinator approves the review (which otherwise defaults it to False).
+    did_eat_as_planned: Optional[bool] = None
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None, "did_eat_as_planned": False}}}
 
 
 class RecipeWithQty(BaseModel):

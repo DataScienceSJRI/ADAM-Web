@@ -307,6 +307,24 @@ class TestPostRecallImage:
         assert kw["image_url_pre"] == "https://storage/pre.jpg"
         assert kw["image_url_post"] is None
 
+    def test_did_eat_as_planned_forwarded(self, client):
+        with patch("routers.recall.log_recall_image", return_value=("rc-p", "rv-p")) as fn:
+            r = client.post(f"{BASE}/image", json={
+                **self._BASE,
+                "image_url_pre": "https://storage/pre.jpg",
+                "did_eat_as_planned": True,
+            })
+        assert r.status_code == 200
+        assert fn.call_args.kwargs["did_eat_as_planned"] is True
+
+    def test_did_eat_as_planned_defaults_to_none(self, client):
+        with patch("routers.recall.log_recall_image", return_value=("rc-q", "rv-q")) as fn:
+            client.post(f"{BASE}/image", json={
+                **self._BASE,
+                "image_url_pre": "https://storage/pre.jpg",
+            })
+        assert fn.call_args.kwargs["did_eat_as_planned"] is None
+
     def test_post_image_only_triggers_upsert_path(self, client):
         with patch("routers.recall.log_recall_image", return_value=("rc-2", "rv-2")) as fn:
             r = client.post(f"{BASE}/image", json={

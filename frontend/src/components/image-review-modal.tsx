@@ -48,6 +48,12 @@ interface FoodItem {
   match_status?: string;
   candidates?: MatchCandidate[];
   consumption?: { pre_quantity_g: number; post_quantity_g: number; consumed_g: number };
+  // From the matched recipe's RecipeTagging row: Portion (full-serving size in
+  // the recipe's own unit), Portion weight (g), and the unit label. Used to
+  // show quantities in the same unit DietRecall stores (Food_Qty / R_desc).
+  portion?: number | null;
+  recipe_weight_g?: number | null;
+  unit_desc?: string | null;
   [key: string]: unknown;
 }
 
@@ -405,8 +411,30 @@ function flattenFoodResult(f: Record<string, unknown>): FoodItem {
     quantity_confidence: (quantity?.quantity_confidence ?? f.quantity_confidence) as string | undefined,
     quantity_method: (quantity?.quantity_method ?? f.quantity_method) as string | undefined,
     match_status: (match?.status ?? f.match_status) as string | undefined,
+    portion: (matched?.portion ?? null) as number | null,
+    recipe_weight_g: (matched?.recipe_weight_g ?? null) as number | null,
+    unit_desc: (matched?.recipe_description ?? null) as string | null,
     candidates,
   } as FoodItem;
+}
+
+/** Quantity in the matched recipe's own portion unit (e.g. "1.8 Cup") — the
+ * same srv × Portion conversion build_diet_recall_food_rows uses when saving
+ * Food_Qty, so the review shows what will land in DietRecall. Falls back to
+ * grams ÷ Portion weight (g) when the AI gave no serving multiplier. */
+function nativeQuantity(f: FoodItem): { qty: number; unit: string } | null {
+  if (f.portion == null || !f.unit_desc) return null;
+  const servings = f.consumption
+    ? f.recipe_weight_g
+      ? f.consumption.consumed_g / f.recipe_weight_g
+      : null
+    : f.serving_multiplier != null
+      ? f.serving_multiplier
+      : f.quantity_g != null && f.recipe_weight_g
+        ? f.quantity_g / f.recipe_weight_g
+        : null;
+  if (servings == null) return null;
+  return { qty: parseFloat((servings * f.portion).toFixed(2)), unit: f.unit_desc };
 }
 
 function parseAi(raw: string | null | undefined): ParsedAi {
@@ -433,6 +461,7 @@ const CONF: Record<string, string> = {
 function FoodCard({ f, index }: { f: FoodItem; index: number }) {
   const name = f.recipe_name ?? f.description ?? "Unknown food";
   const desc = f.recipe_name && f.description && f.recipe_name !== f.description ? f.description : null;
+  const native = nativeQuantity(f);
   return (
     <div className="flex items-start justify-between gap-3 rounded-xl border px-3.5 py-3 text-sm">
       <div className="min-w-0 space-y-0.5">
@@ -446,7 +475,9 @@ function FoodCard({ f, index }: { f: FoodItem; index: number }) {
       <div className="shrink-0 text-right space-y-1">
         {f.consumption ? (
           <>
-            <p className="font-semibold text-sm tabular-nums">{Math.round(f.consumption.consumed_g)} g eaten</p>
+            <p className="font-semibold text-sm tabular-nums">
+              {native ? `${native.qty} ${native.unit} eaten` : `${Math.round(f.consumption.consumed_g)} g eaten`}
+            </p>
             <p className="text-[11px] text-muted-foreground tabular-nums">
               Served {Math.round(f.consumption.pre_quantity_g)}g → Left {Math.round(f.consumption.post_quantity_g)}g
             </p>
@@ -454,21 +485,26 @@ function FoodCard({ f, index }: { f: FoodItem; index: number }) {
         ) : f.serving_multiplier != null ? (
           <>
             <p className="font-semibold text-sm tabular-nums">
-              {parseFloat(f.serving_multiplier.toFixed(2))} srv
+              {native ? `${native.qty} ${native.unit}` : `${parseFloat(f.serving_multiplier.toFixed(2))} srv`}
             </p>
-            {f.quantity_g != null && (
-              <p className="text-[11px] text-muted-foreground tabular-nums">
-                {Math.round(f.quantity_g)} g
-              </p>
-            )}
+            <p className="text-[11px] text-muted-foreground tabular-nums">
+              {parseFloat(f.serving_multiplier.toFixed(2))} srv
+              {f.quantity_g != null && ` · ${Math.round(f.quantity_g)} g`}
+            </p>
           </>
         ) : f.quantity_g != null ? (
           <>
-            <p className="font-semibold text-sm tabular-nums">{Math.round(f.quantity_g)} g</p>
-            {f.quantity_g_min != null && f.quantity_g_max != null && (
-              <p className="text-[10px] text-muted-foreground tabular-nums">
-                {Math.round(f.quantity_g_min)}–{Math.round(f.quantity_g_max)} g
-              </p>
+            <p className="font-semibold text-sm tabular-nums">
+              {native ? `${native.qty} ${native.unit}` : `${Math.round(f.quantity_g)} g`}
+            </p>
+            {native ? (
+              <p className="text-[11px] text-muted-foreground tabular-nums">{Math.round(f.quantity_g)} g</p>
+            ) : (
+              f.quantity_g_min != null && f.quantity_g_max != null && (
+                <p className="text-[10px] text-muted-foreground tabular-nums">
+                  {Math.round(f.quantity_g_min)}–{Math.round(f.quantity_g_max)} g
+                </p>
+              )
             )}
           </>
         ) : null}

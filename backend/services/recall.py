@@ -494,27 +494,30 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
         return False
 
     sb = get_supabase()
+    base_resp = sb.table("DietRecall").select("user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post, did_eat_as_planned").eq("ID", diet_recall_id).limit(1).execute()
+    base_row = base_resp.data[0] if base_resp.data else {}
+    # Keep the participant's upload-time answer to "did you eat as planned?"
+    # where one was given; photo logs without it keep the old default of False.
+    ate_as_planned = bool(base_row.pop("did_eat_as_planned", None))
+
     first, *rest = field_rows
     sb.table("DietRecall").update({
         **first,
-        "did_eat_as_planned": False,
+        "did_eat_as_planned": ate_as_planned,
         "notes": "verified",
         "verified_by_coordinator": True,
     }).eq("ID", diet_recall_id).execute()
 
-    if rest:
-        base_resp = sb.table("DietRecall").select("user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post").eq("ID", diet_recall_id).limit(1).execute()
-        base_row = base_resp.data[0] if base_resp.data else {}
-        for fields in rest:
-            sb.table("DietRecall").insert({
-                "ID": str(uuid.uuid4()),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "did_eat_as_planned": False,
-                "notes": "verified",
-                "verified_by_coordinator": True,
-                **base_row,
-                **fields,
-            }).execute()
+    for fields in rest:
+        sb.table("DietRecall").insert({
+            "ID": str(uuid.uuid4()),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "did_eat_as_planned": ate_as_planned,
+            "notes": "verified",
+            "verified_by_coordinator": True,
+            **base_row,
+            **fields,
+        }).execute()
 
     return True
 
@@ -533,6 +536,7 @@ def log_recall_image(
     meal_slot: MealSlot,
     image_url_pre: Optional[str],
     image_url_post: Optional[str],
+    did_eat_as_planned: Optional[bool] = None,
 ) -> tuple[str, str]:
     sb = get_supabase()
     now = datetime.now(timezone.utc)
@@ -555,7 +559,10 @@ def log_recall_image(
         )
         if existing_recalls:
             recall_id = existing_recalls[0]["ID"]
-            sb.table("DietRecall").update({"image_url_post": image_url_post}).eq("ID", recall_id).execute()
+            patch = {"image_url_post": image_url_post}
+            if did_eat_as_planned is not None:
+                patch["did_eat_as_planned"] = did_eat_as_planned
+            sb.table("DietRecall").update(patch).eq("ID", recall_id).execute()
             existing_review = (
                 sb.table("MealImageReview")
                 .select("id, review_status")
@@ -575,7 +582,7 @@ def log_recall_image(
     recall_id = str(uuid.uuid4())
     review_id = str(uuid.uuid4())
 
-    sb.table("DietRecall").insert({
+    placeholder = {
         "ID": recall_id,
         "user_id": user_id,
         "Date": today,
@@ -585,7 +592,10 @@ def log_recall_image(
         "meal_slot": meal_slot.value,
         "image_url_pre": image_url_pre,
         "image_url_post": image_url_post,
-    }).execute()
+    }
+    if did_eat_as_planned is not None:
+        placeholder["did_eat_as_planned"] = did_eat_as_planned
+    sb.table("DietRecall").insert(placeholder).execute()
 
     sb.table("MealImageReview").insert({
         "id": review_id,
