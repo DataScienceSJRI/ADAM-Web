@@ -41,21 +41,46 @@ def _round_food_qty(qty: Optional[float]) -> Optional[float]:
     return rounded
 
 
-def _latest_plan_id(user_id: str) -> Optional[str]:
-    """Return the most recently created successful plan_id for the user."""
+def _latest_plan_id(user_id: str, target_date: Optional[str] = None) -> Optional[str]:
+    """Return the plan_id that actually has rows for target_date.
+
+    BE_Onboarding_Sessions.plan_id is NOT a history: _write_plan_status()
+    does an UPDATE keyed on onboarding_id, so each newly generated plan
+    overwrites the previous plan_id there. Once a next-week plan has been
+    auto-generated (day 6, 9pm IST), that column only points at the NEW
+    plan even while target_date still falls in the OLD (still-current)
+    week, so resolving via that table returns an empty result for a date
+    that does have data. Recommendation itself is the only place plan
+    history survives, so resolve straight from it. Falls back to the
+    latest plan_id from BE_Onboarding_Sessions only when no plan has any
+    row for target_date (e.g. a date outside any generated week).
+    """
     sb = get_supabase()
+    if target_date is not None:
+        date_resp = (
+            sb.table("Recommendation")
+            .select("plan_id, Pkey")
+            .eq("user_id", user_id)
+            .eq("Date", target_date)
+            .execute()
+        )
+        rows = date_resp.data or []
+        if rows:
+            # Normally exactly one plan_id covers a given date. If more than
+            # one does (e.g. a regenerated plan left stale rows behind),
+            # prefer the one with the highest Pkey (most recently inserted).
+            return max(rows, key=lambda r: r.get("Pkey") or 0)["plan_id"]
+
     resp = (
         sb.table("BE_Onboarding_Sessions")
-        .select("plan_id, created_at")
+        .select("plan_id")
         .eq("user_id", user_id)
         .not_.is_("plan_id", "null")
         .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
-    if resp.data:
-        return resp.data[0]["plan_id"]
-    return None
+    return resp.data[0]["plan_id"] if resp.data else None
 
 
 @router.get("/daily", response_model=DailyPlanResponse)
@@ -66,7 +91,7 @@ def get_daily_plan(
 ):
     """Return the authenticated user's meals for the given date from their latest plan."""
     target_date = plan_date or str(date_type.today())
-    active_plan_id = plan_id or _latest_plan_id(user_id)
+    active_plan_id = plan_id or _latest_plan_id(user_id, target_date)
 
     if not active_plan_id:
         return DailyPlanResponse(date=target_date, meals=[])

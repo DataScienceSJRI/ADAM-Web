@@ -61,17 +61,38 @@ def _fetch_slot_gl(sb, user_id: str, date: str, meal_slot: MealSlot) -> tuple[fl
     """
     timings = SLOT_TO_TIMINGS[meal_slot]
 
-    # Resolve the active plan_id by taking the most recently created plan for this user
-    plan_resp = (
-        sb.table("BE_Onboarding_Sessions")
-        .select("plan_id")
+    # Resolve the active plan_id as the one that actually has rows for `date`.
+    # BE_Onboarding_Sessions.plan_id is NOT a history: it's UPDATEd keyed on
+    # onboarding_id, so each newly generated plan overwrites the previous
+    # plan_id there. Once a next-week plan has been auto-generated (day 6,
+    # 9pm IST), that column only points at the NEW plan even while `date`
+    # still falls in the OLD (still-current) week, causing this to match
+    # zero rows for a date that does have data. Recommendation itself is the
+    # only place plan history survives, so resolve straight from it.
+    date_resp = (
+        sb.table("Recommendation")
+        .select("plan_id, Pkey")
         .eq("user_id", user_id)
-        .not_.is_("plan_id", "null")
-        .order("created_at", desc=True)
-        .limit(1)
+        .eq("Date", date)
         .execute()
     )
-    active_plan_id = (plan_resp.data[0].get("plan_id") if plan_resp.data else None)
+    date_rows = date_resp.data or []
+    if date_rows:
+        # Normally exactly one plan_id covers a given date. If more than one
+        # does (e.g. a regenerated plan left stale rows behind), prefer the
+        # one with the highest Pkey (most recently inserted).
+        active_plan_id = max(date_rows, key=lambda r: r.get("Pkey") or 0)["plan_id"]
+    else:
+        plan_resp = (
+            sb.table("BE_Onboarding_Sessions")
+            .select("plan_id")
+            .eq("user_id", user_id)
+            .not_.is_("plan_id", "null")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        active_plan_id = plan_resp.data[0]["plan_id"] if plan_resp.data else None
 
     query = (
         sb.table("Recommendation")

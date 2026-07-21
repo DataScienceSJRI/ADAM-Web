@@ -376,7 +376,7 @@ def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     Also includes "per_day": an energy-weighted average of total daily GL
     (all slots combined) over the same window."""
     sb = get_supabase()
-    plan_id = _latest_plan_id(sb, user_id)
+    plan_id = _latest_plan_id(sb, user_id, target_date)
     planned = _planned_gl_by_meal(sb, user_id, plan_id, target_date)
     actual = _actual_gl_by_meal(sb, user_id, target_date)
 
@@ -448,7 +448,35 @@ def _latest_weight(sb, user_id: str) -> Optional[dict]:
     return {"weight_kg": weight_kg, "date": log_date, "days_ago": days_ago, "source": source}
 
 
-def _latest_plan_id(sb, user_id: str) -> Optional[str]:
+def _latest_plan_id(sb, user_id: str, target_date: Optional[str] = None) -> Optional[str]:
+    """Return the plan_id that actually has rows for target_date.
+
+    BE_Onboarding_Sessions.plan_id is NOT a history: it's UPDATEd keyed on
+    onboarding_id, so each newly generated plan overwrites the previous
+    plan_id there. Once a next-week plan has been auto-generated (day 6,
+    9pm IST), that column only points at the NEW plan even while
+    target_date still falls in the OLD (still-current) week, so resolving
+    via that table returns an empty result for a date that does have data.
+    Recommendation itself is the only place plan history survives, so
+    resolve straight from it. Falls back to the latest plan_id from
+    BE_Onboarding_Sessions only when no plan has any row for target_date
+    (e.g. a date outside any generated week).
+    """
+    if target_date is not None:
+        date_resp = (
+            sb.table("Recommendation")
+            .select("plan_id, Pkey")
+            .eq("user_id", user_id)
+            .eq("Date", target_date)
+            .execute()
+        )
+        rows = date_resp.data or []
+        if rows:
+            # Normally exactly one plan_id covers a given date. If more than
+            # one does (e.g. a regenerated plan left stale rows behind),
+            # prefer the one with the highest Pkey (most recently inserted).
+            return max(rows, key=lambda r: r.get("Pkey") or 0)["plan_id"]
+
     resp = (
         sb.table("BE_Onboarding_Sessions")
         .select("plan_id")
@@ -472,7 +500,7 @@ def get_kpi(
     """
     sb = get_supabase()
     target_date = plan_date or str(date.today())
-    plan_id = _latest_plan_id(sb, user_id)
+    plan_id = _latest_plan_id(sb, user_id, target_date)
     latest_weight = _latest_weight(sb, user_id)
 
     if not plan_id:
