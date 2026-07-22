@@ -66,6 +66,7 @@ interface ParsedAi {
 // ─── Recipe picker types ──────────────────────────────────────────────────────
 
 type RecipeHit = { code: string; name: string; category: string | null };
+type PendingConversion = { amount: number; kind: "g" | "srv" } | null;
 
 type PickerEntry = {
   id: string;
@@ -75,7 +76,9 @@ type PickerEntry = {
   selected: { code: string; name: string } | null;
   qty: string;
   unit: string;
+  unitLoading: boolean;
   candidates: MatchCandidate[];
+  pendingConversion: PendingConversion;
 };
 
 let _pid = 0;
@@ -88,30 +91,45 @@ function newEntry(partial: Partial<PickerEntry> = {}): PickerEntry {
     selected: null,
     qty: "",
     unit: "g",
+    unitLoading: false,
     candidates: [],
+    pendingConversion: null,
     ...partial,
   };
 }
 
 function initPickers(foods: FoodItem[]): PickerEntry[] {
   if (foods.length === 0) return [newEntry()];
-  return foods.map((f) =>
-    newEntry({
+  return foods.map((f) => {
+    const selected = (f.recipe_name || f.description)
+      ? { code: f.recipe_code ?? "", name: f.recipe_name ?? f.description ?? "" }
+      : null;
+
+    let qty = "";
+    let pendingConversion: PendingConversion = null;
+    if (f.consumption) {
+      qty = String(Math.round(f.consumption.consumed_g));
+      pendingConversion = { amount: f.consumption.consumed_g, kind: "g" };
+    } else if (f.serving_multiplier != null) {
+      qty = String(parseFloat(f.serving_multiplier.toFixed(2)));
+      pendingConversion = { amount: f.serving_multiplier, kind: "srv" };
+    } else if (f.quantity_g != null) {
+      qty = String(Math.round(f.quantity_g));
+      pendingConversion = { amount: f.quantity_g, kind: "g" };
+    }
+
+    // Only recipes with a real code can have their unit looked up in
+    // RecipeTagging — a plain AI description with no matched recipe stays "g".
+    const canFetchUnit = !!(selected && f.recipe_code);
+    return newEntry({
       query: f.recipe_name ?? f.description ?? "",
-      selected: (f.recipe_name || f.description)
-        ? { code: f.recipe_code ?? "", name: f.recipe_name ?? f.description ?? "" }
-        : null,
-      qty: f.consumption
-        ? String(Math.round(f.consumption.consumed_g))
-        : f.serving_multiplier != null
-          ? String(parseFloat(f.serving_multiplier.toFixed(2)))
-          : f.quantity_g != null
-            ? String(Math.round(f.quantity_g))
-            : "",
-      unit: f.consumption ? "g" : f.serving_multiplier != null ? "srv" : "g",
+      selected,
+      qty,
+      unitLoading: canFetchUnit,
+      pendingConversion: canFetchUnit ? pendingConversion : null,
       candidates: f.candidates ?? [],
-    })
-  );
+    });
+  });
 }
 function pickerSourceFoods(review: MealImageReview): FoodItem[] {
   const consumption = parseAi(review.consumption_result);
@@ -133,7 +151,7 @@ function serializePickers(pickers: PickerEntry[]): ConfirmedFood[] {
       recipe_code: p.selected?.code || null,
       recipe_name: p.selected?.name ?? p.query.trim(),
       quantity: p.qty ? parseFloat(p.qty) : null,
-      unit: p.unit === "__custom__" ? "" : p.unit,
+      unit: p.unit,
     }));
 }
 
@@ -154,7 +172,6 @@ function displayReviewedFoods(raw: string): string {
   return raw;
 }
 
-const PRESET_UNITS = ["g", "srv", "cup", "bowl", "piece", "tsp", "tbsp"];
 
 function UnitRow({
   entry,
@@ -165,11 +182,6 @@ function UnitRow({
   disabled: boolean;
   onChange: (partial: Partial<PickerEntry>) => void;
 }) {
-  const isCustom = !PRESET_UNITS.includes(entry.unit);
-  const selectValue = isCustom ? "__custom__" : entry.unit;
-  const [customText, setCustomText] = useState(isCustom ? entry.unit : "");
-  const customRef = useRef<HTMLInputElement>(null);
-
   return (
     <div className="flex items-center gap-2 pt-0.5">
       <input
@@ -182,37 +194,9 @@ function UnitRow({
         step="0.5"
         className="w-16 rounded-lg border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 tabular-nums"
       />
-      <select
-        value={selectValue}
-        onChange={(e) => {
-          if (e.target.value === "__custom__") {
-            setCustomText("");
-            onChange({ unit: "__custom__" });
-            setTimeout(() => customRef.current?.focus(), 0);
-          } else {
-            onChange({ unit: e.target.value });
-          }
-        }}
-        disabled={disabled}
-        className="rounded-lg border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50 cursor-pointer"
-      >
-        {PRESET_UNITS.map((u) => (
-          <option key={u} value={u}>{u}</option>
-        ))}
-        <option value="__custom__">custom…</option>
-      </select>
-      {isCustom && (
-        <input
-          ref={customRef}
-          type="text"
-          value={customText}
-          onChange={(e) => setCustomText(e.target.value)}
-          onBlur={() => onChange({ unit: customText || "__custom__" })}
-          disabled={disabled}
-          placeholder="e.g. glass, slice"
-          className="w-24 rounded-lg border bg-background px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
-        />
-      )}
+      <span className="flex items-center justify-center gap-1 min-w-[3.5rem] rounded-lg border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
+        {entry.unitLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : entry.unit}
+      </span>
     </div>
   );
 }
@@ -236,6 +220,46 @@ function RecipeSearchPicker({
 }) {
   const [searchQuery, setSearchQuery] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** Fetches the recipe's fixed portion unit from RecipeTagging. When `pending`
+   * is set (only true for the entry's initial AI-sourced quantity), the qty
+   * gets converted from grams/servings into that unit once Portion data is
+   * known; otherwise (a coordinator manually swapping the recipe) the qty was
+   * already cleared by the caller and is left alone. */
+  async function loadUnit(code: string, pending: PendingConversion) {
+    try {
+      const res = await fetch(`/api/recipes/${encodeURIComponent(code)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) { onChange({ unitLoading: false }); return; }
+      const data = await res.json() as {
+        tagging?: { Description?: string | null; Portion?: number | string | null; "Portion weight (g)"?: number | string | null } | null;
+      };
+      const tag = data.tagging;
+      const unit = (tag?.Description ? String(tag.Description).trim() : "") || "g";
+      const portion = tag?.Portion != null ? parseFloat(String(tag.Portion)) : null;
+      const portionWeightG = tag?.["Portion weight (g)"] != null ? parseFloat(String(tag["Portion weight (g)"])) : null;
+
+      let qty: string | undefined;
+      if (pending && portion) {
+        if (pending.kind === "srv") {
+          qty = String(parseFloat((pending.amount * portion).toFixed(2)));
+        } else if (pending.kind === "g" && portionWeightG) {
+          qty = String(parseFloat(((pending.amount / portionWeightG) * portion).toFixed(2)));
+        }
+      }
+      onChange({ unit, unitLoading: false, pendingConversion: null, ...(qty !== undefined ? { qty } : {}) });
+    } catch {
+      onChange({ unitLoading: false });
+    }
+  }
+
+  useEffect(() => {
+    if (entry.selected?.code && entry.unitLoading) {
+      loadUnit(entry.selected.code, entry.pendingConversion);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function doSearch(q: string) {
     setSearchQuery(q);
@@ -265,17 +289,19 @@ function RecipeSearchPicker({
   }
 
   function selectHit(r: RecipeHit) {
-    onChange({ selected: { code: r.code, name: r.name }, results: [] });
+    onChange({ selected: { code: r.code, name: r.name }, results: [], qty: "", unit: "g", unitLoading: true, pendingConversion: null });
     setSearchQuery("");
+    loadUnit(r.code, null);
   }
 
   function selectCandidate(c: MatchCandidate) {
     const name = c.recipe_name ?? c.recipe_code;
-    onChange({ selected: { code: c.recipe_code, name } });
+    onChange({ selected: { code: c.recipe_code, name }, qty: "", unit: "g", unitLoading: true, pendingConversion: null });
+    loadUnit(c.recipe_code, null);
   }
 
   function clearSelected() {
-    onChange({ selected: null });
+    onChange({ selected: null, qty: "", unit: "g", unitLoading: false, pendingConversion: null });
     setSearchQuery("");
   }
 
