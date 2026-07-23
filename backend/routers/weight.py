@@ -5,6 +5,7 @@ from core.auth import get_current_user
 from core.roles import require_coordinator
 from core.supabase import get_supabase
 from models.schemas import WeightLogRequest, WeightLogUpdateRequest, WeightLogResponse, WeightLogItem
+from services.recommendation_writer import get_plan_status
 
 logger = logging.getLogger("backend.routers.weight")
 
@@ -12,14 +13,97 @@ router = APIRouter(prefix="/weight", tags=["weight"])
 
 _MIN_KG = 20.0
 _MAX_KG = 300.0
+_MAX_DELTA_KG = 5.0
+
+_SAFETY_MESSAGE = (
+    "This weight value violates our safety/tolerance rules "
+    "(too far from your previous log, or outside the allowed bounds)."
+)
 
 
 def _validate_weight(weight_kg: float) -> None:
     if not (_MIN_KG <= weight_kg <= _MAX_KG):
         raise HTTPException(
             status_code=422,
-            detail=f"Weight must be between {_MIN_KG} and {_MAX_KG} kg.",
+            detail={
+                "message": _SAFETY_MESSAGE,
+                "error_code": "out_of_bounds",
+                "weight_kg": weight_kg,
+                "min_kg": _MIN_KG,
+                "max_kg": _MAX_KG,
+            },
         )
+
+
+def _validate_against_anchor(weight_kg: float, anchor_kg: float | None) -> None:
+    if anchor_kg is None:
+        return
+    delta = abs(weight_kg - anchor_kg)
+    if delta > _MAX_DELTA_KG:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": _SAFETY_MESSAGE,
+                "error_code": "tolerance_exceeded",
+                "weight_kg": weight_kg,
+                "anchor_kg": anchor_kg,
+                "max_delta_kg": _MAX_DELTA_KG,
+            },
+        )
+
+
+def _cycle_bounds_for_date(user_id: str, log_date: date_type) -> tuple[date_type, date_type] | None:
+    """Return the (start_date, end_date) of the plan cycle containing log_date, if any."""
+    for p in get_plan_status(user_id)["plans"]:
+        start, end = p.get("start_date"), p.get("end_date")
+        if start and end and date_type.fromisoformat(start) <= log_date <= date_type.fromisoformat(end):
+            return date_type.fromisoformat(start), date_type.fromisoformat(end)
+    return None
+
+
+def _onboarding_weight(sb, user_id: str) -> float | None:
+    bd = (
+        sb.table("BE_Basic_Details")
+        .select("Weight")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return bd.data[0]["Weight"] if bd.data and bd.data[0].get("Weight") is not None else None
+
+
+def _anchor_weight(sb, user_id: str, log_date: date_type, exclude_log_id: str | None = None) -> float | None:
+    bounds = _cycle_bounds_for_date(user_id, log_date)
+    if bounds:
+        start, end = bounds
+        resp = (
+            sb.table("user_weight_log")
+            .select("id, weight_kg")
+            .eq("user_id", user_id)
+            .gte("date", start.isoformat())
+            .lte("date", end.isoformat())
+            .order("date")
+            .limit(2)
+            .execute()
+        )
+        rows = [r for r in (resp.data or []) if r.get("id") != exclude_log_id]
+        if rows:
+            return rows[0]["weight_kg"]
+
+    prior = (
+        sb.table("user_weight_log")
+        .select("id, weight_kg")
+        .eq("user_id", user_id)
+        .order("date", desc=True)
+        .limit(2)
+        .execute()
+    )
+    prior_rows = [r for r in (prior.data or []) if r.get("id") != exclude_log_id]
+    if prior_rows:
+        return prior_rows[0]["weight_kg"]
+
+    return _onboarding_weight(sb, user_id)
 
 
 # ─── Participant endpoints ──────────────────────────────────────────────────────
@@ -47,6 +131,7 @@ def log_weight(body: WeightLogRequest, user_id: str = Depends(get_current_user))
     _validate_weight(body.weight_kg)
     sb = get_supabase()
     date_str = body.date or str(date_type.today())
+    _validate_against_anchor(body.weight_kg, _anchor_weight(sb, user_id, date_type.fromisoformat(date_str)))
 
     existing = (
         sb.table("user_weight_log")
@@ -84,13 +169,20 @@ def update_weight_log(
     sb = get_supabase()
     existing = (
         sb.table("user_weight_log")
-        .select("id")
+        .select("id, date")
         .eq("id", log_id)
         .eq("user_id", user_id)
         .execute()
     )
     if not existing.data:
         raise HTTPException(status_code=404, detail="Log entry not found.")
+
+    if body.weight_kg is not None:
+        entry_date = body.date or existing.data[0].get("date")
+        _validate_against_anchor(
+            body.weight_kg,
+            _anchor_weight(sb, user_id, date_type.fromisoformat(entry_date), exclude_log_id=log_id),
+        )
 
     update_data: dict = {}
     if body.weight_kg is not None:
