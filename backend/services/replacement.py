@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
+from services.profile_builder import build_profile
 
 VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
 _GL_TOLERANCE = 0.20   # ±20% band around original meal GL
@@ -17,6 +18,150 @@ _ENERGY_TARGET_KCAL: dict = {
     MealSlot.DINNER: 600.0,
     MealSlot.SNACK: 200.0,
 }
+
+
+def _fetch_adam_approved_codes(sb) -> set[str]:
+    """Recipe codes flagged ADAM_Recipes == 1 in Rec_ADAM_yes_no — the same
+    eligibility gate calculate_recipe_gl.py and the main plan-generation
+    pipeline use. Candidates outside this set shouldn't surface as swap
+    suggestions even if they're otherwise a good GL match."""
+    rows = sb.table("Rec_ADAM_yes_no").select("Recipe_Code, ADAM_Recipes").execute().data or []
+    return {
+        str(r["Recipe_Code"]).strip().upper()
+        for r in rows
+        if r.get("Recipe_Code") and str(r.get("ADAM_Recipes")) == "1"
+    }
+
+
+_DIET_COLUMN_MAP = {
+    "veg": "Vegetarian",
+    "vegan": "Vegetarian",
+    "non-veg": "Non vegetarian",
+    "egg": "Ovo-vegetarian",
+    "ovo-veg": "Ovo-vegetarian",
+}
+
+
+def _fetch_diet_allowed_codes(sb, diet_type: Optional[str]) -> Optional[set[str]]:
+    """
+    Recipe codes allowed under the user's dietary_type preference — same
+    columns/logic as services/data_loader.py's live filter (what the main
+    plan-generation pipeline uses), reading RecipeTagging's 1/0
+    "Vegetarian"/"Ovo-vegetarian" columns. "non-veg" and unknown/missing
+    diet_type both mean no filtering (matches the main pipeline exactly),
+    signalled by returning None rather than an empty/permissive set.
+    """
+    col = _DIET_COLUMN_MAP.get((diet_type or "").strip().lower())
+    if col is None or col == "Non vegetarian":
+        return None
+
+    rows = (
+        sb.table("RecipeTagging")
+        .select("Recipe_Code, Vegetarian, \"Ovo-vegetarian\"")
+        .execute()
+        .data
+    ) or []
+
+    def _as_float(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    allowed: set[str] = set()
+    for r in rows:
+        code = r.get("Recipe_Code")
+        if not code:
+            continue
+        veg = _as_float(r.get("Vegetarian"))
+        if col == "Ovo-vegetarian":
+            ovo = _as_float(r.get("Ovo-vegetarian"))
+            ok = (veg == 1) or (veg == 0 and ovo == 1)
+        else:
+            ok = veg == 1
+        if ok:
+            allowed.add(str(code).strip().upper())
+    return allowed
+
+
+def _fetch_excluded_recipe_codes(sb, user_id: str) -> set[str]:
+    """
+    Union of recipes that should never be shown to this user — same
+    sources/logic as services/data_loader.py's live filters:
+
+    - Explicitly disliked: Recipes_LU (UID + Interaction=="U") and
+      Recommendation rows where Reaction or Combo_Reaction == "dislike"
+      (Food_Name_desc is the recipe code column there).
+    - Allergens: BE_Preference_onboarding_details.health_details
+      .allergy_food_codes (ingredient codes), mapped to recipes via
+      Recipes_ingredient.Ing_Id -> Recipe_Code.
+    """
+    excluded: set[str] = set()
+
+    lu_rows = (
+        sb.table("Recipes_LU").select("Recipe_Code").eq("UID", user_id).eq("Interaction", "U").execute().data
+    ) or []
+    excluded.update(str(r["Recipe_Code"]).strip().upper() for r in lu_rows if r.get("Recipe_Code"))
+
+    reaction_rows = (
+        sb.table("Recommendation")
+        .select("Food_Name_desc")
+        .eq("user_id", user_id)
+        .eq("Reaction", "dislike")
+        .execute()
+        .data
+    ) or []
+    excluded.update(str(r["Food_Name_desc"]).strip().upper() for r in reaction_rows if r.get("Food_Name_desc"))
+
+    combo_rows = (
+        sb.table("Recommendation")
+        .select("Food_Name_desc")
+        .eq("user_id", user_id)
+        .eq("Combo_Reaction", "dislike")
+        .execute()
+        .data
+    ) or []
+    excluded.update(str(r["Food_Name_desc"]).strip().upper() for r in combo_rows if r.get("Food_Name_desc"))
+
+    health_rows = (
+        sb.table("BE_Preference_onboarding_details").select("health_details").eq("user_id", user_id).execute().data
+    ) or []
+    allergy_codes: set[str] = set()
+    for row in health_rows:
+        details = row.get("health_details")
+        if isinstance(details, dict):
+            allergy_codes.update(str(c).strip() for c in (details.get("allergy_food_codes") or []) if c is not None)
+
+    if allergy_codes:
+        ing_rows = (
+            sb.table("Recipes_ingredient")
+            .select("Recipe_Code, Ing_Id")
+            .in_("Ing_Id", list(allergy_codes))
+            .execute()
+            .data
+        ) or []
+        excluded.update(str(r["Recipe_Code"]).strip().upper() for r in ing_rows if r.get("Recipe_Code"))
+
+    return excluded
+
+
+def _fetch_eligible_codes(sb, user_id: str) -> set[str]:
+    """
+    Combines all eligibility gates candidates must pass to surface as a swap
+    suggestion: ADAM-approved, matches the user's dietary preference, and
+    isn't disliked or an allergen — the same pool the main plan-generation
+    pipeline draws from (services/data_loader.py), minus the meal-slot tag
+    filter (deliberately not applied here — see _rank_alternatives_for_recipe).
+    """
+    eligible = _fetch_adam_approved_codes(sb)
+
+    profile = build_profile(user_id)
+    diet_allowed = _fetch_diet_allowed_codes(sb, profile.get("diet_type") if profile else None)
+    if diet_allowed is not None:
+        eligible &= diet_allowed
+
+    eligible -= _fetch_excluded_recipe_codes(sb, user_id)
+    return eligible
 
 
 def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
@@ -300,7 +445,7 @@ def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[Rec
 
 
 def _rank_alternatives_for_recipe(
-    sb, recipe_code: str, quantity: float
+    sb, recipe_code: str, quantity: float, eligible_codes: set[str]
 ) -> tuple[Optional[float], Optional[str], list[RecipeWithQty]]:
     """
     "Same_category" group: up to 3 alternatives sharing the same
@@ -310,6 +455,11 @@ def _rank_alternatives_for_recipe(
     tag is inconsistently populated in RecipeTagging (e.g. some egg dishes are
     tagged for no slot at all) and would otherwise hide valid same-subcategory
     swaps.
+
+    Candidates are restricted to eligible_codes (ADAM-approved, matches the
+    user's dietary preference, not disliked/allergenic — see
+    _fetch_eligible_codes) so suggestions stay within the same pool the plan
+    itself was built from.
 
     Returns (original_gl, subcat, alternatives) — original_gl/subcat are None
     if the recipe or its subcategory couldn't be resolved.
@@ -324,6 +474,7 @@ def _rank_alternatives_for_recipe(
         .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
         .eq("Recipe_Category", subcat)
         .neq("Recipe_Code", rc)
+        .in_("Recipe_Code", list(eligible_codes))
         .limit(20)
         .execute()
     )
@@ -446,12 +597,18 @@ def _new_mapping_subcategories(sb, target_subcat: str, companion_subcats: set[st
 
 
 def _rank_new_mapping_for_recipe(
-    sb, recipe_code: str, original_gl: float, target_subcat: str, user_id: str, date: str, meal_slot: MealSlot
+    sb, recipe_code: str, original_gl: float, target_subcat: str, user_id: str, date: str, meal_slot: MealSlot,
+    eligible_codes: set[str],
 ) -> list[RecipeWithQty]:
     """
     "New_mapping" group: up to 3 alternatives from subcategories that pair
     with whatever else is already planned in this meal (via
     Main1_Main2_Mapping Subcategory), ranked the same way as Same_category.
+
+    Candidates are restricted to eligible_codes (ADAM-approved, matches the
+    user's dietary preference, not disliked/allergenic — see
+    _fetch_eligible_codes) so suggestions stay within the same pool the plan
+    itself was built from.
     """
     rc = str(recipe_code).strip()
     companion_subcats = _fetch_companion_subcategories(sb, user_id, date, meal_slot, rc)
@@ -467,6 +624,7 @@ def _rank_new_mapping_for_recipe(
         .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
         .in_("Recipe_Category", list(candidate_subcats))
         .neq("Recipe_Code", rc)
+        .in_("Recipe_Code", list(eligible_codes))
         .limit(20)
         .execute()
     )
@@ -565,20 +723,24 @@ def get_preapproved_replacements(
             )
             resolved_quantities.append(1.0)
 
+    eligible_codes = _fetch_eligible_codes(sb, user_id)
+
     per_recipe_same_category: list[list[RecipeWithQty]] = []
     per_recipe_new_mapping: list[list[RecipeWithQty]] = []
     total_original_gl = 0.0
     any_valid = False
 
     for rc, qty in zip(recipe_codes, resolved_quantities):
-        original_gl, subcat, same_cat_alts = _rank_alternatives_for_recipe(sb, rc, qty)
+        original_gl, subcat, same_cat_alts = _rank_alternatives_for_recipe(sb, rc, qty, eligible_codes)
         if original_gl is None:
             continue
         any_valid = True
         total_original_gl += original_gl
         per_recipe_same_category.append(same_cat_alts)
 
-        new_mapping_alts = _rank_new_mapping_for_recipe(sb, rc, original_gl, subcat, user_id, date, meal_slot)
+        new_mapping_alts = _rank_new_mapping_for_recipe(
+            sb, rc, original_gl, subcat, user_id, date, meal_slot, eligible_codes
+        )
         per_recipe_new_mapping.append(new_mapping_alts)
 
     def _transpose(per_recipe: list[list[RecipeWithQty]]) -> list[list[RecipeWithQty]]:
