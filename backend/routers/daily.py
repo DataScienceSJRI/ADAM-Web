@@ -106,10 +106,10 @@ def get_daily_plan(
         .execute()
     )
 
-    # Fetch GL data: GL per recipe, Meal_GL per timing
+    # Fetch GL and optimal recipe weight data: per recipe, plus Meal_GL per timing
     gl_result = (
         sb.table("FinalSummary")
-        .select("Meal_Time, Recipe_Code, GL, Meal_GL")
+        .select("Meal_Time, Recipe_Code, GL, Meal_GL, Recipe_weight_optimal_g")
         .eq("user_id", user_id)
         .eq("plan_id", active_plan_id)
         .eq("Date", target_date)
@@ -118,6 +118,7 @@ def get_daily_plan(
 
     # Build lookup maps from FinalSummary
     gl_by_item: dict = {}       # (Meal_Time, Recipe_Code) → GL
+    weight_by_item: dict = {}   # (Meal_Time, Recipe_Code) → Recipe_weight_optimal_g
     meal_gl_by_timing: dict = {}  # Meal_Time → Meal_GL (first non-null wins)
     for row in (gl_result.data or []):
         timing = (row.get("Meal_Time") or "").strip()
@@ -126,10 +127,11 @@ def get_daily_plan(
         meal_gl = row.get("Meal_GL")
         if timing and code:
             gl_by_item[(timing, code)] = gl
+            weight_by_item[(timing, code)] = row.get("Recipe_weight_optimal_g")
         if timing and meal_gl is not None and timing not in meal_gl_by_timing:
             meal_gl_by_timing[timing] = meal_gl
 
-    # Attach per-item GL and accumulate per-timing kcal
+    # Attach per-item GL, optimal recipe weight, and accumulate per-timing kcal
     meals: List[DailyMealItem] = []
     kcal_by_timing: dict = {}
     seen_timings: list = []
@@ -137,6 +139,7 @@ def get_daily_plan(
         timing = (row.get("Timings") or "").strip()
         code = (row.get("Food_Name_desc") or "").strip()
         row["GL"] = gl_by_item.get((timing, code))
+        row["Recipe_weight_optimal_g"] = weight_by_item.get((timing, code))
         row["Food_Qty"] = _round_food_qty(row.get("Food_Qty"))
 
         kcal = row.get("Energy_kcal")

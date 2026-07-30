@@ -227,6 +227,7 @@ class DailyMealItem(BaseModel):
     R_desc: Optional[str] = None
     Energy_kcal: Optional[float] = None
     GL: Optional[float] = None
+    Recipe_weight_optimal_g: Optional[float] = None
 
     model_config = {"extra": "allow"}
 

@@ -54,6 +54,30 @@ def _compute_gl_map(sb, recipe_rows: list[dict]) -> dict[str, float]:
     return result
 
 
+def _fetch_portion_map(sb, recipe_codes: list[str]) -> dict[str, float]:
+    """RecipeTagging.Portion per recipe code — the reference amount Recipe's
+    nutrient columns (Carbohydrate_g etc.) were computed for. Needed to turn an
+    absolute Food_Qty (e.g. "4.2 cups") into a proportion (Food_Qty / Portion)
+    before scaling a full-portion GL/energy value, same convention
+    services/recall.py's gl_for_quantity uses."""
+    if not recipe_codes:
+        return {}
+    rows = (
+        sb.table("RecipeTagging")
+        .select("Recipe_Code, Portion")
+        .in_("Recipe_Code", recipe_codes)
+        .execute()
+        .data
+    ) or []
+    result = {}
+    for r in rows:
+        try:
+            result[str(r["Recipe_Code"])] = float(r["Portion"])
+        except (TypeError, ValueError, KeyError):
+            continue
+    return result
+
+
 def _fetch_slot_gl(sb, user_id: str, date: str, meal_slot: MealSlot) -> tuple[float, list[dict]]:
     """
     Return (total_gl, slot_rows) for the user's current plan for the given slot.
@@ -120,7 +144,18 @@ def _fetch_slot_gl(sb, user_id: str, date: str, meal_slot: MealSlot) -> tuple[fl
 
     gl_map = _compute_gl_map(sb, recipe_rows)
     qty_map = {str(r["Food_Name_desc"]): float(r.get("Food_Qty") or 1.0) for r in slot_rows}
-    total_gl = sum(gl_map.get(rc, 0.0) * qty_map.get(rc, 1.0) for rc in codes)
+    portion_map = _fetch_portion_map(sb, codes)
+    # Food_Qty is an absolute quantity in the recipe's own portion unit (e.g.
+    # "4.2 cups") — divide by Portion to get the proportion of a full portion
+    # gl_map's per-recipe value represents, matching services/recall.py's
+    # gl_for_quantity. Falls back to treating Food_Qty as already-a-proportion
+    # only when Portion is unknown (missing RecipeTagging row).
+    def _proportion(rc: str) -> float:
+        qty = qty_map.get(rc, 1.0)
+        portion = portion_map.get(rc)
+        return (qty / portion) if portion and portion > 0 else qty
+
+    total_gl = sum(gl_map.get(rc, 0.0) * _proportion(rc) for rc in codes)
     return total_gl, slot_rows
 
 
@@ -299,14 +334,16 @@ def request_on_demand_replacement(
         logger.info("on_demand: possible=False — recipes not found: %s", missing)
         return OnDemandReplacementResponse(possible=False)
 
-    # Pick up Description here (the recipe's real portion unit, e.g. "2 pieces",
-    # "1 cup" — same column services/recall.py uses) so results don't all just say "serving".
+    # Pick up Description/Portion/"Portion weight (g)" here (the recipe's real portion
+    # unit e.g. "2 pieces", plus what's needed to convert the chosen proportion into an
+    # absolute Food_Qty and a Recipe_weight_optimal_g — same columns services/recall.py
+    # and plan generation use).
     # No meal-slot tag check — that tag is inconsistently populated in RecipeTagging
     # (e.g. some egg dishes are tagged for no slot at all) and would otherwise reject
     # valid same-subcategory swaps.
     tag_resp = (
         sb.table("RecipeTagging")
-        .select("Recipe_Code, Description")
+        .select("Recipe_Code, Description, Portion, \"Portion weight (g)\"")
         .in_("Recipe_Code", recipe_codes)
         .execute()
     )
@@ -315,9 +352,18 @@ def request_on_demand_replacement(
         for row in (tag_resp.data or [])
         if row.get("Description") and str(row["Description"]).strip().lower() not in ("nan", "none", "")
     }
+    portion_map = {
+        row["Recipe_Code"]: float(row["Portion"])
+        for row in (tag_resp.data or [])
+        if row.get("Portion") is not None
+    }
+    portion_weight_map = {
+        row["Recipe_Code"]: row.get("Portion weight (g)")
+        for row in (tag_resp.data or [])
+    }
 
     # Fetch current slot rows for plan metadata (plan_id, WeekNo etc.) and original recipes' GL
-    _, all_slot_rows = _fetch_slot_gl(sb, user_id, date, meal_slot)
+    original_slot_total_gl, all_slot_rows = _fetch_slot_gl(sb, user_id, date, meal_slot)
 
     # Determine which recipes are being replaced and compute their current GL as the target
     replaced_set = set(original_recipe_codes) if original_recipe_codes else {
@@ -342,7 +388,17 @@ def request_on_demand_replacement(
             str(r["Food_Name_desc"]): float(r.get("Food_Qty") or 1.0)
             for r in all_slot_rows if str(r.get("Food_Name_desc") or "") in replaced_set
         }
-        target_gl = sum(orig_gl_map.get(rc, 0.0) * orig_qty_map.get(rc, 1.0) for rc in original_codes_in_plan)
+        # Food_Qty is an absolute quantity (e.g. "4.2 cups") — divide by the
+        # original recipe's Portion to recover the proportion orig_gl_map's
+        # full-portion GL needs to be scaled by (same fix as _fetch_slot_gl).
+        orig_portion_map = _fetch_portion_map(sb, original_codes_in_plan)
+
+        def _orig_proportion(rc: str) -> float:
+            qty = orig_qty_map.get(rc, 1.0)
+            portion = orig_portion_map.get(rc)
+            return (qty / portion) if portion and portion > 0 else qty
+
+        target_gl = sum(orig_gl_map.get(rc, 0.0) * _orig_proportion(rc) for rc in original_codes_in_plan)
 
     logger.info("on_demand: target_gl=%.2f (GL of recipes being replaced)", target_gl)
 
@@ -408,7 +464,16 @@ def request_on_demand_replacement(
                     "Timings": timings,
                     "Food_Name": item.recipe_name,
                     "Food_Name_desc": item.recipe_code,
-                    "Food_Qty": item.quantity,
+                    # item.quantity is a proportion (0.5/1/1.5/2 of a full portion);
+                    # store the absolute quantity in the recipe's own portion unit
+                    # (e.g. "4.2 cups"), same convention write_recommendations uses
+                    # for plan-generated rows, so Food_Qty means the same thing
+                    # everywhere it's read (_fetch_slot_gl, KPI planned-GL trend, etc.)
+                    "Food_Qty": (
+                        round(item.quantity * portion_map[item.recipe_code], 1)
+                        if item.recipe_code in portion_map
+                        else item.quantity
+                    ),
                     "Energy_kcal": energy_by_code.get(item.recipe_code),
                 }
                 for item in combination
@@ -416,5 +481,58 @@ def request_on_demand_replacement(
         ).execute()
     except Exception as exc:
         logger.warning("Could not update Recommendation for on-demand replacement: %s", exc)
+
+    # Keep FinalSummary in sync (GET /plan/daily reads GL and Recipe_weight_optimal_g
+    # from there) — RecommendationsBackup is intentionally left untouched, it's an
+    # immutable snapshot of the original plan and stays that way.
+    try:
+        if existing_plan_id:
+            # Drop stale rows for the recipes being replaced
+            sb.table("FinalSummary").delete().eq("user_id", user_id).eq(
+                "plan_id", existing_plan_id
+            ).eq("Date", date).eq("Meal_Time", timings).in_(
+                "Recipe_Code", list(replaced_set)
+            ).execute()
+
+            # item.quantity IS the proportion here (same convention _compute_gl_map
+            # uses — GL = base_gl * qty, no separate division by Portion), so it
+            # plays the same role as "Optimal proportion"/Serving in plan generation.
+            # portion_weight_map was already fetched above (alongside desc_map/portion_map).
+            sb.table("FinalSummary").insert(
+                [
+                    {
+                        "plan_id": existing_plan_id,
+                        "user_id": user_id,
+                        "Date": date,
+                        "Meal_Time": timings,
+                        "Recipe_Code": item.recipe_code,
+                        "Recipe_Name": item.recipe_name,
+                        "Optimal_proportion": item.quantity,
+                        "Recipe_weight_optimal_g": (
+                            round(float(portion_weight_map[item.recipe_code]) * item.quantity, 2)
+                            if portion_weight_map.get(item.recipe_code) is not None
+                            else None
+                        ),
+                        "Energy_ENERC_Kcal": energy_by_code.get(item.recipe_code),
+                        "GL": item.gl,
+                    }
+                    for item in combination
+                ]
+            ).execute()
+
+            # Recompute this slot's total GL (untouched recipes' contribution +
+            # the new combination's) and sync it onto every row in the slot, so
+            # Meal_GL stays correct regardless of which row a reader picks first.
+            new_meal_gl = round(
+                (original_slot_total_gl - target_gl) + sum(item.gl or 0.0 for item in combination),
+                2,
+            )
+            sb.table("FinalSummary").update({"Meal_GL": new_meal_gl}).eq(
+                "user_id", user_id
+            ).eq("plan_id", existing_plan_id).eq("Date", date).eq(
+                "Meal_Time", timings
+            ).execute()
+    except Exception as exc:
+        logger.warning("Could not update FinalSummary for on-demand replacement: %s", exc)
 
     return OnDemandReplacementResponse(possible=True, combination=combination)
