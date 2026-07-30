@@ -466,6 +466,145 @@ def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     return result
 
 
+def build_recipe_compliance(user_id: str) -> dict:
+    """
+    Compliance against everything planned in RecommendationsBackup over the
+    trailing GL_TREND_WINDOW_DAYS (14) days up to (and including) yesterday,
+    cross-referenced against DietRecall. Two summaries, merged per slot:
+
+    - Occasion-level (slots_recommended / slots_logged / logging_compliance_pct):
+      how many days had a plan for that slot vs how many of those days had
+      ANY DietRecall entry logged at all (any identified-or-not entry counts
+      — "just an entry is enough", it doesn't need to match the plan).
+    - Recipe-level (recipes_recommended / recipes_followed / following_compliance_pct):
+      how many individual planned recipes vs how many were matched exactly
+      (same Recipe_Code logged for the same Date + slot). A planned recipe
+      with no matching recall counts as NOT followed, not excluded/unknown.
+
+    Uses RecommendationsBackup (not Recommendation) since it's the immutable
+    history of everything ever planned, unlike Recommendation which only
+    holds the current/live plan. Matching is by Recipe_Code only — quantity
+    doesn't affect whether a planned recipe counts as followed.
+
+    Window is the trailing 14 days ending yesterday (today/future dates can't
+    have been complied with yet), same width as the GL trend elsewhere in
+    this file.
+    """
+    sb = get_supabase()
+    yesterday_date = date.today() - timedelta(days=1)
+    yesterday = str(yesterday_date)
+    start = str(yesterday_date - timedelta(days=GL_TREND_WINDOW_DAYS - 1))
+
+    def _pct(n: int, d: int) -> Optional[float]:
+        return round(n / d * 100, 1) if d else None
+
+    empty_row = {
+        "slots_recommended": 0,
+        "slots_logged": 0,
+        "logging_compliance_pct": None,
+        "recipes_recommended": 0,
+        "recipes_followed": 0,
+        "following_compliance_pct": None,
+    }
+
+    planned_rows = (
+        sb.table("RecommendationsBackup")
+        .select("Date, Timings, Food_Name_desc")
+        .eq("user_id", user_id)
+        .gte("Date", start)
+        .lte("Date", yesterday)
+        .execute()
+        .data
+    ) or []
+
+    if not planned_rows:
+        return {
+            "by_meal_slot": {slot: dict(empty_row) for slot in MEAL_SLOTS},
+            "overall": dict(empty_row),
+        }
+
+    recall_rows = (
+        sb.table("DietRecall")
+        .select("Date, meal_slot, Food_Name_desc")
+        .eq("user_id", user_id)
+        .gte("Date", start)
+        .lte("Date", yesterday)
+        .execute()
+        .data
+    ) or []
+
+    # Any recall entry at all for a (date, slot) — identified or not.
+    logged_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
+    for r in recall_rows:
+        slot = str(r.get("meal_slot") or "").strip().lower()
+        d = r.get("Date")
+        if slot in logged_occasions and d:
+            logged_occasions[slot].add(str(d)[:10])
+
+    # Identified recall codes only, for exact recipe-level matching.
+    recalled_codes = {
+        (str(r["Date"])[:10], str(r.get("meal_slot") or "").strip().lower(), str(r["Food_Name_desc"]).strip())
+        for r in recall_rows
+        if r.get("Date") and r.get("Food_Name_desc")
+    }
+
+    planned_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
+    recipe_totals: dict[str, dict] = {slot: {"planned": 0, "matched": 0} for slot in MEAL_SLOTS}
+    total = 0
+    matched = 0
+
+    for row in planned_rows:
+        d = row.get("Date")
+        timing = str(row.get("Timings") or "").strip()
+        code = row.get("Food_Name_desc")
+        if not d or not code:
+            continue
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(timing)
+        if slot is None:
+            continue
+
+        d_norm = str(d)[:10]
+        planned_occasions[slot].add(d_norm)
+
+        total += 1
+        recipe_totals[slot]["planned"] += 1
+        if (d_norm, slot, str(code).strip()) in recalled_codes:
+            matched += 1
+            recipe_totals[slot]["matched"] += 1
+
+    by_meal_slot = {}
+    for slot in MEAL_SLOTS:
+        slots_recommended = len(planned_occasions[slot])
+        slots_logged = len(logged_occasions[slot] & planned_occasions[slot])
+        recipes_recommended = recipe_totals[slot]["planned"]
+        recipes_followed = recipe_totals[slot]["matched"]
+        by_meal_slot[slot] = {
+            "slots_recommended": slots_recommended,
+            "slots_logged": slots_logged,
+            "logging_compliance_pct": _pct(slots_logged, slots_recommended),
+            "recipes_recommended": recipes_recommended,
+            "recipes_followed": recipes_followed,
+            "following_compliance_pct": _pct(recipes_followed, recipes_recommended),
+        }
+
+    total_slots_recommended = sum(v["slots_recommended"] for v in by_meal_slot.values())
+    total_slots_logged = sum(v["slots_logged"] for v in by_meal_slot.values())
+
+    overall = {
+        "slots_recommended": total_slots_recommended,
+        "slots_logged": total_slots_logged,
+        "logging_compliance_pct": _pct(total_slots_logged, total_slots_recommended),
+        "recipes_recommended": total,
+        "recipes_followed": matched,
+        "following_compliance_pct": _pct(matched, total),
+    }
+
+    return {
+        "by_meal_slot": by_meal_slot,
+        "overall": overall,
+    }
+
+
 def _latest_weight(sb, user_id: str) -> Optional[dict]:
     """Most recent entry from user_weight_log (routers/weight.py), falling back
     to the onboarding profile's Weight (BE_Basic_Details) if the user has never
@@ -570,6 +709,7 @@ def get_kpi(
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
             "gl_by_meal": build_gl_by_meal(user_id, target_date),
+            "recipe_compliance": build_recipe_compliance(user_id),
             "latest_weight": latest_weight,
             "message": "No plan found.",
         }
@@ -593,6 +733,7 @@ def get_kpi(
             "nutrition": {"carbs_g": 0, "protein_g": 0, "fat_g": 0, "fibre_g": 0},
             "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
             "gl_by_meal": build_gl_by_meal(user_id, target_date),
+            "recipe_compliance": build_recipe_compliance(user_id),
             "latest_weight": latest_weight,
             "message": "No meals found for this date.",
         }
@@ -639,5 +780,6 @@ def get_kpi(
         },
         "nutrient_summary": build_daily_nutrient_summary(user_id, target_date),
         "gl_by_meal": build_gl_by_meal(user_id, target_date),
+        "recipe_compliance": build_recipe_compliance(user_id),
         "latest_weight": latest_weight,
     }
