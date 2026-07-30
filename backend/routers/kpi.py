@@ -7,6 +7,7 @@ from core.auth import get_current_user
 from core.supabase import get_supabase
 from services.data_loader import _fetch_cached
 from services.profile_builder import build_profile
+from services.recall import fetch_base_gl_map, fetch_portion_map, gl_for_quantity
 
 router = APIRouter(prefix="/kpi", tags=["kpi"])
 logger = logging.getLogger("backend.routers.kpi")
@@ -312,6 +313,55 @@ def _gl_energy_daily_totals(sb, user_id: str, target_date: str) -> tuple:
     return daily_gl, daily_energy
 
 
+def _planned_gl_energy_daily_totals(sb, user_id: str, target_date: str) -> tuple:
+    """Sum PLANNED (menu) GL and Energy per (date, meal_slot) over the same
+    GL_TREND_WINDOW_DAYS window as _gl_energy_daily_totals, sourced from
+    RecommendationsBackup rather than Recommendation — RecommendationsBackup
+    is an immutable snapshot of every plan ever written (see
+    services/recommendation_writer.write_recommendations), so a 14-day lookback
+    still works even after older weeks have rolled off the live Recommendation
+    table. Same row format as Recommendation (Food_Name_desc = Recipe_Code,
+    Food_Qty, Timings, Energy_kcal).
+
+    RecommendationsBackup doesn't store GL directly — only Food_Qty and
+    Energy_kcal — so GL is derived the same way DietRecall's actual GL is
+    (services/recall.py): base GL per recipe scaled by the eaten fraction
+    (Food_Qty / RecipeTagging.Portion), keeping planned and actual GL
+    directly comparable.
+    """
+    target = date.fromisoformat(target_date)
+    start = target - timedelta(days=GL_TREND_WINDOW_DAYS)
+    rows = (
+        sb.table("RecommendationsBackup")
+        .select("Date, Timings, Food_Name_desc, Food_Qty, Energy_kcal")
+        .eq("user_id", user_id)
+        .gte("Date", str(start))
+        .lt("Date", target_date)
+        .execute()
+        .data
+    ) or []
+
+    codes = list({str(r["Food_Name_desc"]) for r in rows if r.get("Food_Name_desc")})
+    base_gl_map = fetch_base_gl_map(sb, codes)
+    portion_map = fetch_portion_map(sb, codes)
+
+    daily_gl: dict = {}
+    daily_energy: dict = {}
+    for r in rows:
+        d = (r.get("Date") or "")[:10]
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(str(r.get("Timings", "")).strip())
+        if not d or slot is None:
+            continue
+        key = (d, slot)
+        code = r.get("Food_Name_desc")
+        gl = gl_for_quantity(base_gl_map.get(code), portion_map.get(code), r.get("Food_Qty"))
+        if gl is not None:
+            daily_gl[key] = daily_gl.get(key, 0.0) + gl
+        if r.get("Energy_kcal") is not None:
+            daily_energy[key] = daily_energy.get(key, 0.0) + float(r["Energy_kcal"])
+    return daily_gl, daily_energy
+
+
 def _weighted_avg_gl_by_meal(daily_gl: dict, daily_energy: dict) -> dict:
     """Energy-weighted average GL per meal slot from the shared (date, slot)
     totals: weighted_avg = Σ(GL_day * Energy_day) / Σ(Energy_day) — a day you
@@ -371,10 +421,13 @@ def _gl_indicator(yesterday_value: Optional[float], avg_value: Optional[float]) 
 def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     """Per-meal-slot GL dashboard: today's planned GL (from the menu), today's
     actual GL (from DietRecall), an energy-weighted average of actual GL for
-    that same slot over the past GL_TREND_WINDOW_DAYS days, yesterday's actual
-    GL, and a Good/Poor indicator comparing yesterday to that weighted average.
-    Also includes "per_day": an energy-weighted average of total daily GL
-    (all slots combined) over the same window."""
+    that same slot over the past GL_TREND_WINDOW_DAYS days, an energy-weighted
+    average of PLANNED GL for that slot over the same window (from
+    RecommendationsBackup — what the menu had him doing vs. what he actually
+    did), yesterday's actual GL, and a Good/Poor indicator comparing yesterday
+    to the actual weighted average. Also includes "per_day": an energy-weighted
+    average of total daily GL (all slots combined) over the same window, for
+    both actual and planned."""
     sb = get_supabase()
     plan_id = _latest_plan_id(sb, user_id, target_date)
     planned = _planned_gl_by_meal(sb, user_id, plan_id, target_date)
@@ -387,11 +440,16 @@ def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     trend = _weighted_avg_gl_by_meal(daily_gl, daily_energy)
     per_day_trend = _weighted_avg_gl_per_day(daily_gl, daily_energy)
 
+    planned_daily_gl, planned_daily_energy = _planned_gl_energy_daily_totals(sb, user_id, target_date)
+    planned_trend = _weighted_avg_gl_by_meal(planned_daily_gl, planned_daily_energy)
+    planned_per_day_trend = _weighted_avg_gl_per_day(planned_daily_gl, planned_daily_energy)
+
     result = {
         slot: {
             "planned": planned[slot],
             "actual": actual[slot],
             "weighted_avg_past_14d": trend[slot],
+            "weighted_avg_past_14d_planned": planned_trend[slot],
             "yesterday": yesterday[slot],
             "indicator": _gl_indicator(yesterday[slot], trend[slot]),
         }
@@ -401,6 +459,7 @@ def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     yesterday_per_day = round(sum(yesterday_slot_values), 2) if yesterday_slot_values else None
     result["per_day"] = {
         "weighted_avg_past_14d": per_day_trend,
+        "weighted_avg_past_14d_planned": planned_per_day_trend,
         "yesterday": yesterday_per_day,
         "indicator": _gl_indicator(yesterday_per_day, per_day_trend),
     }

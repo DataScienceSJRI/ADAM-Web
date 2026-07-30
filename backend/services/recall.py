@@ -54,7 +54,7 @@ def compute_energy_for_quantity(recipe_code: Optional[str], food_qty) -> Optiona
     return int(round(float(recipe["Energy_ENERC_KJ"]) / 4.184 * prop))
 
 
-def _base_gl_map(sb, recipe_codes: List[str]) -> dict:
+def fetch_base_gl_map(sb, recipe_codes: List[str]) -> dict:
     """Base Glycemic Load (per one full portion) for each recipe code.
 
     GL = GI_Avg * Carbohydrate_g / 100 — same formula
@@ -100,7 +100,7 @@ def _base_gl_map(sb, recipe_codes: List[str]) -> dict:
     return base_gl
 
 
-def _portion_map(sb, recipe_codes: List[str]) -> dict:
+def fetch_portion_map(sb, recipe_codes: List[str]) -> dict:
     if not recipe_codes:
         return {}
     tag_rows = (
@@ -109,7 +109,7 @@ def _portion_map(sb, recipe_codes: List[str]) -> dict:
     return {t["Recipe_Code"]: t.get("Portion") for t in tag_rows if t.get("Recipe_Code")}
 
 
-def _gl_for_quantity(base_gl: Optional[float], portion, food_qty) -> Optional[float]:
+def gl_for_quantity(base_gl: Optional[float], portion, food_qty) -> Optional[float]:
     if base_gl is None or food_qty is None:
         return None
     try:
@@ -127,9 +127,9 @@ def compute_gl_for_quantity(recipe_code: Optional[str], food_qty) -> Optional[fl
     if not recipe_code or food_qty is None:
         return None
     sb = get_supabase()
-    base_gl = _base_gl_map(sb, [recipe_code]).get(recipe_code)
-    portion = _portion_map(sb, [recipe_code]).get(recipe_code)
-    return _gl_for_quantity(base_gl, portion, food_qty)
+    base_gl = fetch_base_gl_map(sb, [recipe_code]).get(recipe_code)
+    portion = fetch_portion_map(sb, [recipe_code]).get(recipe_code)
+    return gl_for_quantity(base_gl, portion, food_qty)
 
 
 def log_recall(
@@ -156,8 +156,8 @@ def log_recall(
             )
 
         planned_codes = [item.get("Food_Name_desc") for item in planned if item.get("Food_Name_desc")]
-        base_gl_map = _base_gl_map(sb, planned_codes)
-        portion_map = _portion_map(sb, planned_codes)
+        base_gl_map = fetch_base_gl_map(sb, planned_codes)
+        portion_map = fetch_portion_map(sb, planned_codes)
 
         for item in planned:
             recall_id = str(uuid.uuid4())
@@ -177,7 +177,7 @@ def log_recall(
                 "Food_Qty": food_qty,
                 "R_desc": item.get("R_desc"),
                 "Energy_Kcal": int(round(float(item["Energy_kcal"]))) if item.get("Energy_kcal") is not None else None,
-                "GL": _gl_for_quantity(base_gl_map.get(code), portion_map.get(code), food_qty),
+                "GL": gl_for_quantity(base_gl_map.get(code), portion_map.get(code), food_qty),
             }
             sb.table("DietRecall").insert(row).execute()
             recall_ids.append(recall_id)
@@ -207,7 +207,7 @@ def log_recall(
 
             tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description, Portion").in_("Recipe_Code", codes_to_log).execute()
             tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
-            base_gl_map = _base_gl_map(sb, codes_to_log)
+            base_gl_map = fetch_base_gl_map(sb, codes_to_log)
 
             for i, code in enumerate(codes_to_log):
                 recall_id = str(uuid.uuid4())
@@ -253,7 +253,7 @@ def log_recall(
                     # Store the entered quantity as-is (absolute, same unit as the
                     # "ate as planned" path's Food_Qty) so both paths mean the same thing.
                     row["Food_Qty"] = qty
-                    row["GL"] = _gl_for_quantity(base_gl_map.get(code), tag_info.get("Portion"), qty)
+                    row["GL"] = gl_for_quantity(base_gl_map.get(code), tag_info.get("Portion"), qty)
                 sb.table("DietRecall").insert(row).execute()
                 recall_ids.append(recall_id)
 
@@ -286,7 +286,7 @@ def build_diet_recall_food_rows(confirmed_foods: List[dict]) -> List[dict]:
     tag_resp = sb.table("RecipeTagging").select("*").in_("Recipe_Code", codes).execute()
     tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
 
-    base_gl_map = _base_gl_map(sb, codes)
+    base_gl_map = fetch_base_gl_map(sb, codes)
 
     rows = []
     for f in confirmed_foods:
