@@ -251,7 +251,8 @@ class ReplacementsResponse(BaseModel):
     day: int
     meal_slot: MealSlot
     original_gl: Optional[float] = None
-    alternatives: List[List[RecipeWithQty]]
+    same_category: List[List[RecipeWithQty]]
+    new_mapping: List[List[RecipeWithQty]] = []
 
 
 class ActivityLogResponse(BaseModel):

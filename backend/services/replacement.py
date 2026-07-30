@@ -1,6 +1,6 @@
 import itertools
 import logging
-from typing import List
+from typing import List, Optional
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
@@ -188,114 +188,414 @@ def _best_qty_combo(
     return best_combo
 
 
+_SUGGESTION_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0, 2.5]
+
+
+def _resolve_original_gl(sb, recipe_code: str, quantity: float) -> tuple[Optional[float], Optional[str]]:
+    """
+    Fetch recipe_code's Recipe_Category and compute its GL at `quantity`.
+
+    `quantity` is the recipe's CURRENT ABSOLUTE quantity (same convention as
+    Food_Qty elsewhere, e.g. "10" for 10 almonds) — converted to a proportion
+    via RecipeTagging.Portion before scaling the full-portion GL, same fix
+    applied in request_on_demand_replacement / _fetch_slot_gl.
+
+    Returns (original_gl, subcat) — both None if the recipe or its
+    subcategory couldn't be resolved.
+    """
+    rc = str(recipe_code).strip()
+    target_resp = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
+        .eq("Recipe_Code", rc)
+        .execute()
+    )
+    if not target_resp.data:
+        return None, None
+
+    row0 = target_resp.data[0]
+    subcat = row0.get("Recipe_Category", "")
+    if not subcat:
+        return None, None
+
+    base_gl_original = _compute_gl_map(sb, [row0]).get(rc, 0.0)
+    original_portion = _fetch_portion_map(sb, [rc]).get(rc)
+    original_proportion = (quantity / original_portion) if original_portion and original_portion > 0 else quantity
+    return base_gl_original * original_proportion, subcat
+
+
+def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[RecipeWithQty]:
+    """
+    Given a pool of Recipe rows and a target original_gl, score each candidate
+    at whichever of _SUGGESTION_QUANTITIES (as a proportion of its own full
+    portion) lands its GL closest to original_gl — so a candidate isn't
+    penalised just because 1 of its own servings has very different carbs
+    than 1 of the original's. Ranks by that gap, returns the top 3 with
+    quantity expressed as an absolute amount (via RecipeTagging.Portion).
+    """
+    if not candidates:
+        return []
+
+    cand_codes = [row["Recipe_Code"] for row in candidates]
+
+    # Pick up Description (the recipe's real portion unit, e.g. "2 pieces", "1 cup"
+    # — same column services/recall.py uses) and Portion (to convert the chosen
+    # proportion back into an absolute quantity) in one batch.
+    tag_resp = (
+        sb.table("RecipeTagging")
+        .select("Recipe_Code, Description, Portion")
+        .in_("Recipe_Code", cand_codes)
+        .execute()
+    )
+    desc_map = {
+        row["Recipe_Code"]: str(row["Description"]).strip()
+        for row in (tag_resp.data or [])
+        if row.get("Description") and str(row["Description"]).strip().lower() not in ("nan", "none", "")
+    }
+    cand_portion_map = {
+        row["Recipe_Code"]: float(row["Portion"])
+        for row in (tag_resp.data or [])
+        if row.get("Portion") is not None
+    }
+
+    gl_map = _compute_gl_map(sb, candidates)
+
+    scored: list[dict] = []
+    for row in candidates:
+        code = str(row["Recipe_Code"])
+        base_gl = gl_map.get(code, 0.0)
+
+        best_q = _SUGGESTION_QUANTITIES[0]
+        best_gap = float("inf")
+        for q in _SUGGESTION_QUANTITIES:
+            gap = abs(base_gl * q - original_gl)
+            if gap < best_gap:
+                best_gap = gap
+                best_q = q
+
+        portion = cand_portion_map.get(code)
+        abs_quantity = round(best_q * portion, 1) if portion else best_q
+
+        scored.append({
+            "recipe_code": code,
+            "recipe_name": row.get("Recipe_Name") or "",
+            "quantity": abs_quantity,
+            "unit": desc_map.get(code, "serving"),
+            "gl": round(base_gl * best_q, 2),
+            "_gap": best_gap,
+        })
+
+    scored.sort(key=lambda s: s["_gap"])
+
+    return [
+        RecipeWithQty(
+            recipe_code=s["recipe_code"],
+            recipe_name=s["recipe_name"],
+            quantity=s["quantity"],
+            unit=s["unit"],
+            gl=s["gl"],
+        )
+        for s in scored[:3]
+    ]
+
+
+def _rank_alternatives_for_recipe(
+    sb, recipe_code: str, quantity: float
+) -> tuple[Optional[float], Optional[str], list[RecipeWithQty]]:
+    """
+    "Same_category" group: up to 3 alternatives sharing the same
+    Recipe_Category as recipe_code, ranked via _rank_candidates.
+
+    Matching is by Recipe_Category only — no meal-slot tag filter — since that
+    tag is inconsistently populated in RecipeTagging (e.g. some egg dishes are
+    tagged for no slot at all) and would otherwise hide valid same-subcategory
+    swaps.
+
+    Returns (original_gl, subcat, alternatives) — original_gl/subcat are None
+    if the recipe or its subcategory couldn't be resolved.
+    """
+    rc = str(recipe_code).strip()
+    original_gl, subcat = _resolve_original_gl(sb, rc, quantity)
+    if original_gl is None:
+        return None, None, []
+
+    candidate_resp = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
+        .eq("Recipe_Category", subcat)
+        .neq("Recipe_Code", rc)
+        .limit(20)
+        .execute()
+    )
+    candidates = candidate_resp.data or []
+    return original_gl, subcat, _rank_candidates(sb, candidates, original_gl)
+
+
+def _split_codes(value) -> list[str]:
+    return [c.strip() for c in str(value or "").split(",") if c.strip()]
+
+
+def _find_column_role(mapping_rows: list[dict], subcat: str) -> Optional[str]:
+    """Which column of Main1_Main2_Mapping Subcategory `subcat` naturally
+    belongs to: an exact Main1_Code match takes priority (that's its own
+    dedicated row), else whichever of Main2_Code/Main3_Code/Optional lists it
+    under."""
+    for row in mapping_rows:
+        if str(row.get("Main1_Code") or "").strip() == subcat:
+            return "Main1_Code"
+    for col in ("Main2_Code", "Main3_Code", "Optional"):
+        for row in mapping_rows:
+            if subcat in _split_codes(row.get(col)):
+                return col
+    return None
+
+
+def _fetch_companion_subcategories(
+    sb, user_id: str, date: str, meal_slot: MealSlot, exclude_recipe_code: str
+) -> set[str]:
+    """Recipe_Category of every OTHER recipe already planned in this
+    (user_id, date, meal_slot) — what's already on the plate alongside the
+    recipe being replaced."""
+    timings = SLOT_TO_TIMINGS[meal_slot]
+    rows = (
+        sb.table("Recommendation")
+        .select("Food_Name_desc")
+        .eq("user_id", user_id)
+        .eq("Date", date)
+        .eq("Timings", timings)
+        .execute()
+        .data
+    ) or []
+    codes = {
+        str(r["Food_Name_desc"]) for r in rows
+        if r.get("Food_Name_desc") and str(r["Food_Name_desc"]) != str(exclude_recipe_code)
+    }
+    if not codes:
+        return set()
+    recipe_rows = (
+        sb.table("Recipe").select("Recipe_Code, Recipe_Category").in_("Recipe_Code", list(codes)).execute().data
+    ) or []
+    return {str(r["Recipe_Category"]).strip() for r in recipe_rows if r.get("Recipe_Category")}
+
+
+def _optional_companions_for_target(sb, mapping_rows: list[dict], target_subcat: str) -> set[str]:
+    """
+    Subcategories that are merely OPTIONAL accompaniments to target_subcat
+    itself, per every row target_subcat appears in (as Main1_Code, or inside
+    Main2_Code/Main3_Code/Optional). E.g. Black Coffee is Optional for Dosa's
+    own row — so even though Coffee is genuinely on the plate, it isn't a real
+    signal of what this meal is themed around and shouldn't drive the search.
+    """
+    result: set[str] = set()
+    for row in mapping_rows:
+        m1 = str(row.get("Main1_Code") or "").strip()
+        row_all = (
+            {m1} | set(_split_codes(row.get("Main2_Code")))
+            | set(_split_codes(row.get("Main3_Code"))) | set(_split_codes(row.get("Optional")))
+        )
+        if target_subcat in row_all:
+            result.update(_split_codes(row.get("Optional")))
+    result.discard(target_subcat)
+    return result
+
+
+def _new_mapping_subcategories(sb, target_subcat: str, companion_subcats: set[str]) -> set[str]:
+    """
+    Subcategories that pair with the SAME companions target_subcat's own meal
+    already has, restricted to target_subcat's own column-role (e.g. Dosa is
+    a Main1_Code-type dish, so only other Main1_Code values are suggested —
+    not Main3/Optional accompaniment types like chutney or buttermilk).
+
+    Companions that are merely OPTIONAL accompaniments to target_subcat itself
+    (see _optional_companions_for_target) are dropped before matching — e.g.
+    Black Coffee being on the plate alongside Dosa shouldn't pull in "pairs
+    with coffee" categories like Sandwich, since Coffee isn't a real signal of
+    what the Dosa meal is themed around.
+
+    A row qualifies if ANY remaining companion subcategory appears in
+    Main1_Code, Main2_Code, or Main3_Code (union across companions, not
+    requiring all of them at once). Optional is excluded from row-matching —
+    it's a loose "goes with almost anything" bucket, so a companion only found
+    there isn't a real pairing signal either.
+    """
+    mapping_rows = sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+    role = _find_column_role(mapping_rows, target_subcat)
+    if role is None or not companion_subcats:
+        return set()
+
+    optional_for_target = _optional_companions_for_target(sb, mapping_rows, target_subcat)
+    effective_companions = companion_subcats - optional_for_target
+    if not effective_companions:
+        return set()
+
+    result: set[str] = set()
+    for row in mapping_rows:
+        m1 = str(row.get("Main1_Code") or "").strip()
+        cols = {
+            "Main1_Code": [m1] if m1 else [],
+            "Main2_Code": _split_codes(row.get("Main2_Code")),
+            "Main3_Code": _split_codes(row.get("Main3_Code")),
+            "Optional": _split_codes(row.get("Optional")),
+        }
+        row_match_codes = set(cols["Main1_Code"]) | set(cols["Main2_Code"]) | set(cols["Main3_Code"])
+        if row_match_codes & effective_companions:
+            result.update(cols[role])
+
+    result.discard(target_subcat)
+    return result
+
+
+def _rank_new_mapping_for_recipe(
+    sb, recipe_code: str, original_gl: float, target_subcat: str, user_id: str, date: str, meal_slot: MealSlot
+) -> list[RecipeWithQty]:
+    """
+    "New_mapping" group: up to 3 alternatives from subcategories that pair
+    with whatever else is already planned in this meal (via
+    Main1_Main2_Mapping Subcategory), ranked the same way as Same_category.
+    """
+    rc = str(recipe_code).strip()
+    companion_subcats = _fetch_companion_subcategories(sb, user_id, date, meal_slot, rc)
+    if not companion_subcats:
+        return []
+
+    candidate_subcats = _new_mapping_subcategories(sb, target_subcat, companion_subcats)
+    if not candidate_subcats:
+        return []
+
+    candidate_resp = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
+        .in_("Recipe_Category", list(candidate_subcats))
+        .neq("Recipe_Code", rc)
+        .limit(20)
+        .execute()
+    )
+    candidates = candidate_resp.data or []
+    return _rank_candidates(sb, candidates, original_gl)
+
+
+def _fetch_current_quantities(
+    sb, user_id: str, date: str, meal_slot: MealSlot, recipe_codes: list[str]
+) -> dict[str, float]:
+    """Look up each recipe's actual currently-planned Food_Qty from
+    Recommendation for this user/date/slot — the real "original quantity" a
+    replacement should be ranked against, rather than a guessed default."""
+    if not recipe_codes:
+        return {}
+    timings = SLOT_TO_TIMINGS[meal_slot]
+    rows = (
+        sb.table("Recommendation")
+        .select("Food_Name_desc, Food_Qty")
+        .eq("user_id", user_id)
+        .eq("Date", date)
+        .eq("Timings", timings)
+        .in_("Food_Name_desc", recipe_codes)
+        .execute()
+        .data
+    ) or []
+    result: dict[str, float] = {}
+    for r in rows:
+        code = r.get("Food_Name_desc")
+        qty = r.get("Food_Qty")
+        if not code or qty is None:
+            continue
+        try:
+            result[str(code)] = float(qty)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def get_preapproved_replacements(
     date: str,
     day: int,
     meal_slot: MealSlot,
     recipe_codes: List[str],
+    user_id: str,
     recipe_quantities: List[float] | None = None,
 ) -> ReplacementsResponse:
     """
-    For each recipe in the combination, find up to 3 same-subcategory alternatives,
-    ranked by GL proximity to the original. Transpose into up to 3 alternate
-    combinations (one pick per position). Returns original_gl (total meal GL at
-    given quantities) alongside alternatives.
+    For each recipe in the combination, finds two groups of alternatives:
 
-    Matching is by Recipe_Category only — no meal-slot tag filter — since that tag
-    is inconsistently populated in RecipeTagging (e.g. some egg dishes are tagged
-    for no slot at all) and would otherwise hide valid same-subcategory swaps.
+    - same_category: up to 3 alternatives sharing the recipe's own
+      Recipe_Category (_rank_alternatives_for_recipe).
+    - new_mapping: up to 3 alternatives from subcategories that pair with
+      whatever else is already planned in this meal, via
+      Main1_Main2_Mapping Subcategory (_rank_new_mapping_for_recipe) — e.g.
+      replacing Dosa when Sambar is also planned surfaces Idli, since both
+      pair with Sambar.
+
+    Both groups are transposed into up to 3 alternate combinations each (one
+    pick per position) — same shape/logic as before, just run twice against
+    different candidate pools.
 
     recipe_codes may contain a single recipe (a single-dish swap) or several
     (a whole-slot combination) — the ranking and quantity logic is identical
-    either way.
+    either way, applied independently per recipe.
+
+    recipe_quantities are each recipe's current ABSOLUTE quantity (same
+    convention as Food_Qty, e.g. "10" for 10 almonds). Any recipe missing an
+    explicit value here (including when recipe_quantities is omitted
+    entirely, e.g. the Flutter app currently never sends it) has its actual
+    planned quantity looked up from Recommendation instead of guessing —
+    only falls back to 1.0 if that lookup also finds nothing (e.g. the
+    recipe isn't actually in the plan for this date/slot).
     """
     sb = get_supabase()
 
-    # Pad/default quantities to 1.0 per recipe
-    quantities: list[float] = list(recipe_quantities or [])
+    quantities: list[Optional[float]] = list(recipe_quantities or [])
     while len(quantities) < len(recipe_codes):
-        quantities.append(1.0)
+        quantities.append(None)
 
-    per_recipe_alts: list[list[dict]] = []
-    total_original_gl: float = 0.0
+    missing_codes = [rc for rc, q in zip(recipe_codes, quantities) if q is None]
+    # Skip the Recommendation lookup entirely when every recipe already has an
+    # explicit quantity — no need to touch the DB for something we already have.
+    plan_qty_map = _fetch_current_quantities(sb, user_id, date, meal_slot, missing_codes) if missing_codes else {}
 
-    for rc, qty in zip(recipe_codes, quantities):
-        rc = str(rc).strip()
-
-        # Fetch this recipe's subcategory and nutrients needed for GL
-        target_resp = (
-            sb.table("Recipe")
-            .select("Recipe_Code, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
-            .eq("Recipe_Code", rc)
-            .execute()
-        )
-        if not target_resp.data:
-            continue
-
-        row0 = target_resp.data[0]
-        subcat = row0.get("Recipe_Category", "")
-        if not subcat:
-            continue
-
-        original_gl = _compute_gl_map(sb, [row0]).get(rc, 0.0)
-        total_original_gl += original_gl * qty
-
-        # Fetch a larger pool of same-subcategory candidates for GL ranking
-        candidate_resp = (
-            sb.table("Recipe")
-            .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g")
-            .eq("Recipe_Category", subcat)
-            .neq("Recipe_Code", rc)
-            .limit(20)
-            .execute()
-        )
-        candidates = candidate_resp.data or []
-
-        # Pick up Description here (the recipe's real portion unit, e.g. "2 pieces",
-        # "1 cup" — same column services/recall.py uses) so results don't all just say "serving".
-        desc_map: dict = {}
-        if candidates:
-            cand_codes = [row["Recipe_Code"] for row in candidates]
-            tag_resp = (
-                sb.table("RecipeTagging")
-                .select("Recipe_Code, Description")
-                .in_("Recipe_Code", cand_codes)
-                .execute()
+    resolved_quantities: list[float] = []
+    for rc, q in zip(recipe_codes, quantities):
+        if q is not None:
+            resolved_quantities.append(q)
+        elif rc in plan_qty_map:
+            resolved_quantities.append(plan_qty_map[rc])
+        else:
+            logger.warning(
+                "get_preapproved_replacements: no planned quantity found for %s on %s/%s — defaulting to 1.0",
+                rc, date, meal_slot,
             )
-            desc_map = {
-                row["Recipe_Code"]: str(row["Description"]).strip()
-                for row in (tag_resp.data or [])
-                if row.get("Description") and str(row["Description"]).strip().lower() not in ("nan", "none", "")
-            }
+            resolved_quantities.append(1.0)
 
-        # Compute GL for all candidates in one batch GI lookup, then rank by proximity to original
-        gl_map = _compute_gl_map(sb, candidates)
-        candidates.sort(key=lambda row: abs(gl_map.get(str(row["Recipe_Code"]), 0.0) - original_gl))
+    per_recipe_same_category: list[list[RecipeWithQty]] = []
+    per_recipe_new_mapping: list[list[RecipeWithQty]] = []
+    total_original_gl = 0.0
+    any_valid = False
 
-        alts = [
-            {
-                "recipe_code": row["Recipe_Code"],
-                "recipe_name": row.get("Recipe_Name") or "",
-                "quantity": qty,
-                "unit": desc_map.get(row["Recipe_Code"], "serving"),
-                "gl": round(gl_map.get(str(row["Recipe_Code"]), 0.0) * qty, 2),
-            }
-            for row in candidates[:3]
-        ]
-        per_recipe_alts.append(alts)
+    for rc, qty in zip(recipe_codes, resolved_quantities):
+        original_gl, subcat, same_cat_alts = _rank_alternatives_for_recipe(sb, rc, qty)
+        if original_gl is None:
+            continue
+        any_valid = True
+        total_original_gl += original_gl
+        per_recipe_same_category.append(same_cat_alts)
 
-    result_combos: list[list[dict]] = []
-    for i in range(3):
-        combo = [alts[i] for alts in per_recipe_alts if i < len(alts)]
-        if combo:
-            result_combos.append(combo)
+        new_mapping_alts = _rank_new_mapping_for_recipe(sb, rc, original_gl, subcat, user_id, date, meal_slot)
+        per_recipe_new_mapping.append(new_mapping_alts)
+
+    def _transpose(per_recipe: list[list[RecipeWithQty]]) -> list[list[RecipeWithQty]]:
+        result: list[list[RecipeWithQty]] = []
+        for i in range(3):
+            combo = [alts[i] for alts in per_recipe if i < len(alts)]
+            if combo:
+                result.append(combo)
+        return result
 
     return ReplacementsResponse(
         date=date,
         day=day,
         meal_slot=meal_slot,
-        original_gl=round(total_original_gl, 2),
-        alternatives=result_combos,
+        original_gl=round(total_original_gl, 2) if any_valid else None,
+        same_category=_transpose(per_recipe_same_category),
+        new_mapping=_transpose(per_recipe_new_mapping),
     )
 
 
