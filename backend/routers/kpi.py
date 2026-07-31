@@ -477,28 +477,28 @@ def build_recipe_compliance(user_id: str) -> dict:
       ANY DietRecall entry logged at all (any identified-or-not entry counts
       — "just an entry is enough", it doesn't need to match the plan).
     - Recipe-level (recipes_recommended / recipes_followed / following_compliance_pct):
-      per (Date, slot) occasion, compares what was actually recalled against
-      what was planned. A recalled item counts as "on plan" if EITHER its
-      Recipe_Code matches a planned recipe OR its Recipe_Name matches a
-      planned recipe's name AND their Carbohydrate_g is within
-      _NAME_MATCH_CARB_TOLERANCE of each other — covers cases where the same
-      dish exists as two different near-duplicate recipe entries in the
-      catalog under different codes, while rejecting name matches where the
-      catalog itself is inconsistent (e.g. two recipes both called "Ragi
-      dosa" but with carbs 56% apart — a scan of the Recipe table found 26+
-      such same-name/same-category/different-nutrition pairs, so name alone
-      isn't a safe signal without a nutrition check backing it up). Eating a
-      SUBSET of what was planned (e.g. 2 of 3 recommended dishes, nothing
-      else) still counts as fully followed — full credit for all planned
-      recipes that occasion, since eating less of the plan isn't a
-      violation. An occasion only counts as NOT followed (zero credit) if
-      the user recalled something not on the plan by either check, or
-      recalled nothing at all for that occasion.
+      checked per PLANNED RECIPE, not per occasion. For each recipe planned
+      for a given (Date, slot), it counts as followed if it's found anywhere
+      in that same (Date, slot)'s DietRecall entries — either an exact
+      Recipe_Code match, or a Recipe_Name match whose Carbohydrate_g is
+      within _NAME_MATCH_CARB_TOLERANCE of the planned recipe's (covers the
+      same dish existing as two different near-duplicate recipe entries in
+      the catalog under different codes, while rejecting name matches where
+      the catalog itself is inconsistent — e.g. two recipes both called
+      "Ragi dosa" but with carbs 56% apart; a scan of the Recipe table found
+      26+ such same-name/same-category/different-nutrition pairs, so name
+      alone isn't a safe signal without a nutrition check backing it up).
+
+      Each planned recipe is scored independently: recommending 3 dishes and
+      eating 2 of them credits those 2 as followed (partial credit, not
+      all-or-nothing). Anything recalled that ISN'T on the plan is simply
+      ignored — it doesn't cost the occasion's other, genuinely-matched
+      recipes any credit.
 
     Uses RecommendationsBackup (not Recommendation) since it's the immutable
     history of everything ever planned, unlike Recommendation which only
-    holds the current/live plan. Matching is by Recipe_Code only — quantity
-    doesn't affect whether a planned recipe counts as followed.
+    holds the current/live plan. Quantity doesn't affect whether a planned
+    recipe counts as followed.
 
     Window is the trailing 14 days ending yesterday (today/future dates can't
     have been complied with yet), same width as the GL trend elsewhere in
@@ -576,34 +576,9 @@ def build_recipe_compliance(user_id: str) -> dict:
             (str(code).strip(), _norm_name(r.get("Food_Name")))
         )
 
-    # Planned codes/names grouped by (date, slot). names maps name -> planned
-    # codes sharing it, so the carb-tolerance check below knows which planned
-    # recipe(s) to compare a name-matched recalled item against.
-    planned_by_occasion: dict[tuple[str, str], dict] = {}
-    planned_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
-
-    for row in planned_rows:
-        d = row.get("Date")
-        timing = str(row.get("Timings") or "").strip()
-        code = row.get("Food_Name_desc")
-        if not d or not code:
-            continue
-        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(timing)
-        if slot is None:
-            continue
-
-        d_norm = str(d)[:10]
-        planned_occasions[slot].add(d_norm)
-        entry = planned_by_occasion.setdefault((d_norm, slot), {"codes": set(), "names": {}})
-        code_norm = str(code).strip()
-        entry["codes"].add(code_norm)
-        planned_name = _norm_name(row.get("Food_Name"))
-        if planned_name:
-            entry["names"].setdefault(planned_name, []).append(code_norm)
-
     # Carbohydrate_g for every code that appears on either side, so a
     # name-only match can be checked for nutrition similarity.
-    all_codes = {c for p in planned_by_occasion.values() for c in p["codes"]}
+    all_codes = {str(row["Food_Name_desc"]).strip() for row in planned_rows if row.get("Food_Name_desc")}
     all_codes |= {code for items in recalled_by_occasion.values() for code, _ in items}
     carb_map: dict[str, float] = {}
     if all_codes:
@@ -623,37 +598,41 @@ def build_recipe_compliance(user_id: str) -> dict:
         hi = max(ca, cb)
         return hi == 0 or abs(ca - cb) / hi <= _NAME_MATCH_CARB_TOLERANCE
 
-    def _is_on_plan(code: str, name: str, planned: dict) -> bool:
-        if code in planned["codes"]:
-            return True
-        if name and name in planned["names"]:
-            return any(_carbs_close(code, planned_code) for planned_code in planned["names"][name])
-        return False
-
-    # Occasion-level pass/fail: every recalled item must be "on plan" — either
-    # its Recipe_Code matches a planned recipe, or its Recipe_Name matches AND
-    # its Carbohydrate_g is close enough to the planned recipe's (covers
-    # near-duplicate recipe entries for the same dish under different codes,
-    # while rejecting same-name catalog entries that are nutritionally very
-    # different) — and at least one item must have been recalled. Eating
-    # fewer of the planned dishes is fine; eating anything off-plan, or
-    # nothing at all, fails the whole occasion.
+    # Per-recipe scoring: each planned recipe is checked independently against
+    # that (date, slot)'s recall — found by exact code, or by name+carb-close
+    # match. Anything else recalled (extra/off-plan items) is simply ignored;
+    # it doesn't cost this or any other planned recipe its credit.
+    planned_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
     recipe_totals: dict[str, dict] = {slot: {"planned": 0, "matched": 0} for slot in MEAL_SLOTS}
     total = 0
     matched = 0
 
-    for (d_norm, slot), planned in planned_by_occasion.items():
-        recalled_items = recalled_by_occasion.get((d_norm, slot), [])
-        is_compliant = bool(recalled_items) and all(
-            _is_on_plan(code, name, planned) for code, name in recalled_items
-        )
+    for row in planned_rows:
+        d = row.get("Date")
+        timing = str(row.get("Timings") or "").strip()
+        code = row.get("Food_Name_desc")
+        if not d or not code:
+            continue
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(timing)
+        if slot is None:
+            continue
 
-        planned_count = len(planned["codes"])
-        recipe_totals[slot]["planned"] += planned_count
-        total += planned_count
-        if is_compliant:
-            recipe_totals[slot]["matched"] += planned_count
-            matched += planned_count
+        d_norm = str(d)[:10]
+        code_norm = str(code).strip()
+        name_norm = _norm_name(row.get("Food_Name"))
+        planned_occasions[slot].add(d_norm)
+
+        recipe_totals[slot]["planned"] += 1
+        total += 1
+
+        recalled_items = recalled_by_occasion.get((d_norm, slot), [])
+        followed = any(
+            r_code == code_norm or (name_norm and r_name == name_norm and _carbs_close(r_code, code_norm))
+            for r_code, r_name in recalled_items
+        )
+        if followed:
+            recipe_totals[slot]["matched"] += 1
+            matched += 1
 
     by_meal_slot = {}
     for slot in MEAL_SLOTS:
