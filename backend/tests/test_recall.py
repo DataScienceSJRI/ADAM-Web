@@ -53,20 +53,19 @@ def _sb(data=None, count=None):
 # ─── POST /recall/log ─────────────────────────────────────────────────────────
 
 class TestPostRecallLog:
-    _BASE_PAYLOAD = {"plan_id": "plan-1", "meal_slot": "breakfast", "did_eat_as_planned": True}
+    _BASE_PAYLOAD = {"plan_id": "plan-1", "meal_slot": "breakfast"}
 
-    def test_ate_as_planned_returns_recall_ids(self, client):
+    def test_recall_returns_recall_ids(self, client):
         with patch("routers.recall.log_recall", return_value=["id-a", "id-b"]):
             r = client.post(f"{BASE}/log", json=self._BASE_PAYLOAD)
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "recall_ids": ["id-a", "id-b"]}
 
-    def test_changed_multiple_recipes(self, client):
+    def test_multiple_recipes(self, client):
         with patch("routers.recall.log_recall", return_value=["id-c", "id-d"]) as fn:
             r = client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "lunch",
-                "did_eat_as_planned": False,
                 "recipe_codes": ["R001", "R002"],
                 "actual_quantities": ["0.8", "1.0"],
             })
@@ -74,14 +73,12 @@ class TestPostRecallLog:
         kw = fn.call_args.kwargs
         assert kw["recipe_codes"] == ["R001", "R002"]
         assert kw["actual_quantities"] == ["0.8", "1.0"]
-        assert kw["did_eat_as_planned"] is False
 
     def test_skipped_meal_passes_none_codes(self, client):
         with patch("routers.recall.log_recall", return_value=["skip-id"]) as fn:
             r = client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "dinner",
-                "did_eat_as_planned": False,
             })
         assert r.status_code == 200
         kw = fn.call_args.kwargs
@@ -93,7 +90,6 @@ class TestPostRecallLog:
             client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "breakfast",
-                "did_eat_as_planned": False,
                 "recipe_code": "R999",
                 "actual_quantity": "1.5",
             })
@@ -106,7 +102,6 @@ class TestPostRecallLog:
             client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "breakfast",
-                "did_eat_as_planned": False,
                 "recipe_code": "OLD",
                 "recipe_codes": ["NEW1", "NEW2"],
             })
@@ -123,7 +118,7 @@ class TestPostRecallLog:
         assert fn.call_args.kwargs["date"] == "2026-06-10"
 
     def test_missing_plan_id_returns_422(self, client):
-        r = client.post(f"{BASE}/log", json={"meal_slot": "breakfast", "did_eat_as_planned": True})
+        r = client.post(f"{BASE}/log", json={"meal_slot": "breakfast"})
         assert r.status_code == 422
 
     def test_invalid_meal_slot_returns_422(self, client):
@@ -138,7 +133,6 @@ class TestGetRecall:
         "ID": "r1",
         "Date": "2026-06-01",
         "meal_slot": "breakfast",
-        "did_eat_as_planned": True,
         "Food_Name": "Idli",
         "Food_Qty": 1.0,
         "Energy_Kcal": 150,
@@ -222,13 +216,6 @@ class TestPutRecall:
         assert r.status_code == 200
         sb.update.assert_called_once_with({"Food_Qty": "0.75"})
 
-    def test_update_did_eat_as_planned(self, client):
-        sb = _sb(data=[{"ID": self._ID}])
-        with patch("routers.recall.get_supabase", return_value=sb):
-            r = client.put(f"{BASE}/{self._ID}", json={"did_eat_as_planned": False})
-        assert r.status_code == 200
-        sb.update.assert_called_once_with({"did_eat_as_planned": False})
-
     def test_multiple_fields_at_once(self, client):
         sb = _sb(data=[{"ID": self._ID}])
         with patch("routers.recall.get_supabase", return_value=sb):
@@ -306,24 +293,6 @@ class TestPostRecallImage:
         kw = fn.call_args.kwargs
         assert kw["image_url_pre"] == "https://storage/pre.jpg"
         assert kw["image_url_post"] is None
-
-    def test_did_eat_as_planned_forwarded(self, client):
-        with patch("routers.recall.log_recall_image", return_value=("rc-p", "rv-p")) as fn:
-            r = client.post(f"{BASE}/image", json={
-                **self._BASE,
-                "image_url_pre": "https://storage/pre.jpg",
-                "did_eat_as_planned": True,
-            })
-        assert r.status_code == 200
-        assert fn.call_args.kwargs["did_eat_as_planned"] is True
-
-    def test_did_eat_as_planned_defaults_to_none(self, client):
-        with patch("routers.recall.log_recall_image", return_value=("rc-q", "rv-q")) as fn:
-            client.post(f"{BASE}/image", json={
-                **self._BASE,
-                "image_url_pre": "https://storage/pre.jpg",
-            })
-        assert fn.call_args.kwargs["did_eat_as_planned"] is None
 
     def test_post_image_only_triggers_upsert_path(self, client):
         with patch("routers.recall.log_recall_image", return_value=("rc-2", "rv-2")) as fn:
