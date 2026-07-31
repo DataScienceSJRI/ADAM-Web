@@ -333,9 +333,6 @@ def _best_qty_combo(
     return best_combo
 
 
-_SUGGESTION_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0, 2.5]
-
-
 def _resolve_original_gl(sb, recipe_code: str, quantity: float) -> tuple[Optional[float], Optional[str]]:
     """
     Fetch recipe_code's Recipe_Category and compute its GL at `quantity`.
@@ -372,11 +369,19 @@ def _resolve_original_gl(sb, recipe_code: str, quantity: float) -> tuple[Optiona
 def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[RecipeWithQty]:
     """
     Given a pool of Recipe rows and a target original_gl, score each candidate
-    at whichever of _SUGGESTION_QUANTITIES (as a proportion of its own full
-    portion) lands its GL closest to original_gl — so a candidate isn't
-    penalised just because 1 of its own servings has very different carbs
-    than 1 of the original's. Ranks by that gap, returns the top 3 with
-    quantity expressed as an absolute amount (via RecipeTagging.Portion).
+    at whichever of VALID_QUANTITIES (as a proportion of its own full portion)
+    lands its GL closest to original_gl — so a candidate isn't penalised just
+    because 1 of its own servings has very different carbs than 1 of the
+    original's. Ranks by that gap, returns the top 3 with quantity expressed
+    as an absolute amount (via RecipeTagging.Portion).
+
+    Only considers quantities that land within the same ±_GL_TOLERANCE band
+    request_on_demand_replacement's confirmation step (_best_qty_combo)
+    requires, and searches the same VALID_QUANTITIES set (not a wider one) —
+    so every suggestion returned here is guaranteed to actually be
+    confirmable via a subsequent swap request. A candidate with no quantity
+    landing in-band is excluded entirely rather than shown as a "closest
+    available but not really close" option.
     """
     if not candidates:
         return []
@@ -405,18 +410,27 @@ def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[Rec
 
     gl_map = _compute_gl_map(sb, candidates)
 
+    tolerance = max(_GL_FLOOR, original_gl * _GL_TOLERANCE)
+    lo, hi = original_gl - tolerance, original_gl + tolerance
+
     scored: list[dict] = []
     for row in candidates:
         code = str(row["Recipe_Code"])
         base_gl = gl_map.get(code, 0.0)
 
-        best_q = _SUGGESTION_QUANTITIES[0]
+        best_q = None
         best_gap = float("inf")
-        for q in _SUGGESTION_QUANTITIES:
-            gap = abs(base_gl * q - original_gl)
+        for q in VALID_QUANTITIES:
+            gl_at_q = base_gl * q
+            if not (lo <= gl_at_q <= hi):
+                continue
+            gap = abs(gl_at_q - original_gl)
             if gap < best_gap:
                 best_gap = gap
                 best_q = q
+
+        if best_q is None:
+            continue  # no confirmable quantity for this candidate — exclude it
 
         portion = cand_portion_map.get(code)
         abs_quantity = round(best_q * portion, 1) if portion else best_q
@@ -475,7 +489,7 @@ def _rank_alternatives_for_recipe(
         .eq("Recipe_Category", subcat)
         .neq("Recipe_Code", rc)
         .in_("Recipe_Code", list(eligible_codes))
-        .limit(20)
+        .limit(50)
         .execute()
     )
     candidates = candidate_resp.data or []
@@ -625,7 +639,7 @@ def _rank_new_mapping_for_recipe(
         .in_("Recipe_Category", list(candidate_subcats))
         .neq("Recipe_Code", rc)
         .in_("Recipe_Code", list(eligible_codes))
-        .limit(20)
+        .limit(50)
         .execute()
     )
     candidates = candidate_resp.data or []
