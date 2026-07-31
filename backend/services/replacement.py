@@ -936,6 +936,7 @@ def request_on_demand_replacement(
                         if item.recipe_code in portion_map
                         else item.quantity
                     ),
+                    "R_desc": desc_map.get(item.recipe_code, "serving"),
                     "Energy_kcal": energy_by_code.get(item.recipe_code),
                 }
                 for item in combination
