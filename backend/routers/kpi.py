@@ -480,14 +480,19 @@ def build_recipe_compliance(user_id: str) -> dict:
       per (Date, slot) occasion, compares what was actually recalled against
       what was planned. A recalled item counts as "on plan" if EITHER its
       Recipe_Code matches a planned recipe OR its Recipe_Name matches a
-      planned recipe's name (case/whitespace-insensitive) — covers cases
-      where the same dish exists as two different near-duplicate recipe
-      entries in the catalog (e.g. two "Ragi dosa" rows with different
-      codes). Eating a SUBSET of what was planned (e.g. 2 of 3 recommended
-      dishes, nothing else) still counts as fully followed — full credit for
-      all planned recipes that occasion, since eating less of the plan isn't
-      a violation. An occasion only counts as NOT followed (zero credit) if
-      the user recalled something not on the plan by either code or name, or
+      planned recipe's name AND their Carbohydrate_g is within
+      _NAME_MATCH_CARB_TOLERANCE of each other — covers cases where the same
+      dish exists as two different near-duplicate recipe entries in the
+      catalog under different codes, while rejecting name matches where the
+      catalog itself is inconsistent (e.g. two recipes both called "Ragi
+      dosa" but with carbs 56% apart — a scan of the Recipe table found 26+
+      such same-name/same-category/different-nutrition pairs, so name alone
+      isn't a safe signal without a nutrition check backing it up). Eating a
+      SUBSET of what was planned (e.g. 2 of 3 recommended dishes, nothing
+      else) still counts as fully followed — full credit for all planned
+      recipes that occasion, since eating less of the plan isn't a
+      violation. An occasion only counts as NOT followed (zero credit) if
+      the user recalled something not on the plan by either check, or
       recalled nothing at all for that occasion.
 
     Uses RecommendationsBackup (not Recommendation) since it's the immutable
@@ -518,6 +523,11 @@ def build_recipe_compliance(user_id: str) -> dict:
 
     def _norm_name(name) -> str:
         return str(name or "").strip().lower()
+
+    # Name matches only count if the two recipes' carbs are also this close —
+    # closes the "Ragi dosa" loophole (two same-named, same-category recipes
+    # with very different actual nutrition; see build_recipe_compliance's docstring).
+    _NAME_MATCH_CARB_TOLERANCE = 0.20
 
     planned_rows = (
         sb.table("RecommendationsBackup")
@@ -566,7 +576,9 @@ def build_recipe_compliance(user_id: str) -> dict:
             (str(code).strip(), _norm_name(r.get("Food_Name")))
         )
 
-    # Planned codes/names grouped by (date, slot).
+    # Planned codes/names grouped by (date, slot). names maps name -> planned
+    # codes sharing it, so the carb-tolerance check below knows which planned
+    # recipe(s) to compare a name-matched recalled item against.
     planned_by_occasion: dict[tuple[str, str], dict] = {}
     planned_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
 
@@ -582,18 +594,50 @@ def build_recipe_compliance(user_id: str) -> dict:
 
         d_norm = str(d)[:10]
         planned_occasions[slot].add(d_norm)
-        entry = planned_by_occasion.setdefault((d_norm, slot), {"codes": set(), "names": set()})
-        entry["codes"].add(str(code).strip())
+        entry = planned_by_occasion.setdefault((d_norm, slot), {"codes": set(), "names": {}})
+        code_norm = str(code).strip()
+        entry["codes"].add(code_norm)
         planned_name = _norm_name(row.get("Food_Name"))
         if planned_name:
-            entry["names"].add(planned_name)
+            entry["names"].setdefault(planned_name, []).append(code_norm)
+
+    # Carbohydrate_g for every code that appears on either side, so a
+    # name-only match can be checked for nutrition similarity.
+    all_codes = {c for p in planned_by_occasion.values() for c in p["codes"]}
+    all_codes |= {code for items in recalled_by_occasion.values() for code, _ in items}
+    carb_map: dict[str, float] = {}
+    if all_codes:
+        carb_rows = (
+            sb.table("Recipe").select("Recipe_Code, Carbohydrate_g").in_("Recipe_Code", list(all_codes)).execute().data
+        ) or []
+        for r in carb_rows:
+            try:
+                carb_map[str(r["Recipe_Code"]).strip()] = float(r["Carbohydrate_g"])
+            except (TypeError, ValueError, KeyError):
+                continue
+
+    def _carbs_close(code_a: str, code_b: str) -> bool:
+        ca, cb = carb_map.get(code_a), carb_map.get(code_b)
+        if ca is None or cb is None:
+            return False
+        hi = max(ca, cb)
+        return hi == 0 or abs(ca - cb) / hi <= _NAME_MATCH_CARB_TOLERANCE
+
+    def _is_on_plan(code: str, name: str, planned: dict) -> bool:
+        if code in planned["codes"]:
+            return True
+        if name and name in planned["names"]:
+            return any(_carbs_close(code, planned_code) for planned_code in planned["names"][name])
+        return False
 
     # Occasion-level pass/fail: every recalled item must be "on plan" — either
-    # its Recipe_Code or its Recipe_Name matches a planned recipe (covers
-    # near-duplicate recipe entries for the same dish under different codes)
-    # — and at least one item must have been recalled. Eating fewer of the
-    # planned dishes is fine; eating anything off-plan, or nothing at all,
-    # fails the whole occasion.
+    # its Recipe_Code matches a planned recipe, or its Recipe_Name matches AND
+    # its Carbohydrate_g is close enough to the planned recipe's (covers
+    # near-duplicate recipe entries for the same dish under different codes,
+    # while rejecting same-name catalog entries that are nutritionally very
+    # different) — and at least one item must have been recalled. Eating
+    # fewer of the planned dishes is fine; eating anything off-plan, or
+    # nothing at all, fails the whole occasion.
     recipe_totals: dict[str, dict] = {slot: {"planned": 0, "matched": 0} for slot in MEAL_SLOTS}
     total = 0
     matched = 0
@@ -601,8 +645,7 @@ def build_recipe_compliance(user_id: str) -> dict:
     for (d_norm, slot), planned in planned_by_occasion.items():
         recalled_items = recalled_by_occasion.get((d_norm, slot), [])
         is_compliant = bool(recalled_items) and all(
-            code in planned["codes"] or (name and name in planned["names"])
-            for code, name in recalled_items
+            _is_on_plan(code, name, planned) for code, name in recalled_items
         )
 
         planned_count = len(planned["codes"])
