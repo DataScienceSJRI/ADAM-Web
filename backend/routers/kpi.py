@@ -477,9 +477,18 @@ def build_recipe_compliance(user_id: str) -> dict:
       ANY DietRecall entry logged at all (any identified-or-not entry counts
       — "just an entry is enough", it doesn't need to match the plan).
     - Recipe-level (recipes_recommended / recipes_followed / following_compliance_pct):
-      how many individual planned recipes vs how many were matched exactly
-      (same Recipe_Code logged for the same Date + slot). A planned recipe
-      with no matching recall counts as NOT followed, not excluded/unknown.
+      per (Date, slot) occasion, compares what was actually recalled against
+      what was planned. A recalled item counts as "on plan" if EITHER its
+      Recipe_Code matches a planned recipe OR its Recipe_Name matches a
+      planned recipe's name (case/whitespace-insensitive) — covers cases
+      where the same dish exists as two different near-duplicate recipe
+      entries in the catalog (e.g. two "Ragi dosa" rows with different
+      codes). Eating a SUBSET of what was planned (e.g. 2 of 3 recommended
+      dishes, nothing else) still counts as fully followed — full credit for
+      all planned recipes that occasion, since eating less of the plan isn't
+      a violation. An occasion only counts as NOT followed (zero credit) if
+      the user recalled something not on the plan by either code or name, or
+      recalled nothing at all for that occasion.
 
     Uses RecommendationsBackup (not Recommendation) since it's the immutable
     history of everything ever planned, unlike Recommendation which only
@@ -507,9 +516,12 @@ def build_recipe_compliance(user_id: str) -> dict:
         "following_compliance_pct": None,
     }
 
+    def _norm_name(name) -> str:
+        return str(name or "").strip().lower()
+
     planned_rows = (
         sb.table("RecommendationsBackup")
-        .select("Date, Timings, Food_Name_desc")
+        .select("Date, Timings, Food_Name_desc, Food_Name")
         .eq("user_id", user_id)
         .gte("Date", start)
         .lte("Date", yesterday)
@@ -525,7 +537,7 @@ def build_recipe_compliance(user_id: str) -> dict:
 
     recall_rows = (
         sb.table("DietRecall")
-        .select("Date, meal_slot, Food_Name_desc")
+        .select("Date, meal_slot, Food_Name_desc, Food_Name")
         .eq("user_id", user_id)
         .gte("Date", start)
         .lte("Date", yesterday)
@@ -541,17 +553,22 @@ def build_recipe_compliance(user_id: str) -> dict:
         if slot in logged_occasions and d:
             logged_occasions[slot].add(str(d)[:10])
 
-    # Identified recall codes only, for exact recipe-level matching.
-    recalled_codes = {
-        (str(r["Date"])[:10], str(r.get("meal_slot") or "").strip().lower(), str(r["Food_Name_desc"]).strip())
-        for r in recall_rows
-        if r.get("Date") and r.get("Food_Name_desc")
-    }
+    # Identified recall items grouped by (date, slot) — keep (code, name) pairs
+    # so the compliance check below can match on either.
+    recalled_by_occasion: dict[tuple[str, str], list] = {}
+    for r in recall_rows:
+        d = r.get("Date")
+        code = r.get("Food_Name_desc")
+        slot = str(r.get("meal_slot") or "").strip().lower()
+        if not d or not code or slot not in MEAL_SLOTS:
+            continue
+        recalled_by_occasion.setdefault((str(d)[:10], slot), []).append(
+            (str(code).strip(), _norm_name(r.get("Food_Name")))
+        )
 
+    # Planned codes/names grouped by (date, slot).
+    planned_by_occasion: dict[tuple[str, str], dict] = {}
     planned_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
-    recipe_totals: dict[str, dict] = {slot: {"planned": 0, "matched": 0} for slot in MEAL_SLOTS}
-    total = 0
-    matched = 0
 
     for row in planned_rows:
         d = row.get("Date")
@@ -565,12 +582,35 @@ def build_recipe_compliance(user_id: str) -> dict:
 
         d_norm = str(d)[:10]
         planned_occasions[slot].add(d_norm)
+        entry = planned_by_occasion.setdefault((d_norm, slot), {"codes": set(), "names": set()})
+        entry["codes"].add(str(code).strip())
+        planned_name = _norm_name(row.get("Food_Name"))
+        if planned_name:
+            entry["names"].add(planned_name)
 
-        total += 1
-        recipe_totals[slot]["planned"] += 1
-        if (d_norm, slot, str(code).strip()) in recalled_codes:
-            matched += 1
-            recipe_totals[slot]["matched"] += 1
+    # Occasion-level pass/fail: every recalled item must be "on plan" — either
+    # its Recipe_Code or its Recipe_Name matches a planned recipe (covers
+    # near-duplicate recipe entries for the same dish under different codes)
+    # — and at least one item must have been recalled. Eating fewer of the
+    # planned dishes is fine; eating anything off-plan, or nothing at all,
+    # fails the whole occasion.
+    recipe_totals: dict[str, dict] = {slot: {"planned": 0, "matched": 0} for slot in MEAL_SLOTS}
+    total = 0
+    matched = 0
+
+    for (d_norm, slot), planned in planned_by_occasion.items():
+        recalled_items = recalled_by_occasion.get((d_norm, slot), [])
+        is_compliant = bool(recalled_items) and all(
+            code in planned["codes"] or (name and name in planned["names"])
+            for code, name in recalled_items
+        )
+
+        planned_count = len(planned["codes"])
+        recipe_totals[slot]["planned"] += planned_count
+        total += planned_count
+        if is_compliant:
+            recipe_totals[slot]["matched"] += planned_count
+            matched += planned_count
 
     by_meal_slot = {}
     for slot in MEAL_SLOTS:
