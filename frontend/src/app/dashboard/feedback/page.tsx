@@ -431,7 +431,7 @@ export default function FeedbackPage() {
       )}
 
       {/* Bulk action bar */}
-      {selectedKeys.size > 0 && (
+      {statusFilter === "pending" && selectedKeys.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-background border rounded-xl px-5 py-3 shadow-xl">
           <span className="text-sm font-medium tabular-nums">{selectedKeys.size} selected</span>
           <div className="w-px h-4 bg-border" />
@@ -550,13 +550,15 @@ export default function FeedbackPage() {
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-b bg-muted/30">
-                            <th className="px-4 py-2.5 w-8">
-                              <IndeterminateCheckbox
-                                checked={allPageSelected}
-                                indeterminate={somePageSelected}
-                                onChange={togglePageSelect}
-                              />
-                            </th>
+                            {statusFilter === "pending" && (
+                              <th className="px-4 py-2.5 w-8">
+                                <IndeterminateCheckbox
+                                  checked={allPageSelected}
+                                  indeterminate={somePageSelected}
+                                  onChange={togglePageSelect}
+                                />
+                              </th>
+                            )}
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Meal</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Status</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Waiting</th>
@@ -577,18 +579,20 @@ export default function FeedbackPage() {
                                 key={g.key}
                                 className={`transition-colors ${isChecked ? "bg-primary/5" : "hover:bg-muted/30"} cursor-pointer bg-[#fbfbfb] dark:bg-transparent`}
                               >
-                                <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                                  <input
-                                    type="checkbox"
-                                    checked={isChecked}
-                                    onChange={() => setSelectedKeys(prev => {
-                                      const next = new Set(prev);
-                                      if (isChecked) next.delete(g.key); else next.add(g.key);
-                                      return next;
-                                    })}
-                                    className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary cursor-pointer"
-                                  />
-                                </td>
+                                {statusFilter === "pending" && (
+                                  <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => setSelectedKeys(prev => {
+                                        const next = new Set(prev);
+                                        if (isChecked) next.delete(g.key); else next.add(g.key);
+                                        return next;
+                                      })}
+                                      className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary cursor-pointer"
+                                    />
+                                  </td>
+                                )}
                                 <td className="px-4 py-3" onClick={() => openModal(g)}>
                                   {g.meal_slot
                                     ? <MealSlotBadge slot={g.meal_slot} />
