@@ -604,6 +604,7 @@ export function ImageReviewModal({
   const [review, setReview] = useState<MealImageReview>(reviews[0]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<"approve" | "reject" | null>(null);
 
   const parsed = parseAi(review.tracked_foods_by_ai);
   const parsedPost = parseAi(review.tracked_foods_by_ai_post);
@@ -632,6 +633,7 @@ export function ImageReviewModal({
     setManualText(r.reviewed_foods_by_human ?? "");
     setError(null);
     setPickers(initPickers(pickerSourceFoods(r)));
+    setPendingAction(null);
   }
 
   const handlePoll = useCallback((u: MealImageReview) => {
@@ -911,22 +913,48 @@ export function ImageReviewModal({
                 </button>
               )}
 
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => doAction("reject")}
-                  disabled={!!busy || rejected}
-                  className="rounded-lg border border-red-200 text-red-600 py-2.5 text-xs font-semibold hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors disabled:opacity-50"
-                >
-                  {busy === "reject" ? "Rejecting…" : rejected ? "Rejected" : "Reject"}
-                </button>
-                <button
-                  onClick={handleApprove}
-                  disabled={!!busy || approved}
-                  className="rounded-lg bg-emerald-600 text-white py-2.5 text-xs font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-50"
-                >
-                  {busy === "approve" ? "Approving…" : approved ? "Approved" : "Approve"}
-                </button>
-              </div>
+              {pendingAction ? (
+                <div className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2">
+                  <span className="text-xs font-medium">
+                    {pendingAction === "approve" ? "Approve this meal log?" : "Reject this meal log?"}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => setPendingAction(null)}
+                      disabled={!!busy}
+                      className="rounded-md border px-2.5 py-1 text-[11px] font-semibold hover:bg-muted transition-colors disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => { const a = pendingAction; setPendingAction(null); if (a === "approve") handleApprove(); else doAction("reject"); }}
+                      disabled={!!busy}
+                      className={`rounded-md text-white px-2.5 py-1 text-[11px] font-semibold transition-colors disabled:opacity-50 ${
+                        pendingAction === "approve" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-red-600 hover:bg-red-700"
+                      }`}
+                    >
+                      Confirm
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setPendingAction("reject")}
+                    disabled={!!busy || rejected}
+                    className="rounded-lg border border-red-200 text-red-600 py-2.5 text-xs font-semibold hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors disabled:opacity-50"
+                  >
+                    {busy === "reject" ? "Rejecting…" : rejected ? "Rejected" : "Reject"}
+                  </button>
+                  <button
+                    onClick={() => setPendingAction("approve")}
+                    disabled={!!busy || approved}
+                    className="rounded-lg bg-emerald-600 text-white py-2.5 text-xs font-semibold hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                  >
+                    {busy === "approve" ? "Approving…" : approved ? "Approved" : "Approve"}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -260,6 +260,7 @@ export default function FeedbackPage() {
   const [modalState, setModalState] = useState<{ reviews: MealImageReview[]; slotLabel: string; dateLabel: string } | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [pendingBulkAction, setPendingBulkAction] = useState<"approve" | "reject" | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -371,8 +372,8 @@ export default function FeedbackPage() {
   }, [dateGroups, statusFilter]);
 
   // Reset to newest date when participant changes
-  useEffect(() => { setDateIndex(0); setPage(0); setSelectedKeys(new Set()); setStatusFilter("all"); }, [selectedId]);
-  useEffect(() => { setPage(0); setSelectedKeys(new Set()); }, [dateIndex, statusFilter]);
+  useEffect(() => { setDateIndex(0); setPage(0); setSelectedKeys(new Set()); setStatusFilter("all"); setPendingBulkAction(null); }, [selectedId]);
+  useEffect(() => { setPage(0); setSelectedKeys(new Set()); setPendingBulkAction(null); }, [dateIndex, statusFilter]);
 
   const totalPages = Math.ceil(displayGroups.length / PAGE_SIZE);
   const pagedGroups = displayGroups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -419,6 +420,7 @@ export default function FeedbackPage() {
 
   async function doBulkAction(action: "approve" | "reject") {
     if (!token) return;
+    setPendingBulkAction(null);
     setBulkLoading(true);
     try {
       const targets = displayGroups.filter(g => selectedKeys.has(g.key));
@@ -476,28 +478,53 @@ export default function FeedbackPage() {
       {/* Bulk action bar */}
       {statusFilter === "pending" && selectedKeys.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-background border rounded-xl px-5 py-3 shadow-xl">
-          <span className="text-sm font-medium tabular-nums">{selectedKeys.size} selected</span>
-          <div className="w-px h-4 bg-border" />
-          <button
-            onClick={() => doBulkAction("approve")}
-            disabled={bulkLoading}
-            className="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            {bulkLoading ? "Saving…" : "Approve all"}
-          </button>
-          <button
-            onClick={() => doBulkAction("reject")}
-            disabled={bulkLoading}
-            className="rounded-lg bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            Reject all
-          </button>
-          <button
-            onClick={() => setSelectedKeys(new Set())}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Clear
-          </button>
+          {pendingBulkAction ? (
+            <>
+              <span className="text-sm font-medium">
+                {pendingBulkAction === "approve" ? "Approve" : "Reject"} {selectedKeys.size} selected?
+              </span>
+              <div className="w-px h-4 bg-border" />
+              <button
+                onClick={() => setPendingBulkAction(null)}
+                disabled={bulkLoading}
+                className="rounded-lg border px-4 py-1.5 text-xs font-semibold hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => doBulkAction(pendingBulkAction)}
+                disabled={bulkLoading}
+                className={`rounded-lg text-white px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                  pendingBulkAction === "approve" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-red-600 hover:bg-red-700"
+                }`}
+              >
+                {bulkLoading ? "Saving…" : "Confirm"}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-medium tabular-nums">{selectedKeys.size} selected</span>
+              <div className="w-px h-4 bg-border" />
+              <button
+                onClick={() => setPendingBulkAction("approve")}
+                className="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors"
+              >
+                Approve all
+              </button>
+              <button
+                onClick={() => setPendingBulkAction("reject")}
+                className="rounded-lg bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors"
+              >
+                Reject all
+              </button>
+              <button
+                onClick={() => setSelectedKeys(new Set())}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Clear
+              </button>
+            </>
+          )}
         </div>
       )}
 
