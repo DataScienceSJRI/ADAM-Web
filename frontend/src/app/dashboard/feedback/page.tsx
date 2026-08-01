@@ -257,7 +257,7 @@ export default function FeedbackPage() {
   const [page, setPage] = useState(0);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
-  const [modalState, setModalState] = useState<{ reviews: MealImageReview[]; slotLabel: string; dateLabel: string } | null>(null);
+  const [modalState, setModalState] = useState<{ reviews: MealImageReview[]; slotLabel: string; dateLabel: string; participantId: string } | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [pendingBulkAction, setPendingBulkAction] = useState<"approve" | "reject" | null>(null);
@@ -401,6 +401,7 @@ export default function FeedbackPage() {
       reviews: mealGroupToReviews(g),
       slotLabel: g.meal_slot ?? "Meal",
       dateLabel: formatIST(g.date, { weekday: "short", day: "numeric", month: "long", year: "numeric" }),
+      participantId: selected?.participant_id ?? selected?.user_id ?? "",
     });
   }
 
@@ -469,6 +470,7 @@ export default function FeedbackPage() {
           reviews={modalState.reviews}
           slotLabel={modalState.slotLabel}
           dateLabel={modalState.dateLabel}
+          participantId={modalState.participantId}
           token={token}
           onClose={() => setModalState(null)}
           onUpdated={handleSingleUpdated}

@@ -27,6 +27,16 @@ export type MealImageReview = {
   meal_slot?: string;
 };
 
+type PlannedItem = {
+  Food_Name?: string;
+  Food_Name_desc?: string;
+  Food_Qty?: number;
+  R_desc?: string;
+  Energy_kcal?: number;
+  Timings?: string;
+  Date?: string;
+};
+
 interface MatchCandidate {
   recipe_code: string;
   recipe_name: string | null;
@@ -591,11 +601,12 @@ function AiResultsSection({ label, parsed, emptyText }: { label: string; parsed:
 // ─── Main modal ───────────────────────────────────────────────────────────────
 
 export function ImageReviewModal({
-  reviews, slotLabel, dateLabel, token, onClose, onUpdated,
+  reviews, slotLabel, dateLabel, participantId, token, onClose, onUpdated,
 }: {
   reviews: MealImageReview[];
   slotLabel: string;
   dateLabel: string;
+  participantId: string;
   token: string;
   onClose: () => void;
   onUpdated: (review: MealImageReview) => void;
@@ -605,6 +616,39 @@ export function ImageReviewModal({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<"approve" | "reject" | null>(null);
+  const [plannedItems, setPlannedItems] = useState<PlannedItem[] | null>(null);
+  const [plannedLoading, setPlannedLoading] = useState(false);
+  const [plannedError, setPlannedError] = useState<string | null>(null);
+
+  // Planned foods for this date/slot — fetched once so the coordinator can
+  // compare against the photo without leaving the modal.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPlanned() {
+      setPlannedLoading(true);
+      setPlannedError(null);
+      try {
+        const res = await fetch(`/api/logs/food/${participantId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) throw new Error("Failed to load planned meals");
+        const data = (await res.json()) as { plan?: PlannedItem[] };
+        const dateStr = reviews[0].created_at.slice(0, 10);
+        const slot = (reviews[0].meal_slot ?? "").toLowerCase();
+        const items = (data.plan ?? []).filter(
+          (p) => (p.Date ?? "").slice(0, 10) === dateStr && (p.Timings ?? "").toLowerCase() === slot
+        );
+        if (!cancelled) setPlannedItems(items);
+      } catch (e) {
+        if (!cancelled) setPlannedError(e instanceof Error ? e.message : "Unknown error");
+      } finally {
+        if (!cancelled) setPlannedLoading(false);
+      }
+    }
+    loadPlanned();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participantId, token]);
 
   const parsed = parseAi(review.tracked_foods_by_ai);
   const parsedPost = parseAi(review.tracked_foods_by_ai_post);
@@ -710,7 +754,7 @@ export function ImageReviewModal({
       className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="bg-background w-full max-w-5xl rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
+      <div className="bg-background w-full max-w-6xl rounded-2xl shadow-2xl flex flex-col overflow-hidden max-h-[92vh]">
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b shrink-0">
@@ -745,8 +789,8 @@ export function ImageReviewModal({
           </div>
         </div>
 
-        {/* 2-panel body */}
-        <div className="flex-1 overflow-hidden grid grid-cols-[1fr_400px] divide-x min-h-0">
+        {/* 3-panel body */}
+        <div className="flex-1 overflow-hidden grid grid-cols-[1fr_340px_280px] divide-x min-h-0">
 
           {/* Left — Images + AI results */}
           <div className="overflow-auto p-5 space-y-5">
@@ -956,6 +1000,37 @@ export function ImageReviewModal({
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Right — Planned foods for this date/slot, for comparison against the photo */}
+          <div className="overflow-auto p-4 space-y-3">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest">
+              Planned
+            </p>
+            {plannedLoading && <p className="text-xs text-muted-foreground">Loading…</p>}
+            {plannedError && <p className="text-xs text-red-500">{plannedError}</p>}
+            {!plannedLoading && !plannedError && plannedItems?.length === 0 && (
+              <p className="text-xs text-muted-foreground italic">No plan for this slot.</p>
+            )}
+            {plannedItems && plannedItems.length > 0 && (
+              <>
+                {plannedItems.map((p, i) => (
+                  <div key={i} className="rounded-lg border px-3 py-2 space-y-0.5">
+                    <p className="text-xs font-medium truncate">{p.Food_Name ?? "—"}</p>
+                    {p.R_desc && <p className="text-[10px] text-muted-foreground">{p.R_desc}</p>}
+                    <div className="flex items-center justify-between pt-0.5">
+                      <span className="text-xs tabular-nums">{p.Food_Qty ?? "—"}</span>
+                      {p.Energy_kcal != null && (
+                        <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(p.Energy_kcal)} kcal</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                <p className="text-[10px] text-muted-foreground text-right pt-1">
+                  {Math.round(plannedItems.reduce((s, p) => s + (p.Energy_kcal ?? 0), 0))} kcal planned
+                </p>
+              </>
+            )}
           </div>
         </div>
       </div>
