@@ -179,6 +179,22 @@ def get_review(
     return resp.data[0]
 
 
+@router.delete("/reviews/{review_id}", status_code=204)
+def delete_review(
+    review_id: str,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Delete a MealImageReview row — used by the coordinator to clean up a
+    duplicate meal-photo submission. Only removes this table's row; the
+    matching DietRecall entry (if any) is deleted separately via
+    DELETE /recall/coordinator/{recall_id}."""
+    sb = get_supabase()
+    resp = sb.table("MealImageReview").delete().eq("id", review_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+
 class ReviewUpdateRequest(BaseModel):
     action: str  # "approve" | "reject" | "analyse" | "identify" | "check_consumption"
     reviewed_foods_by_human: Optional[str] = None

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { AlertTriangle, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, ChevronDown, Trash2 } from "lucide-react";
 import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
 import { formatIST } from "@/lib/utils";
 
@@ -258,6 +258,8 @@ export default function FeedbackPage() {
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
   const [modalState, setModalState] = useState<{ reviews: MealImageReview[]; slotLabel: string; dateLabel: string } | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -294,6 +296,47 @@ export default function FeedbackPage() {
   const handleSingleUpdated = useCallback((updated: MealImageReview) => {
     handleBulkUpdated([updated as unknown as Review]);
   }, [handleBulkUpdated]);
+
+  const handleGroupDeleted = useCallback((reviewIds: string[]) => {
+    setParticipants(prev =>
+      prev.map(pg => {
+        if (!pg.reviews.some(r => reviewIds.includes(r.id))) return pg;
+        const reviews = pg.reviews.filter(r => !reviewIds.includes(r.id));
+        const pending_count = groupReviews(reviews).filter(g => groupStatus(g) === "pending").length;
+        return { ...pg, reviews, pending_count };
+      })
+    );
+  }, []);
+
+  async function deleteGroup(g: MealGroup) {
+    if (!token) return;
+    setDeletingKey(g.key);
+    try {
+      const reviewIds = [...new Set([g.pre?.id, g.post?.id].filter((id): id is string => !!id))];
+      const dietRecallId = g.pre?.diet_recall_id ?? g.post?.diet_recall_id ?? null;
+
+      await Promise.all([
+        ...reviewIds.map(id =>
+          fetch(`/api/feedback/reviews/${id}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        ),
+        ...(dietRecallId
+          ? [fetch(`/api/logs/food/entry/${dietRecallId}`, {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${token}` },
+            })]
+          : []),
+      ]);
+
+      handleGroupDeleted(reviewIds);
+      setSelectedKeys(prev => { const next = new Set(prev); next.delete(g.key); return next; });
+      setConfirmDeleteKey(null);
+    } finally {
+      setDeletingKey(null);
+    }
+  }
 
   // Sidebar sorted by pending count descending
   const sortedParticipants = useMemo(
@@ -564,6 +607,7 @@ export default function FeedbackPage() {
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Waiting</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Reviewed by</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Images</th>
+                            <th className="px-4 py-2.5 w-8" />
                           </tr>
                         </thead>
                         <tbody className="divide-y">
@@ -647,6 +691,33 @@ export default function FeedbackPage() {
                                       )}
                                     </div>
                                   </div>
+                                </td>
+                                <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                                  {confirmDeleteKey === g.key ? (
+                                    <div className="flex items-center gap-1 whitespace-nowrap">
+                                      <button
+                                        onClick={() => deleteGroup(g)}
+                                        disabled={deletingKey === g.key}
+                                        className="rounded-md bg-red-500 text-white px-2 py-0.5 text-[11px] font-semibold hover:bg-red-600 disabled:opacity-50 transition-colors"
+                                      >
+                                        {deletingKey === g.key ? "…" : "Yes"}
+                                      </button>
+                                      <button
+                                        onClick={() => setConfirmDeleteKey(null)}
+                                        className="rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted transition-colors"
+                                      >
+                                        No
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => setConfirmDeleteKey(g.key)}
+                                      title="Delete this entry"
+                                      className="p-1 rounded-md text-muted-foreground hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
                                 </td>
                               </tr>
                             );
