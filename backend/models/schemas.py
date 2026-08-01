@@ -265,6 +265,20 @@ class RecallImageResponse(BaseModel):
     review_id: str
 
 
+class RecallPendingItem(BaseModel):
+    id: Optional[str] = None
+    date: Optional[str] = None
+    meal_slot: Optional[str] = None
+    image_url_pre: Optional[str] = None
+    image_url_post: Optional[str] = None
+    status: str = "pending"
+
+
+class RecallPendingResponse(BaseModel):
+    items: List[RecallPendingItem]
+    total: int
+
+
 class ReactionResponse(BaseModel):
     status: str
 

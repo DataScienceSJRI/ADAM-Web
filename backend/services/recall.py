@@ -490,12 +490,15 @@ def resolve_confirmed_foods(
 
 
 def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict]) -> bool:
-    """Write the coordinator-confirmed foods into DietRecall. A placeholder row
-    (no food data) already exists for this review from photo-upload time
-    (log_recall_image) — update it with the first confirmed food, then insert
-    one additional row per remaining food (a meal can be more than one dish),
-    mirroring how log_recall()'s text-only path creates one row per recipe_code.
-    Every written row is marked verified_by_coordinator=True.
+    """Write the coordinator-confirmed foods into the DietRecall row that's
+    been sitting there as Food_Name="Pending" since upload (log_recall_image).
+    The first confirmed food updates that row in place — same ID throughout,
+    so MealImageReview.diet_recall_id never needs to change — and any
+    additional foods (a meal can be more than one dish) get freshly-inserted
+    extra rows, same convention log_recall()'s text-only path uses. Every
+    written row is marked verified_by_coordinator=True. Finally drops the
+    now-resolved row from DietRecallBuffer.
+
     Returns False (no-op) if confirmed_foods resolves to nothing usable.
     """
     field_rows = build_diet_recall_food_rows(confirmed_foods)
@@ -503,7 +506,9 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
         return False
 
     sb = get_supabase()
-    base_resp = sb.table("DietRecall").select("user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post").eq("ID", diet_recall_id).limit(1).execute()
+    base_resp = sb.table("DietRecall").select(
+        "user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post"
+    ).eq("ID", diet_recall_id).limit(1).execute()
     base_row = base_resp.data[0] if base_resp.data else {}
 
     first, *rest = field_rows
@@ -523,15 +528,18 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
             **fields,
         }).execute()
 
+    sb.table("DietRecallBuffer").delete().eq("ID", diet_recall_id).execute()
     return True
 
 
 def reject_review_diet_recall(diet_recall_id: str) -> None:
-    """Leave DietRecall's food fields empty on reject, but note it so the
-    user/coordinator can see it needs resubmitting."""
-    get_supabase().table("DietRecall").update({
-        "notes": "Image review rejected — please resubmit",
-    }).eq("ID", diet_recall_id).execute()
+    """Delete the DietRecall row (the one that's been showing as
+    Food_Name="Pending" since upload) and its DietRecallBuffer counterpart —
+    a rejected photo leaves no trace in either table. The participant is
+    notified separately via push."""
+    sb = get_supabase()
+    sb.table("DietRecall").delete().eq("ID", diet_recall_id).execute()
+    sb.table("DietRecallBuffer").delete().eq("ID", diet_recall_id).execute()
 
 
 def log_recall_image(
@@ -541,6 +549,14 @@ def log_recall_image(
     image_url_pre: Optional[str],
     image_url_post: Optional[str],
 ) -> tuple[str, str]:
+    """Upload pre/post meal photo URLs. Writes the same placeholder row (same
+    ID) to both DietRecall — with Food_Name="Pending" so it shows up in
+    history immediately instead of being hidden — and DietRecallBuffer, which
+    exists purely so GET /recall/pending has a fast "what's still pending"
+    list without scanning DietRecall for Food_Name="Pending" rows.
+    approve_review_diet_recall updates the DietRecall row in place with the
+    real food data and drops the buffer row; reject_review_diet_recall
+    deletes both."""
     sb = get_supabase()
     now = datetime.now(timezone.utc)
     today = str(date_type.today())
@@ -564,6 +580,7 @@ def log_recall_image(
             recall_id = existing_recalls[0]["ID"]
             patch = {"image_url_post": image_url_post}
             sb.table("DietRecall").update(patch).eq("ID", recall_id).execute()
+            sb.table("DietRecallBuffer").update(patch).eq("ID", recall_id).execute()
             existing_review = (
                 sb.table("MealImageReview")
                 .select("id, review_status")
@@ -579,7 +596,9 @@ def log_recall_image(
                     _enqueue_post_identification(sb, review_id, image_url_post)
                 return recall_id, review_id
 
-    # Default: insert a new DietRecall + MealImageReview row (pre-only or both together).
+    # Default: insert a new DietRecall + DietRecallBuffer + MealImageReview row
+    # (pre-only or both together). Same ID in DietRecall and DietRecallBuffer,
+    # so approve can update the DietRecall row by that same ID later.
     recall_id = str(uuid.uuid4())
     review_id = str(uuid.uuid4())
 
@@ -594,7 +613,12 @@ def log_recall_image(
         "image_url_pre": image_url_pre,
         "image_url_post": image_url_post,
     }
-    sb.table("DietRecall").insert(placeholder).execute()
+    sb.table("DietRecall").insert({
+        **placeholder,
+        "Food_Name": "Pending",
+        "notes": "pending_review",
+    }).execute()
+    sb.table("DietRecallBuffer").insert({**placeholder, "status": "pending"}).execute()
 
     sb.table("MealImageReview").insert({
         "id": review_id,

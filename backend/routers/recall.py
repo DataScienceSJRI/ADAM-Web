@@ -17,6 +17,8 @@ from models.schemas import (
     RecallHistoryResponse,
     RecallImageResponse,
     RecallLogResponse,
+    RecallPendingItem,
+    RecallPendingResponse,
 )
 from services.recall import log_recall, log_recall_image, compute_energy_for_quantity, compute_gl_for_quantity
 
@@ -80,23 +82,9 @@ def get_recall_history(
     resp = query.order("Date", desc=True).limit(2000).execute()
     sorted_rows = _sort_recall_rows(resp.data or [])
 
-    # A meal-photo upload (POST /recall/image) inserts a DietRecall placeholder
-    # with no Food_Name until a coordinator approves the matching MealImageReview
-    # Hide it from history entirely until it's confirmed (approved -> Food_Name
-    # gets filled in) so callers never have to special-case it: an unreviewed or
-    # rejected photo simply doesn't show up as "logged" yet.
-    def _is_confirmed(r: dict) -> bool:
-        # Photo rows stay hidden until a coordinator approves the review (which
-        # fills in Food_Name); only then do they count as confirmed.
-        if r.get("image_url_pre") or r.get("image_url_post"):
-            return bool(r.get("Food_Name"))
-        if r.get("Food_Name"):
-            return True
-        if r.get("notes") == "skipped":
-            return True
-        return False
-
-    sorted_rows = [r for r in sorted_rows if _is_confirmed(r)]
+    # A meal-photo upload (POST /recall/image) writes its DietRecall row with
+    # Food_Name="Pending" immediately, so it's already visible here — no
+    # filtering needed while it awaits coordinator review.
     page = sorted_rows[offset: offset + limit]
     items = [
         RecallHistoryItem(
@@ -113,6 +101,32 @@ def get_recall_history(
         for r in page
     ]
     return RecallHistoryResponse(items=items, total=len(sorted_rows))
+
+
+@router.get("/pending", response_model=RecallPendingResponse)
+def get_pending_recalls(user_id: str = Depends(get_current_user)):
+    sb = get_supabase()
+    rows = (
+        sb.table("DietRecallBuffer")
+        .select("ID, Date, meal_slot, image_url_pre, image_url_post, status")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+        .data
+    ) or []
+    items = [
+        RecallPendingItem(
+            id=r.get("ID"),
+            date=r.get("Date"),
+            meal_slot=r.get("meal_slot"),
+            image_url_pre=r.get("image_url_pre"),
+            image_url_post=r.get("image_url_post"),
+            status=r.get("status") or "pending",
+        )
+        for r in rows
+    ]
+    return RecallPendingResponse(items=items, total=len(items))
+
 
 @router.put("/{recall_id}")
 def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = Depends(get_current_user)):
@@ -269,21 +283,6 @@ def list_coordinator_participants(
         .data
     ) or []
 
-    # Exclude image-derived rows that haven't been approved by a coordinator
-    # yet — a pending/rejected photo shouldn't count as a logged meal.
-    if recalls:
-        review_rows = (
-            sb.table("MealImageReview")
-            .select("diet_recall_id, review_status")
-            .in_("user_id", lookup_ids)
-            .neq("review_status", "approved")
-            .limit(5000)
-            .execute()
-            .data
-        ) or []
-        hidden_ids = {r["diet_recall_id"] for r in review_rows if r.get("diet_recall_id")}
-        recalls = [r for r in recalls if r["ID"] not in hidden_ids]
-
     planned = (
         sb.table("Recommendation")
         .select("user_id, Date, Timings, Food_Name_desc")
@@ -372,23 +371,6 @@ def get_participant_recall_logs(
             .execute()
             .data
         ) or []
-
-        # Image-derived rows stay invisible in the log view until the
-        # coordinator has explicitly approved them (pending/rejected reviews
-        # are hidden — only reviewed via the Image Review queue).
-        if rows:
-            review_rows = (
-                sb.table("MealImageReview")
-                .select("diet_recall_id, review_status")
-                .in_("user_id", user_filter)
-                .neq("review_status", "approved")
-                .limit(5000)
-                .execute()
-                .data
-            ) or []
-            hidden_ids = {r["diet_recall_id"] for r in review_rows if r.get("diet_recall_id")}
-            rows = [r for r in rows if r["ID"] not in hidden_ids]
-
         return _sort_recall_rows(rows)
 
     def fetch_plan():
