@@ -112,23 +112,21 @@ class DietRecallLogRequest(BaseModel):
     plan_id: str
     date: Optional[str] = None
     meal_slot: MealSlot
-    did_eat_as_planned: bool
     recipe_code: Optional[str] = None              # single recipe (legacy)
     recipe_codes: Optional[List[str]] = None       # multiple recipes (preferred)
     actual_quantity: Optional[str] = None          # single quantity (legacy)
     actual_quantities: Optional[List[str]] = None  # one per recipe_codes entry (preferred)
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "did_eat_as_planned": False, "recipe_codes": ["B000029", "A001234"], "actual_quantities": ["0.8", "1.0"]}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "date": "2026-05-22", "meal_slot": "breakfast", "recipe_codes": ["B000029", "A001234"], "actual_quantities": ["0.8", "1.0"]}}}
 
 
 class DietRecallUpdateRequest(BaseModel):
-    did_eat_as_planned: Optional[bool] = None
     food_name: Optional[str] = None
     food_qty: Optional[str] = None
     meal_slot: Optional[MealSlot] = None
     notes: Optional[str] = None
 
-    model_config = {"json_schema_extra": {"example": {"did_eat_as_planned": False, "food_name": "Idli", "food_qty": "0.75", "meal_slot": "breakfast", "notes": "ate less"}}}
+    model_config = {"json_schema_extra": {"example": {"food_name": "Idli", "food_qty": "0.75", "meal_slot": "breakfast", "notes": "ate less"}}}
 
 
 class DietRecallImageRequest(BaseModel):
@@ -136,12 +134,8 @@ class DietRecallImageRequest(BaseModel):
     meal_slot: MealSlot
     image_url_pre: Optional[str] = None
     image_url_post: Optional[str] = None
-    # Participant's own answer to "did you eat as planned?", captured at upload
-    # time. Stored on the placeholder DietRecall row and preserved when the
-    # coordinator approves the review (which otherwise defaults it to False).
-    did_eat_as_planned: Optional[bool] = None
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None, "did_eat_as_planned": False}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None}}}
 
 
 class RecipeWithQty(BaseModel):
@@ -271,6 +265,20 @@ class RecallImageResponse(BaseModel):
     review_id: str
 
 
+class RecallPendingItem(BaseModel):
+    id: Optional[str] = None
+    date: Optional[str] = None
+    meal_slot: Optional[str] = None
+    image_url_pre: Optional[str] = None
+    image_url_post: Optional[str] = None
+    status: str = "pending"
+
+
+class RecallPendingResponse(BaseModel):
+    items: List[RecallPendingItem]
+    total: int
+
+
 class ReactionResponse(BaseModel):
     status: str
 
@@ -295,7 +303,6 @@ class RecallHistoryItem(BaseModel):
     id: Optional[str] = None
     date: Optional[str] = None
     meal_slot: Optional[str] = None
-    did_eat_as_planned: Optional[bool] = None
     food_name: Optional[str] = None
     food_qty: Optional[float] = None
     r_desc: Optional[str] = None

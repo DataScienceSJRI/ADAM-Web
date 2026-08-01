@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { AlertTriangle, ChevronLeft, ChevronRight, ChevronDown } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, ChevronDown, Trash2 } from "lucide-react";
 import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
 import { formatIST } from "@/lib/utils";
 
@@ -257,7 +257,10 @@ export default function FeedbackPage() {
   const [page, setPage] = useState(0);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
-  const [modalState, setModalState] = useState<{ reviews: MealImageReview[]; slotLabel: string; dateLabel: string } | null>(null);
+  const [modalState, setModalState] = useState<{ reviews: MealImageReview[]; slotLabel: string; dateLabel: string; participantId: string } | null>(null);
+  const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const [pendingBulkAction, setPendingBulkAction] = useState<"approve" | "reject" | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -295,6 +298,47 @@ export default function FeedbackPage() {
     handleBulkUpdated([updated as unknown as Review]);
   }, [handleBulkUpdated]);
 
+  const handleGroupDeleted = useCallback((reviewIds: string[]) => {
+    setParticipants(prev =>
+      prev.map(pg => {
+        if (!pg.reviews.some(r => reviewIds.includes(r.id))) return pg;
+        const reviews = pg.reviews.filter(r => !reviewIds.includes(r.id));
+        const pending_count = groupReviews(reviews).filter(g => groupStatus(g) === "pending").length;
+        return { ...pg, reviews, pending_count };
+      })
+    );
+  }, []);
+
+  async function deleteGroup(g: MealGroup) {
+    if (!token) return;
+    setDeletingKey(g.key);
+    try {
+      const reviewIds = [...new Set([g.pre?.id, g.post?.id].filter((id): id is string => !!id))];
+      const dietRecallId = g.pre?.diet_recall_id ?? g.post?.diet_recall_id ?? null;
+
+      await Promise.all([
+        ...reviewIds.map(id =>
+          fetch(`/api/feedback/reviews/${id}`, {
+            method: "DELETE",
+            headers: { Authorization: `Bearer ${token}` },
+          })
+        ),
+        ...(dietRecallId
+          ? [fetch(`/api/logs/food/entry/${dietRecallId}`, {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${token}` },
+            })]
+          : []),
+      ]);
+
+      handleGroupDeleted(reviewIds);
+      setSelectedKeys(prev => { const next = new Set(prev); next.delete(g.key); return next; });
+      setConfirmDeleteKey(null);
+    } finally {
+      setDeletingKey(null);
+    }
+  }
+
   // Sidebar sorted by pending count descending
   const sortedParticipants = useMemo(
     () => [...participants].sort((a, b) => b.pending_count - a.pending_count),
@@ -328,8 +372,8 @@ export default function FeedbackPage() {
   }, [dateGroups, statusFilter]);
 
   // Reset to newest date when participant changes
-  useEffect(() => { setDateIndex(0); setPage(0); setSelectedKeys(new Set()); setStatusFilter("all"); }, [selectedId]);
-  useEffect(() => { setPage(0); setSelectedKeys(new Set()); }, [dateIndex, statusFilter]);
+  useEffect(() => { setDateIndex(0); setPage(0); setSelectedKeys(new Set()); setStatusFilter("all"); setPendingBulkAction(null); }, [selectedId]);
+  useEffect(() => { setPage(0); setSelectedKeys(new Set()); setPendingBulkAction(null); }, [dateIndex, statusFilter]);
 
   const totalPages = Math.ceil(displayGroups.length / PAGE_SIZE);
   const pagedGroups = displayGroups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -357,6 +401,7 @@ export default function FeedbackPage() {
       reviews: mealGroupToReviews(g),
       slotLabel: g.meal_slot ?? "Meal",
       dateLabel: formatIST(g.date, { weekday: "short", day: "numeric", month: "long", year: "numeric" }),
+      participantId: selected?.participant_id ?? selected?.user_id ?? "",
     });
   }
 
@@ -376,6 +421,7 @@ export default function FeedbackPage() {
 
   async function doBulkAction(action: "approve" | "reject") {
     if (!token) return;
+    setPendingBulkAction(null);
     setBulkLoading(true);
     try {
       const targets = displayGroups.filter(g => selectedKeys.has(g.key));
@@ -424,6 +470,7 @@ export default function FeedbackPage() {
           reviews={modalState.reviews}
           slotLabel={modalState.slotLabel}
           dateLabel={modalState.dateLabel}
+          participantId={modalState.participantId}
           token={token}
           onClose={() => setModalState(null)}
           onUpdated={handleSingleUpdated}
@@ -431,30 +478,55 @@ export default function FeedbackPage() {
       )}
 
       {/* Bulk action bar */}
-      {selectedKeys.size > 0 && (
+      {statusFilter === "pending" && selectedKeys.size > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 flex items-center gap-3 bg-background border rounded-xl px-5 py-3 shadow-xl">
-          <span className="text-sm font-medium tabular-nums">{selectedKeys.size} selected</span>
-          <div className="w-px h-4 bg-border" />
-          <button
-            onClick={() => doBulkAction("approve")}
-            disabled={bulkLoading}
-            className="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            {bulkLoading ? "Saving…" : "Approve all"}
-          </button>
-          <button
-            onClick={() => doBulkAction("reject")}
-            disabled={bulkLoading}
-            className="rounded-lg bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50"
-          >
-            Reject all
-          </button>
-          <button
-            onClick={() => setSelectedKeys(new Set())}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            Clear
-          </button>
+          {pendingBulkAction ? (
+            <>
+              <span className="text-sm font-medium">
+                {pendingBulkAction === "approve" ? "Approve" : "Reject"} {selectedKeys.size} selected?
+              </span>
+              <div className="w-px h-4 bg-border" />
+              <button
+                onClick={() => setPendingBulkAction(null)}
+                disabled={bulkLoading}
+                className="rounded-lg border px-4 py-1.5 text-xs font-semibold hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => doBulkAction(pendingBulkAction)}
+                disabled={bulkLoading}
+                className={`rounded-lg text-white px-4 py-1.5 text-xs font-semibold transition-colors disabled:opacity-50 ${
+                  pendingBulkAction === "approve" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-red-600 hover:bg-red-700"
+                }`}
+              >
+                {bulkLoading ? "Saving…" : "Confirm"}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-sm font-medium tabular-nums">{selectedKeys.size} selected</span>
+              <div className="w-px h-4 bg-border" />
+              <button
+                onClick={() => setPendingBulkAction("approve")}
+                className="rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors"
+              >
+                Approve all
+              </button>
+              <button
+                onClick={() => setPendingBulkAction("reject")}
+                className="rounded-lg bg-red-600 hover:bg-red-700 text-white px-4 py-1.5 text-xs font-semibold transition-colors"
+              >
+                Reject all
+              </button>
+              <button
+                onClick={() => setSelectedKeys(new Set())}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                Clear
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -550,18 +622,21 @@ export default function FeedbackPage() {
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-b bg-muted/30">
-                            <th className="px-4 py-2.5 w-8">
-                              <IndeterminateCheckbox
-                                checked={allPageSelected}
-                                indeterminate={somePageSelected}
-                                onChange={togglePageSelect}
-                              />
-                            </th>
+                            {statusFilter === "pending" && (
+                              <th className="px-4 py-2.5 w-8">
+                                <IndeterminateCheckbox
+                                  checked={allPageSelected}
+                                  indeterminate={somePageSelected}
+                                  onChange={togglePageSelect}
+                                />
+                              </th>
+                            )}
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Meal</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Status</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Waiting</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Reviewed by</th>
                             <th className="text-left px-4 py-2.5 text-xs font-semibold text-muted-foreground">Images</th>
+                            <th className="px-4 py-2.5 w-8" />
                           </tr>
                         </thead>
                         <tbody className="divide-y">
@@ -577,18 +652,20 @@ export default function FeedbackPage() {
                                 key={g.key}
                                 className={`transition-colors ${isChecked ? "bg-primary/5" : "hover:bg-muted/30"} cursor-pointer bg-[#fbfbfb] dark:bg-transparent`}
                               >
-                                <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                                  <input
-                                    type="checkbox"
-                                    checked={isChecked}
-                                    onChange={() => setSelectedKeys(prev => {
-                                      const next = new Set(prev);
-                                      if (isChecked) next.delete(g.key); else next.add(g.key);
-                                      return next;
-                                    })}
-                                    className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary cursor-pointer"
-                                  />
-                                </td>
+                                {statusFilter === "pending" && (
+                                  <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => setSelectedKeys(prev => {
+                                        const next = new Set(prev);
+                                        if (isChecked) next.delete(g.key); else next.add(g.key);
+                                        return next;
+                                      })}
+                                      className="h-3.5 w-3.5 rounded border-muted-foreground/40 accent-primary cursor-pointer"
+                                    />
+                                  </td>
+                                )}
                                 <td className="px-4 py-3" onClick={() => openModal(g)}>
                                   {g.meal_slot
                                     ? <MealSlotBadge slot={g.meal_slot} />
@@ -643,6 +720,33 @@ export default function FeedbackPage() {
                                       )}
                                     </div>
                                   </div>
+                                </td>
+                                <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                                  {confirmDeleteKey === g.key ? (
+                                    <div className="flex items-center gap-1 whitespace-nowrap">
+                                      <button
+                                        onClick={() => deleteGroup(g)}
+                                        disabled={deletingKey === g.key}
+                                        className="rounded-md bg-red-500 text-white px-2 py-0.5 text-[11px] font-semibold hover:bg-red-600 disabled:opacity-50 transition-colors"
+                                      >
+                                        {deletingKey === g.key ? "…" : "Yes"}
+                                      </button>
+                                      <button
+                                        onClick={() => setConfirmDeleteKey(null)}
+                                        className="rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted transition-colors"
+                                      >
+                                        No
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => setConfirmDeleteKey(g.key)}
+                                      title="Delete this entry"
+                                      className="p-1 rounded-md text-muted-foreground hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
                                 </td>
                               </tr>
                             );

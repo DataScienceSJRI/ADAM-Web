@@ -20,7 +20,8 @@ def _participant_email(user_id: str) -> str:
 
 
 def _write_review_log(*, sb, review: dict, review_id: str, coordinator_id: str,
-                      action: str, human_corrected: str | None, reviewed_at: str) -> None:
+                      action: str, human_corrected: str | None, reviewed_at: str,
+                      meal_slot: str | None = None) -> None:
     """Append a row to FoodReviewLog whenever a review is approved or rejected."""
     import json
 
@@ -33,10 +34,8 @@ def _write_review_log(*, sb, review: dict, review_id: str, coordinator_id: str,
         except Exception:
             ai_json = None
 
-    # Fetch meal_slot from DietRecall (best-effort)
-    meal_slot: str | None = None
     diet_recall_id = review.get("diet_recall_id")
-    if diet_recall_id:
+    if meal_slot is None and diet_recall_id:
         try:
             rc = sb.table("DietRecall").select("meal_slot").eq("ID", diet_recall_id).limit(1).execute()
             if rc.data:
@@ -66,15 +65,14 @@ def _write_review_log(*, sb, review: dict, review_id: str, coordinator_id: str,
         logger.exception("Failed to write FoodReviewLog for review %s", review_id)
 
 
-def _notify_participant_review_result(sb, review: dict, action: str) -> None:
+def _notify_participant_review_result(sb, review: dict, action: str, meal_slot: str | None = None) -> None:
     """Push a notification to the participant once a coordinator approves
     or rejects their meal-photo review."""
     try:
         from services.push import send_push
 
         diet_recall_id = review.get("diet_recall_id")
-        meal_slot = None
-        if diet_recall_id:
+        if meal_slot is None and diet_recall_id:
             rc = sb.table("DietRecall").select("meal_slot").eq("ID", diet_recall_id).limit(1).execute()
             if rc.data:
                 meal_slot = rc.data[0].get("meal_slot")
@@ -181,6 +179,22 @@ def get_review(
     return resp.data[0]
 
 
+@router.delete("/reviews/{review_id}", status_code=204)
+def delete_review(
+    review_id: str,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Delete a MealImageReview row — used by the coordinator to clean up a
+    duplicate meal-photo submission. Only removes this table's row; the
+    matching DietRecall entry (if any) is deleted separately via
+    DELETE /recall/coordinator/{recall_id}."""
+    sb = get_supabase()
+    resp = sb.table("MealImageReview").delete().eq("id", review_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Review not found")
+
+
 class ReviewUpdateRequest(BaseModel):
     action: str  # "approve" | "reject" | "analyse" | "identify" | "check_consumption"
     reviewed_foods_by_human: Optional[str] = None
@@ -272,6 +286,13 @@ def update_review(
 
         from services.recall import approve_review_diet_recall, reject_review_diet_recall, resolve_confirmed_foods
 
+        diet_recall_id = review.get("diet_recall_id")
+        meal_slot = None
+        if diet_recall_id:
+            rc = sb.table("DietRecall").select("meal_slot").eq("ID", diet_recall_id).limit(1).execute()
+            if rc.data:
+                meal_slot = rc.data[0].get("meal_slot")
+
         if body.action == "approve":
             confirmed_foods = resolve_confirmed_foods(
                 body.reviewed_foods_by_human,
@@ -288,7 +309,7 @@ def update_review(
         else:
             reject_review_diet_recall(review["diet_recall_id"])
 
-        _notify_participant_review_result(sb, review, body.action)
+        _notify_participant_review_result(sb, review, body.action, meal_slot=meal_slot)
 
         _write_review_log(
             sb=sb,
@@ -297,6 +318,7 @@ def update_review(
             coordinator_id=user_id,
             action=body.action,
             human_corrected=body.reviewed_foods_by_human,
+            meal_slot=meal_slot,
             reviewed_at=now_iso,
         )
 

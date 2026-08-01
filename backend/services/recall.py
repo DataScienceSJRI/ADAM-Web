@@ -136,7 +136,6 @@ def log_recall(
     user_id: str,
     plan_id: str,
     meal_slot: MealSlot,
-    did_eat_as_planned: bool,
     date: Optional[str] = None,
     recipe_codes: Optional[List[str]] = None,
     actual_quantities: Optional[List[str]] = None,
@@ -146,95 +145,103 @@ def log_recall(
     now = datetime.now(timezone.utc)
     recall_ids: List[str] = []
 
-    if did_eat_as_planned:
-        planned = _fetch_planned_meals(user_id, plan_id, meal_slot, target_date)
+    codes_to_log = recipe_codes or []
 
-        if not planned:
-            logger.warning(
-                "No planned meals found for user=%s plan=%s slot=%s date=%s",
-                user_id, plan_id, meal_slot.value, target_date,
-            )
-
-        planned_codes = [item.get("Food_Name_desc") for item in planned if item.get("Food_Name_desc")]
-        base_gl_map = fetch_base_gl_map(sb, planned_codes)
-        portion_map = fetch_portion_map(sb, planned_codes)
-
-        for item in planned:
-            recall_id = str(uuid.uuid4())
-            code = item.get("Food_Name_desc")
-            food_qty = item.get("Food_Qty")
-            row = {
-                "ID": recall_id,
-                "user_id": user_id,
-                "Date": target_date,
-                "Time": now.strftime("%H:%M:%S"),
-                "created_at": now.isoformat(),
-                "plan_id": plan_id,
-                "meal_slot": meal_slot.value,
-                "did_eat_as_planned": True,
-                "Food_Name": item.get("Food_Name"),
-                "Food_Name_desc": code,
-                "Food_Qty": food_qty,
-                "R_desc": item.get("R_desc"),
-                "Energy_Kcal": int(round(float(item["Energy_kcal"]))) if item.get("Energy_kcal") is not None else None,
-                "GL": gl_for_quantity(base_gl_map.get(code), portion_map.get(code), food_qty),
-            }
-            sb.table("DietRecall").insert(row).execute()
-            recall_ids.append(recall_id)
-
+    if not codes_to_log:
+        recall_id = str(uuid.uuid4())
+        sb.table("DietRecall").insert({
+            "ID": recall_id,
+            "user_id": user_id,
+            "Date": target_date,
+            "Time": now.strftime("%H:%M:%S"),
+            "created_at": now.isoformat(),
+            "plan_id": plan_id,
+            "meal_slot": meal_slot.value,
+            "notes": "skipped",
+        }).execute()
+        recall_ids.append(recall_id)
     else:
-        codes_to_log = recipe_codes or []
+        # Planned meals for this slot, keyed by recipe code. When a recalled
+        # code matches one of these, its Energy_Kcal comes straight from the
+        # plan's own precomputed value (scaled if the entered quantity differs
+        # from what was planned) instead of being recomputed from Recipe —
+        # keeps "planned" and "logged" energy for the same food from drifting
+        # apart due to differing computation paths.
+        #
+        # GL is NOT stored on Recommendation at all (see routers/kpi.py's
+        # _planned_gl_energy_daily_totals) — every consumer, including the
+        # plan's own display, recomputes it from Recipe/RecipeTagging's base
+        # GL scaled by quantity. So GL is always computed that way here too,
+        # for every code regardless of plan match.
+        planned_by_code = {
+            item["Food_Name_desc"]: item
+            for item in _fetch_planned_meals(user_id, plan_id, meal_slot, target_date)
+            if item.get("Food_Name_desc")
+        }
 
-        if not codes_to_log:
-            # Skipped entirely — single row with no food info
-            recall_id = str(uuid.uuid4())
-            sb.table("DietRecall").insert({
-                "ID": recall_id,
-                "user_id": user_id,
-                "Date": target_date,
-                "Time": now.strftime("%H:%M:%S"),
-                "created_at": now.isoformat(),
-                "plan_id": plan_id,
-                "meal_slot": meal_slot.value,
-                "did_eat_as_planned": False,
-                "notes": "skipped",
-            }).execute()
-            recall_ids.append(recall_id)
-        else:
-            # Fetch recipe info and default unit (Description) from RecipeTagging
-            recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", codes_to_log).execute()
+        base_gl_map = fetch_base_gl_map(sb, codes_to_log)
+        portion_map = fetch_portion_map(sb, codes_to_log)
+
+        # Only codes that aren't already covered by the plan need Recipe name/
+        # energy/description lookups.
+        unplanned_codes = [c for c in codes_to_log if c not in planned_by_code]
+        recipe_map: dict = {}
+        desc_map: dict = {}
+        if unplanned_codes:
+            recipe_resp = sb.table("Recipe").select("Recipe_Code, Recipe_Name, Energy_ENERC_KJ").in_("Recipe_Code", unplanned_codes).execute()
             recipe_map = {r["Recipe_Code"]: r for r in (recipe_resp.data or [])}
 
-            tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description, Portion").in_("Recipe_Code", codes_to_log).execute()
-            tag_map = {t["Recipe_Code"]: t for t in (tag_resp.data or []) if t.get("Recipe_Code")}
-            base_gl_map = fetch_base_gl_map(sb, codes_to_log)
+            tag_resp = sb.table("RecipeTagging").select("Recipe_Code, Description").in_("Recipe_Code", unplanned_codes).execute()
+            desc_map = {t["Recipe_Code"]: t.get("Description") for t in (tag_resp.data or []) if t.get("Recipe_Code")}
 
-            for i, code in enumerate(codes_to_log):
-                recall_id = str(uuid.uuid4())
-                row: dict = {
-                    "ID": recall_id,
-                    "user_id": user_id,
-                    "Date": target_date,
-                    "Time": now.strftime("%H:%M:%S"),
-                    "created_at": now.isoformat(),
-                    "plan_id": plan_id,
-                    "meal_slot": meal_slot.value,
-                    "did_eat_as_planned": False,
-                    "notes": "changed",
-                }
-                # actual_quantities is the absolute quantity the user entered, in the
-                # recipe's own portion unit (e.g. Cups) — same as Food_Qty elsewhere.
-                # Divide by RecipeTagging.Portion (the recipe's full-portion size) to
-                # get the eaten fraction, exactly like build_daily_nutrient_summary
-                # (routers/kpi.py) does when it reads Food_Qty back later.
-                qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
-                tag_info = tag_map.get(code, {})
+        for i, code in enumerate(codes_to_log):
+            recall_id = str(uuid.uuid4())
+            row: dict = {
+                "ID": recall_id,
+                "user_id": user_id,
+                "Date": target_date,
+                "Time": now.strftime("%H:%M:%S"),
+                "created_at": now.isoformat(),
+                "plan_id": plan_id,
+                "meal_slot": meal_slot.value,
+            }
+            # actual_quantities is the absolute quantity the user entered, in the
+            # recipe's own portion unit (e.g. Cups) — same as Food_Qty elsewhere.
+            qty = actual_quantities[i] if actual_quantities and i < len(actual_quantities) else None
+            try:
+                entered_qty = float(qty) if qty not in (None, "") else None
+            except (TypeError, ValueError):
+                entered_qty = None
+
+            planned_item = planned_by_code.get(code)
+
+            if planned_item is not None:
+                planned_qty = planned_item.get("Food_Qty")
                 try:
-                    entered_qty = float(qty)
-                    base_portion = float(tag_info.get("Portion"))
-                    prop = (entered_qty / base_portion) if base_portion > 0 else 1.0
+                    prop = (entered_qty / float(planned_qty)) if entered_qty is not None and planned_qty else 1.0
+                except (TypeError, ValueError, ZeroDivisionError):
+                    prop = 1.0
+                effective_qty = entered_qty if entered_qty is not None else planned_qty
+
+                row["Food_Name"] = planned_item.get("Food_Name") or code
+                row["Food_Name_desc"] = code
+                if planned_item.get("R_desc"):
+                    row["R_desc"] = planned_item["R_desc"]
+                row["Food_Qty"] = effective_qty
+                if planned_item.get("Energy_kcal") is not None:
+                    row["Energy_Kcal"] = int(round(float(planned_item["Energy_kcal"]) * prop))
+            else:
+                # Not on the plan — compute Name/Energy from Recipe/RecipeTagging.
+                # Divide by RecipeTagging.Portion (the recipe's full-portion
+                # size) to get the eaten fraction, the same way
+                # build_daily_nutrient_summary (routers/kpi.py) does when it
+                # reads Food_Qty back later.
+                try:
+                    base_portion = float(portion_map.get(code))
+                    prop = (entered_qty / base_portion) if entered_qty is not None and base_portion > 0 else 1.0
                 except (TypeError, ValueError):
                     prop = 1.0
+                effective_qty = entered_qty
 
                 recipe = recipe_map.get(code)
                 if recipe:
@@ -246,16 +253,17 @@ def log_recall(
                 else:
                     row["Food_Name"] = code
                     row["Food_Name_desc"] = code
-                desc = tag_info.get("Description")
+                desc = desc_map.get(code)
                 if desc and str(desc).strip().lower() not in ("nan", "none", ""):
                     row["R_desc"] = str(desc).strip()
-                if qty:
-                    # Store the entered quantity as-is (absolute, same unit as the
-                    # "ate as planned" path's Food_Qty) so both paths mean the same thing.
+                if effective_qty is not None:
                     row["Food_Qty"] = qty
-                    row["GL"] = gl_for_quantity(base_gl_map.get(code), tag_info.get("Portion"), qty)
-                sb.table("DietRecall").insert(row).execute()
-                recall_ids.append(recall_id)
+
+            if effective_qty is not None:
+                row["GL"] = gl_for_quantity(base_gl_map.get(code), portion_map.get(code), effective_qty)
+
+            sb.table("DietRecall").insert(row).execute()
+            recall_ids.append(recall_id)
 
     return recall_ids
 
@@ -482,12 +490,15 @@ def resolve_confirmed_foods(
 
 
 def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict]) -> bool:
-    """Write the coordinator-confirmed foods into DietRecall. A placeholder row
-    (no food data) already exists for this review from photo-upload time
-    (log_recall_image) — update it with the first confirmed food, then insert
-    one additional row per remaining food (a meal can be more than one dish),
-    mirroring how log_recall()'s text-only path creates one row per recipe_code.
-    Every written row is marked verified_by_coordinator=True.
+    """Write the coordinator-confirmed foods into the DietRecall row that's
+    been sitting there as Food_Name="Pending" since upload (log_recall_image).
+    The first confirmed food updates that row in place — same ID throughout,
+    so MealImageReview.diet_recall_id never needs to change — and any
+    additional foods (a meal can be more than one dish) get freshly-inserted
+    extra rows, same convention log_recall()'s text-only path uses. Every
+    written row is marked verified_by_coordinator=True. Finally drops the
+    now-resolved row from DietRecallBuffer.
+
     Returns False (no-op) if confirmed_foods resolves to nothing usable.
     """
     field_rows = build_diet_recall_food_rows(confirmed_foods)
@@ -495,16 +506,14 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
         return False
 
     sb = get_supabase()
-    base_resp = sb.table("DietRecall").select("user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post, did_eat_as_planned").eq("ID", diet_recall_id).limit(1).execute()
+    base_resp = sb.table("DietRecall").select(
+        "user_id, Date, Time, plan_id, meal_slot, image_url_pre, image_url_post"
+    ).eq("ID", diet_recall_id).limit(1).execute()
     base_row = base_resp.data[0] if base_resp.data else {}
-    # Keep the participant's upload-time answer to "did you eat as planned?"
-    # where one was given; photo logs without it keep the old default of False.
-    ate_as_planned = bool(base_row.pop("did_eat_as_planned", None))
 
     first, *rest = field_rows
     sb.table("DietRecall").update({
         **first,
-        "did_eat_as_planned": ate_as_planned,
         "notes": "verified",
         "verified_by_coordinator": True,
     }).eq("ID", diet_recall_id).execute()
@@ -513,22 +522,24 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
         sb.table("DietRecall").insert({
             "ID": str(uuid.uuid4()),
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "did_eat_as_planned": ate_as_planned,
             "notes": "verified",
             "verified_by_coordinator": True,
             **base_row,
             **fields,
         }).execute()
 
+    sb.table("DietRecallBuffer").delete().eq("ID", diet_recall_id).execute()
     return True
 
 
 def reject_review_diet_recall(diet_recall_id: str) -> None:
-    """Leave DietRecall's food fields empty on reject, but note it so the
-    user/coordinator can see it needs resubmitting."""
-    get_supabase().table("DietRecall").update({
-        "notes": "Image review rejected — please resubmit",
-    }).eq("ID", diet_recall_id).execute()
+    """Delete the DietRecall row (the one that's been showing as
+    Food_Name="Pending" since upload) and its DietRecallBuffer counterpart —
+    a rejected photo leaves no trace in either table. The participant is
+    notified separately via push."""
+    sb = get_supabase()
+    sb.table("DietRecall").delete().eq("ID", diet_recall_id).execute()
+    sb.table("DietRecallBuffer").delete().eq("ID", diet_recall_id).execute()
 
 
 def log_recall_image(
@@ -537,8 +548,15 @@ def log_recall_image(
     meal_slot: MealSlot,
     image_url_pre: Optional[str],
     image_url_post: Optional[str],
-    did_eat_as_planned: Optional[bool] = None,
 ) -> tuple[str, str]:
+    """Upload pre/post meal photo URLs. Writes the same placeholder row (same
+    ID) to both DietRecall — with Food_Name="Pending" so it shows up in
+    history immediately instead of being hidden — and DietRecallBuffer, which
+    exists purely so GET /recall/pending has a fast "what's still pending"
+    list without scanning DietRecall for Food_Name="Pending" rows.
+    approve_review_diet_recall updates the DietRecall row in place with the
+    real food data and drops the buffer row; reject_review_diet_recall
+    deletes both."""
     sb = get_supabase()
     now = datetime.now(timezone.utc)
     today = str(date_type.today())
@@ -561,9 +579,8 @@ def log_recall_image(
         if existing_recalls:
             recall_id = existing_recalls[0]["ID"]
             patch = {"image_url_post": image_url_post}
-            if did_eat_as_planned is not None:
-                patch["did_eat_as_planned"] = did_eat_as_planned
             sb.table("DietRecall").update(patch).eq("ID", recall_id).execute()
+            sb.table("DietRecallBuffer").update(patch).eq("ID", recall_id).execute()
             existing_review = (
                 sb.table("MealImageReview")
                 .select("id, review_status")
@@ -579,7 +596,9 @@ def log_recall_image(
                     _enqueue_post_identification(sb, review_id, image_url_post)
                 return recall_id, review_id
 
-    # Default: insert a new DietRecall + MealImageReview row (pre-only or both together).
+    # Default: insert a new DietRecall + DietRecallBuffer + MealImageReview row
+    # (pre-only or both together). Same ID in DietRecall and DietRecallBuffer,
+    # so approve can update the DietRecall row by that same ID later.
     recall_id = str(uuid.uuid4())
     review_id = str(uuid.uuid4())
 
@@ -594,9 +613,12 @@ def log_recall_image(
         "image_url_pre": image_url_pre,
         "image_url_post": image_url_post,
     }
-    if did_eat_as_planned is not None:
-        placeholder["did_eat_as_planned"] = did_eat_as_planned
-    sb.table("DietRecall").insert(placeholder).execute()
+    sb.table("DietRecall").insert({
+        **placeholder,
+        "Food_Name": "Pending",
+        "notes": "pending_review",
+    }).execute()
+    sb.table("DietRecallBuffer").insert({**placeholder, "status": "pending"}).execute()
 
     sb.table("MealImageReview").insert({
         "id": review_id,

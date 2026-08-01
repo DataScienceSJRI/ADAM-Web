@@ -50,23 +50,51 @@ def _sb(data=None, count=None):
     return m
 
 
+def _multi_sb(table_data: dict):
+    """Return a mock Supabase client where .table(name) yields a distinct,
+    persistent mock per table name — every op on that table (select/insert/
+    update/delete) returns table_data.get(name, []) from execute(), and each
+    table's insert/update/delete calls can be asserted independently via
+    sb._tables[name]. Needed wherever a function under test touches more than
+    one table (e.g. reads DietRecallBuffer, writes DietRecall, patches
+    MealImageReview) — the single-table _sb() can't distinguish between them.
+    """
+    m = MagicMock()
+    table_mocks: dict = {}
+
+    def table_side_effect(name):
+        if name not in table_mocks:
+            tm = MagicMock()
+            result = MagicMock()
+            result.data = table_data.get(name, [])
+            for meth in ("select", "eq", "neq", "is_", "in_", "order",
+                         "range", "limit", "update", "delete", "insert", "upsert"):
+                getattr(tm, meth).return_value = tm
+            tm.execute.return_value = result
+            table_mocks[name] = tm
+        return table_mocks[name]
+
+    m.table.side_effect = table_side_effect
+    m._tables = table_mocks
+    return m
+
+
 # ─── POST /recall/log ─────────────────────────────────────────────────────────
 
 class TestPostRecallLog:
-    _BASE_PAYLOAD = {"plan_id": "plan-1", "meal_slot": "breakfast", "did_eat_as_planned": True}
+    _BASE_PAYLOAD = {"plan_id": "plan-1", "meal_slot": "breakfast"}
 
-    def test_ate_as_planned_returns_recall_ids(self, client):
+    def test_recall_returns_recall_ids(self, client):
         with patch("routers.recall.log_recall", return_value=["id-a", "id-b"]):
             r = client.post(f"{BASE}/log", json=self._BASE_PAYLOAD)
         assert r.status_code == 200
         assert r.json() == {"status": "ok", "recall_ids": ["id-a", "id-b"]}
 
-    def test_changed_multiple_recipes(self, client):
+    def test_multiple_recipes(self, client):
         with patch("routers.recall.log_recall", return_value=["id-c", "id-d"]) as fn:
             r = client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "lunch",
-                "did_eat_as_planned": False,
                 "recipe_codes": ["R001", "R002"],
                 "actual_quantities": ["0.8", "1.0"],
             })
@@ -74,14 +102,12 @@ class TestPostRecallLog:
         kw = fn.call_args.kwargs
         assert kw["recipe_codes"] == ["R001", "R002"]
         assert kw["actual_quantities"] == ["0.8", "1.0"]
-        assert kw["did_eat_as_planned"] is False
 
     def test_skipped_meal_passes_none_codes(self, client):
         with patch("routers.recall.log_recall", return_value=["skip-id"]) as fn:
             r = client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "dinner",
-                "did_eat_as_planned": False,
             })
         assert r.status_code == 200
         kw = fn.call_args.kwargs
@@ -93,7 +119,6 @@ class TestPostRecallLog:
             client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "breakfast",
-                "did_eat_as_planned": False,
                 "recipe_code": "R999",
                 "actual_quantity": "1.5",
             })
@@ -106,7 +131,6 @@ class TestPostRecallLog:
             client.post(f"{BASE}/log", json={
                 "plan_id": "plan-1",
                 "meal_slot": "breakfast",
-                "did_eat_as_planned": False,
                 "recipe_code": "OLD",
                 "recipe_codes": ["NEW1", "NEW2"],
             })
@@ -123,7 +147,7 @@ class TestPostRecallLog:
         assert fn.call_args.kwargs["date"] == "2026-06-10"
 
     def test_missing_plan_id_returns_422(self, client):
-        r = client.post(f"{BASE}/log", json={"meal_slot": "breakfast", "did_eat_as_planned": True})
+        r = client.post(f"{BASE}/log", json={"meal_slot": "breakfast"})
         assert r.status_code == 422
 
     def test_invalid_meal_slot_returns_422(self, client):
@@ -138,7 +162,6 @@ class TestGetRecall:
         "ID": "r1",
         "Date": "2026-06-01",
         "meal_slot": "breakfast",
-        "did_eat_as_planned": True,
         "Food_Name": "Idli",
         "Food_Qty": 1.0,
         "Energy_Kcal": 150,
@@ -222,13 +245,6 @@ class TestPutRecall:
         assert r.status_code == 200
         sb.update.assert_called_once_with({"Food_Qty": "0.75"})
 
-    def test_update_did_eat_as_planned(self, client):
-        sb = _sb(data=[{"ID": self._ID}])
-        with patch("routers.recall.get_supabase", return_value=sb):
-            r = client.put(f"{BASE}/{self._ID}", json={"did_eat_as_planned": False})
-        assert r.status_code == 200
-        sb.update.assert_called_once_with({"did_eat_as_planned": False})
-
     def test_multiple_fields_at_once(self, client):
         sb = _sb(data=[{"ID": self._ID}])
         with patch("routers.recall.get_supabase", return_value=sb):
@@ -307,24 +323,6 @@ class TestPostRecallImage:
         assert kw["image_url_pre"] == "https://storage/pre.jpg"
         assert kw["image_url_post"] is None
 
-    def test_did_eat_as_planned_forwarded(self, client):
-        with patch("routers.recall.log_recall_image", return_value=("rc-p", "rv-p")) as fn:
-            r = client.post(f"{BASE}/image", json={
-                **self._BASE,
-                "image_url_pre": "https://storage/pre.jpg",
-                "did_eat_as_planned": True,
-            })
-        assert r.status_code == 200
-        assert fn.call_args.kwargs["did_eat_as_planned"] is True
-
-    def test_did_eat_as_planned_defaults_to_none(self, client):
-        with patch("routers.recall.log_recall_image", return_value=("rc-q", "rv-q")) as fn:
-            client.post(f"{BASE}/image", json={
-                **self._BASE,
-                "image_url_pre": "https://storage/pre.jpg",
-            })
-        assert fn.call_args.kwargs["did_eat_as_planned"] is None
-
     def test_post_image_only_triggers_upsert_path(self, client):
         with patch("routers.recall.log_recall_image", return_value=("rc-2", "rv-2")) as fn:
             r = client.post(f"{BASE}/image", json={
@@ -374,3 +372,108 @@ class TestPostRecallImage:
     def test_invalid_meal_slot_returns_422(self, client):
         r = client.post(f"{BASE}/image", json={**self._BASE, "meal_slot": "brunch", "image_url_pre": "url"})
         assert r.status_code == 422
+
+
+# ─── GET /recall/pending ───────────────────────────────────────────────────────
+
+class TestGetPendingRecalls:
+    def test_returns_pending_items(self, client):
+        sb = _sb(data=[{
+            "ID": "buf-1", "Date": "2026-06-01", "meal_slot": "breakfast",
+            "image_url_pre": "https://storage/pre.jpg", "image_url_post": None,
+            "status": "pending",
+        }])
+        with patch("routers.recall.get_supabase", return_value=sb):
+            r = client.get(f"{BASE}/pending")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["total"] == 1
+        assert body["items"][0]["id"] == "buf-1"
+        assert body["items"][0]["status"] == "pending"
+
+    def test_empty(self, client):
+        sb = _sb(data=[])
+        with patch("routers.recall.get_supabase", return_value=sb):
+            r = client.get(f"{BASE}/pending")
+        assert r.json() == {"items": [], "total": 0}
+
+    def test_scoped_to_current_user(self, client):
+        sb = _sb(data=[])
+        with patch("routers.recall.get_supabase", return_value=sb):
+            client.get(f"{BASE}/pending")
+        sb.eq.assert_any_call("user_id", TEST_USER)
+
+    def test_queries_buffer_table(self, client):
+        sb = _sb(data=[])
+        with patch("routers.recall.get_supabase", return_value=sb):
+            client.get(f"{BASE}/pending")
+        sb.table.assert_any_call("DietRecallBuffer")
+
+
+# ─── services.recall.approve_review_diet_recall / reject_review_diet_recall ───
+
+class TestApproveReviewDietRecall:
+    _BASE_ROW = {
+        "user_id": "u1", "Date": "2026-06-01", "Time": "08:00:00",
+        "plan_id": "p1", "meal_slot": "breakfast",
+        "image_url_pre": "https://storage/pre.jpg", "image_url_post": None,
+    }
+
+    def test_updates_pending_row_in_place_and_clears_buffer(self):
+        from services.recall import approve_review_diet_recall
+        sb = _multi_sb({"DietRecall": [self._BASE_ROW]})
+        with patch("services.recall.get_supabase", return_value=sb), \
+             patch("services.recall.build_diet_recall_food_rows",
+                   return_value=[{"Food_Name": "Idli", "Food_Name_desc": "A1"}]):
+            result = approve_review_diet_recall("rec-1", [{"recipe_code": "A1", "quantity": 1, "unit": "srv"}])
+
+        assert result is True
+
+        sb._tables["DietRecall"].update.assert_called_once()
+        updated = sb._tables["DietRecall"].update.call_args.args[0]
+        assert updated["Food_Name_desc"] == "A1"
+        assert updated["notes"] == "verified"
+        assert updated["verified_by_coordinator"] is True
+        # ID/user_id/meal_slot etc. are NOT overwritten by an update() call — the
+        # row keeps its identity, unlike the old insert-a-new-row approach.
+        assert "ID" not in updated
+
+        sb._tables["DietRecall"].insert.assert_not_called()
+        sb._tables["DietRecallBuffer"].delete.assert_called_once()
+
+    def test_multiple_foods_updates_first_row_and_inserts_the_rest(self):
+        from services.recall import approve_review_diet_recall
+        sb = _multi_sb({"DietRecall": [self._BASE_ROW]})
+        with patch("services.recall.get_supabase", return_value=sb), \
+             patch("services.recall.build_diet_recall_food_rows", return_value=[
+                 {"Food_Name": "Idli", "Food_Name_desc": "A1"},
+                 {"Food_Name": "Sambar", "Food_Name_desc": "A2"},
+             ]):
+            approve_review_diet_recall("rec-1", [{"recipe_code": "A1"}, {"recipe_code": "A2"}])
+
+        sb._tables["DietRecall"].update.assert_called_once()
+        assert sb._tables["DietRecall"].update.call_args.args[0]["Food_Name_desc"] == "A1"
+        sb._tables["DietRecall"].insert.assert_called_once()
+        inserted = sb._tables["DietRecall"].insert.call_args.args[0]
+        assert inserted["Food_Name_desc"] == "A2"
+        assert inserted["user_id"] == "u1"  # base row fields carried over
+
+    def test_no_confirmed_foods_returns_false(self):
+        from services.recall import approve_review_diet_recall
+        sb = _multi_sb({"DietRecall": [self._BASE_ROW]})
+        with patch("services.recall.get_supabase", return_value=sb), \
+             patch("services.recall.build_diet_recall_food_rows", return_value=[]):
+            result = approve_review_diet_recall("rec-1", [])
+        assert result is False
+        # Returns before touching Supabase at all when there's nothing to write.
+        assert "DietRecall" not in sb._tables
+
+
+class TestRejectReviewDietRecall:
+    def test_deletes_from_both_tables(self):
+        from services.recall import reject_review_diet_recall
+        sb = _multi_sb({})
+        with patch("services.recall.get_supabase", return_value=sb):
+            reject_review_diet_recall("rec-1")
+        sb._tables["DietRecall"].delete.assert_called_once()
+        sb._tables["DietRecallBuffer"].delete.assert_called_once()

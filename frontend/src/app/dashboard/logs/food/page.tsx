@@ -43,7 +43,6 @@ type LogItem = {
   ID: string;
   Date?: string;
   meal_slot?: string;
-  did_eat_as_planned?: boolean;
   Food_Name?: string;
   Food_Name_desc?: string;
   Food_Qty?: number | string;
@@ -92,13 +91,17 @@ function getLogsForSlot(logs: LogItem[], date: string, slot: string): LogItem[] 
   );
 }
 
-function slotStatus(slotLogs: LogItem[]): SlotStatus {
+function slotStatus(planItems: PlanItem[], slotLogs: LogItem[]): SlotStatus {
   if (slotLogs.length === 0) return "not_logged";
-  const skipped = slotLogs.every((l) => l.notes === "skipped" || (!l.Food_Name && !l.did_eat_as_planned));
+  const skipped = slotLogs.every((l) => l.notes === "skipped" || (!l.Food_Name && !l.Food_Name_desc));
   if (skipped) return "skipped";
-  const allPlanned = slotLogs.every((l) => l.did_eat_as_planned);
-  if (allPlanned) return "as_planned";
-  return "modified";
+  const loggedCodes = new Set(slotLogs.map((l) => l.Food_Name_desc).filter(Boolean));
+  const plannedCodes = new Set(planItems.map((p) => p.Food_Name_desc).filter(Boolean));
+  const asPlanned =
+    loggedCodes.size > 0 &&
+    loggedCodes.size === plannedCodes.size &&
+    [...loggedCodes].every((c) => plannedCodes.has(c));
+  return asPlanned ? "as_planned" : "modified";
 }
 
 function isoWeek(dateStr: string): number {
@@ -173,7 +176,7 @@ function EditModal({
   onSaved: (updated: LogItem[]) => void;
   onDeleted: (id: string) => void;
 }) {
-  type FieldMap = Record<string, { food_qty: string; notes: string; did_eat_as_planned: boolean }>;
+  type FieldMap = Record<string, { food_qty: string; notes: string }>;
 
   const [fields, setFields] = useState<FieldMap>(() => {
     const m: FieldMap = {};
@@ -181,7 +184,6 @@ function EditModal({
       m[l.ID] = {
         food_qty: fmt(l.Food_Qty),
         notes: l.notes ?? "",
-        did_eat_as_planned: l.did_eat_as_planned ?? false,
       };
     }
     return m;
@@ -226,7 +228,6 @@ function EditModal({
       const results: LogItem[] = [];
       for (const [id, f] of Object.entries(fields)) {
         const body: Record<string, unknown> = {
-          did_eat_as_planned: f.did_eat_as_planned,
           notes: f.notes || null,
           food_qty: f.food_qty || null,
         };
@@ -316,15 +317,6 @@ function EditModal({
                     </button>
                   )}
                 </div>
-                <label className="flex items-center gap-2 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={f.did_eat_as_planned}
-                    onChange={(e) => setField(l.ID, "did_eat_as_planned", e.target.checked)}
-                    className="h-3.5 w-3.5 rounded accent-primary"
-                  />
-                  <span className="text-xs">Ate as planned</span>
-                </label>
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">Quantity (servings)</p>
@@ -396,7 +388,7 @@ function MealSlotCard({
   onEdit: () => void;
 }) {
   const meta = SLOT_META[slot] ?? SLOT_META.breakfast;
-  const status = slotStatus(logItems);
+  const status = slotStatus(planItems, logItems);
   const planKcal = totalKcal(planItems);
   const logKcal = totalKcalLog(logItems);
 
@@ -701,7 +693,7 @@ export default function FoodLogsPage() {
       logItems: getLogsForSlot(logs, currentDate, slot),
     })).filter((s) => s.planItems.length > 0 || s.logItems.length > 0);
 
-    const statuses = slotData.map((s) => slotStatus(s.logItems));
+    const statuses = slotData.map((s) => slotStatus(s.planItems, s.logItems));
     return {
       slotData,
       total: slotData.length,

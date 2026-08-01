@@ -17,6 +17,8 @@ from models.schemas import (
     RecallHistoryResponse,
     RecallImageResponse,
     RecallLogResponse,
+    RecallPendingItem,
+    RecallPendingResponse,
 )
 from services.recall import log_recall, log_recall_image, compute_energy_for_quantity, compute_gl_for_quantity
 
@@ -40,7 +42,10 @@ def _sort_recall_rows(rows: list) -> list:
 
 @router.post("/log", response_model=RecallLogResponse)
 def recall_log(body: DietRecallLogRequest, user_id: str = Depends(get_current_user)):
-    """Record whether the user ate as planned for a given meal slot."""
+    """Log what the user actually ate for a meal slot. Pass recipe_codes (and
+    optionally actual_quantities) for whatever was recalled — including the
+    planned recipe codes themselves, if that's what they ate; omit
+    recipe_codes entirely to log the slot as skipped."""
     # recipe_codes (plural) takes priority; fall back to legacy recipe_code
     codes = body.recipe_codes or ([body.recipe_code] if body.recipe_code else None)
     # actual_quantities (plural) takes priority; fall back to legacy actual_quantity
@@ -49,7 +54,6 @@ def recall_log(body: DietRecallLogRequest, user_id: str = Depends(get_current_us
         user_id=user_id,
         plan_id=body.plan_id,
         meal_slot=body.meal_slot,
-        did_eat_as_planned=body.did_eat_as_planned,
         date=body.date,
         recipe_codes=codes,
         actual_quantities=quantities,
@@ -78,33 +82,15 @@ def get_recall_history(
     resp = query.order("Date", desc=True).limit(2000).execute()
     sorted_rows = _sort_recall_rows(resp.data or [])
 
-    # A meal-photo upload (POST /recall/image) inserts a DietRecall placeholder
-    # with no Food_Name until a coordinator approves the matching MealImageReview
-    # Hide it from history entirely until it's confirmed (approved -> Food_Name
-    # gets filled in) so callers never have to special-case it: an unreviewed or
-    # rejected photo simply doesn't show up as "logged" yet.
-    def _is_confirmed(r: dict) -> bool:
-        # Photo rows may carry the participant's upload-time did_eat_as_planned
-        # answer before review, so for them only a filled-in Food_Name (set at
-        # approval) counts as confirmed.
-        if r.get("image_url_pre") or r.get("image_url_post"):
-            return bool(r.get("Food_Name"))
-        if r.get("Food_Name"):
-            return True
-        if r.get("did_eat_as_planned"):
-            return True
-        if r.get("notes") == "skipped":
-            return True
-        return False
-
-    sorted_rows = [r for r in sorted_rows if _is_confirmed(r)]
+    # A meal-photo upload (POST /recall/image) writes its DietRecall row with
+    # Food_Name="Pending" immediately, so it's already visible here — no
+    # filtering needed while it awaits coordinator review.
     page = sorted_rows[offset: offset + limit]
     items = [
         RecallHistoryItem(
             id=r.get("ID"),
             date=r.get("Date"),
             meal_slot=r.get("meal_slot"),
-            did_eat_as_planned=r.get("did_eat_as_planned"),
             food_name=r.get("Food_Name"),
             food_qty=r.get("Food_Qty"),
             r_desc=r.get("R_desc"),
@@ -116,11 +102,36 @@ def get_recall_history(
     ]
     return RecallHistoryResponse(items=items, total=len(sorted_rows))
 
+
+@router.get("/pending", response_model=RecallPendingResponse)
+def get_pending_recalls(user_id: str = Depends(get_current_user)):
+    sb = get_supabase()
+    rows = (
+        sb.table("DietRecallBuffer")
+        .select("ID, Date, meal_slot, image_url_pre, image_url_post, status")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .execute()
+        .data
+    ) or []
+    items = [
+        RecallPendingItem(
+            id=r.get("ID"),
+            date=r.get("Date"),
+            meal_slot=r.get("meal_slot"),
+            image_url_pre=r.get("image_url_pre"),
+            image_url_post=r.get("image_url_post"),
+            status=r.get("status") or "pending",
+        )
+        for r in rows
+    ]
+    return RecallPendingResponse(items=items, total=len(items))
+
+
 @router.put("/{recall_id}")
 def update_recall(recall_id: str, body: DietRecallUpdateRequest, user_id: str = Depends(get_current_user)):
     """Update a diet recall entry belonging to the authenticated user."""
     updates = {k: v for k, v in {
-        "did_eat_as_planned": body.did_eat_as_planned,
         "Food_Name": body.food_name,
         "Food_Qty": body.food_qty,
         "meal_slot": body.meal_slot.value if body.meal_slot else None,
@@ -174,7 +185,6 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         meal_slot=body.meal_slot,
         image_url_pre=body.image_url_pre,
         image_url_post=body.image_url_post,
-        did_eat_as_planned=body.did_eat_as_planned,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
 
@@ -265,7 +275,7 @@ def list_coordinator_participants(
     since = str(date_type.today() - timedelta(days=90))
     recalls = (
         sb.table("DietRecall")
-        .select("ID, user_id, Date, meal_slot, did_eat_as_planned")
+        .select("ID, user_id, Date, meal_slot, Food_Name_desc, notes")
         .in_("user_id", lookup_ids)
         .gte("Date", since)
         .limit(5000)
@@ -273,41 +283,45 @@ def list_coordinator_participants(
         .data
     ) or []
 
-    # Exclude image-derived rows that haven't been approved by a coordinator
-    # yet — a pending/rejected photo shouldn't count as a logged meal.
-    if recalls:
-        review_rows = (
-            sb.table("MealImageReview")
-            .select("diet_recall_id, review_status")
-            .in_("user_id", lookup_ids)
-            .neq("review_status", "approved")
-            .limit(5000)
-            .execute()
-            .data
-        ) or []
-        hidden_ids = {r["diet_recall_id"] for r in review_rows if r.get("diet_recall_id")}
-        recalls = [r for r in recalls if r["ID"] not in hidden_ids]
+    planned = (
+        sb.table("Recommendation")
+        .select("user_id, Date, Timings, Food_Name_desc")
+        .in_("user_id", lookup_ids)
+        .gte("Date", since)
+        .limit(5000)
+        .execute()
+        .data
+    ) or []
 
-    recall_by_user: dict = {}
+    def _slot_key(uid: str, date_str: str, slot) -> tuple:
+        return (uid.split("@")[0], date_str, str(slot or "").strip().lower())
+    
+    planned_by_key: dict = {}
+    for r in planned:
+        date_str = (r.get("Date") or "")[:10]
+        if r.get("Food_Name_desc"):
+            key = _slot_key(r["user_id"], date_str, r.get("Timings"))
+            planned_by_key.setdefault(key, set()).add(r["Food_Name_desc"])
+
+    logged_by_key: dict = {}
     for r in recalls:
-        uid = r["user_id"]
-        canonical = uid.split("@")[0]
-        if canonical not in recall_by_user:
-            recall_by_user[canonical] = {}
         date_str = (r.get("Date") or r.get("created_at") or "")[:10]
-        slot = r.get("meal_slot") or ""
-        key = f"{date_str}_{slot}"
-        if key not in recall_by_user[canonical]:
-            recall_by_user[canonical][key] = {"all_planned": True, "date": date_str}
-        if not r.get("did_eat_as_planned"):
-            recall_by_user[canonical][key]["all_planned"] = False
+        key = _slot_key(r["user_id"], date_str, r.get("meal_slot"))
+        entry = logged_by_key.setdefault(key, {"codes": set(), "skipped": False, "date": date_str})
+        if r.get("notes") == "skipped":
+            entry["skipped"] = True
+        elif r.get("Food_Name_desc"):
+            entry["codes"].add(r["Food_Name_desc"])
 
     result = []
     for p in participants:
         pid = p["user_id"]
-        combos = recall_by_user.get(pid, {})
+        combos = {k: v for k, v in logged_by_key.items() if k[0] == pid}
         total = len(combos)
-        as_planned = sum(1 for c in combos.values() if c["all_planned"])
+        as_planned = sum(
+            1 for key, c in combos.items()
+            if not c["skipped"] and c["codes"] and c["codes"] == planned_by_key.get(key, set())
+        )
         pct = round(as_planned / total * 100, 1) if total > 0 else None
         dates = sorted({c["date"] for c in combos.values() if c["date"]}, reverse=True)
         result.append({
@@ -357,23 +371,6 @@ def get_participant_recall_logs(
             .execute()
             .data
         ) or []
-
-        # Image-derived rows stay invisible in the log view until the
-        # coordinator has explicitly approved them (pending/rejected reviews
-        # are hidden — only reviewed via the Image Review queue).
-        if rows:
-            review_rows = (
-                sb.table("MealImageReview")
-                .select("diet_recall_id, review_status")
-                .in_("user_id", user_filter)
-                .neq("review_status", "approved")
-                .limit(5000)
-                .execute()
-                .data
-            ) or []
-            hidden_ids = {r["diet_recall_id"] for r in review_rows if r.get("diet_recall_id")}
-            rows = [r for r in rows if r["ID"] not in hidden_ids]
-
         return _sort_recall_rows(rows)
 
     def fetch_plan():
@@ -424,7 +421,6 @@ def coordinator_update_recall(
 ):
     """Coordinator edits a diet recall entry."""
     updates = {k: v for k, v in {
-        "did_eat_as_planned": body.did_eat_as_planned,
         "Food_Name": body.food_name,
         "Food_Qty": body.food_qty,
         "meal_slot": body.meal_slot.value if body.meal_slot else None,
