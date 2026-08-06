@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core.auth import get_current_user
@@ -12,9 +13,13 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 _PARTICIPANT_PASSWORD = os.getenv("PARTICIPANT_DEFAULT_PASSWORD", "")
 
+# "test" -> P001, P002... (dummy/QA accounts). "participant" -> A001, A002... (real study participants).
+_GROUP_PREFIXES = {"test": "P", "participant": "A"}
+
 
 class CreateParticipantRequest(BaseModel):
     display_name: str
+    group: Literal["test", "participant"] = "test"
 
 
 class ParticipantResponse(BaseModel):
@@ -35,21 +40,25 @@ def create_participant(
     role: str = Depends(require_coordinator),
 ):
     """Create a new participant account. Only coordinators and admins can do this."""
+    if body.group == "test" and role != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can create test accounts")
+
     sb = get_supabase()
 
-    # Auto-generate next participant ID (P001_JOHN, P002_PRIYA, ...)
+    # Auto-generate next ID for this group: P001_JOHN, P002_PRIYA... (test) or A001_JOHN... (participant)
+    prefix = _GROUP_PREFIXES[body.group]
     existing = sb.table("UserRoles").select("participant_id").eq("role", "participant").execute()
     max_num = 0
     for row in (existing.data or []):
         pid = row.get("participant_id") or ""
-        m = re.match(r"^P(\d+)", pid.upper())
+        m = re.match(rf"^{prefix}(\d+)", pid.upper())
         if m:
             max_num = max(max_num, int(m.group(1)))
 
     # Build name slug: first word of display_name, uppercase letters/digits only, max 10 chars
     first_word = (body.display_name.strip().split()[0] if body.display_name.strip() else "")
     name_slug = re.sub(r"[^A-Z0-9]", "", first_word.upper())[:10]
-    participant_id = f"P{max_num + 1:03d}_{name_slug}" if name_slug else f"P{max_num + 1:03d}"
+    participant_id = f"{prefix}{max_num + 1:03d}_{name_slug}" if name_slug else f"{prefix}{max_num + 1:03d}"
 
     email = f"{participant_id}@adam.participant"
 

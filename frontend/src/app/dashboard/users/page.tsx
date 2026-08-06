@@ -64,20 +64,27 @@ export default function UsersPage() {
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "generating" | "none" | "failed">("all");
   const [showModal, setShowModal] = useState(false);
   const [displayName, setDisplayName] = useState("");
+  const [group, setGroup] = useState<"test" | "participant">("test");
   const [submitting, setSubmitting] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedUser | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const load = useCallback(async () => {
     const supabase = createClient();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) { router.push("/login"); return; }
+    setIsAdmin(session.user.email === "test@example.com");
     const res = await fetch("/api/users", { headers: { Authorization: `Bearer ${session.access_token}` } });
     if (!res.ok) { setError("Failed to load participants"); setLoading(false); return; }
     setParticipants(await res.json());
     setLoading(false);
   }, [router]);
 
+  // `load` also drives the polling effect below and post-action refreshes, so it can't be
+  // moved out of an effect without duplicating the fetch — the lint rule's cascading-render
+  // concern doesn't apply here since this only ever runs once on mount.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { load(); }, [load]);
 
   // Poll while any plan is generating
@@ -99,7 +106,7 @@ export default function UsersPage() {
     const res = await fetch("/api/users", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-      body: JSON.stringify({ display_name: displayName.trim() }),
+      body: JSON.stringify({ display_name: displayName.trim(), group: isAdmin ? group : "participant" }),
     });
     const data = await res.json();
     if (!res.ok) { setAddError(data.detail ?? "Failed to create participant"); setSubmitting(false); return; }
@@ -111,6 +118,7 @@ export default function UsersPage() {
   function closeModal() {
     setShowModal(false);
     setDisplayName("");
+    setGroup(isAdmin ? "test" : "participant");
     setAddError(null);
     setCreated(null);
   }
@@ -326,6 +334,19 @@ export default function UsersPage() {
                   <p className="text-xs text-muted-foreground">Create a participant account for your study.</p>
                 </div>
                 <form onSubmit={handleAddUser} className="space-y-3">
+                  {isAdmin && (
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium">Group</label>
+                      <select
+                        value={group}
+                        onChange={(e) => setGroup(e.target.value as "test" | "participant")}
+                        className="w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+                      >
+                        <option value="test">Test user (P001, P002…)</option>
+                        <option value="participant">Participant (A001, A002…)</option>
+                      </select>
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <label className="text-xs font-medium">Full Name</label>
                     <input
