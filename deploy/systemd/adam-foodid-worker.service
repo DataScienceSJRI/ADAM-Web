@@ -1,0 +1,14 @@
+[Unit]
+Description=ADAM food identification worker
+After=network-online.target redis-server.service
+
+[Service]
+User=datascience
+WorkingDirectory=/home/datascience/ADAM-Web/backend
+ExecStart=/home/datascience/ADAM-Web/.adam/bin/python -m services.food_id_worker
+Restart=always
+RestartSec=5
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

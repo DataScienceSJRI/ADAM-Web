@@ -1,0 +1,13 @@
+[Unit]
+Description=ADAM meal reminder worker
+After=network-online.target
+
+[Service]
+User=datascience
+WorkingDirectory=/home/datascience/ADAM-Web/backend
+ExecStart=/home/datascience/ADAM-Web/.adam/bin/python -m services.reminder_worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

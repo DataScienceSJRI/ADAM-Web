@@ -1,0 +1,16 @@
+[Unit]
+Description=ADAM FastAPI backend
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+User=datascience
+WorkingDirectory=/home/datascience/ADAM-Web/backend
+Environment=REDIS_URL=redis://localhost:6379/1
+Environment=PLAN_QUEUE_NAME=meal-plans
+ExecStart=/home/datascience/ADAM-Web/.adam/bin/uvicorn main:app --host 127.0.0.1 --port 8078 --proxy-headers
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
