@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 
 from core.supabase import get_supabase
 from services.push import send_bulk_push
+from services.whatsapp_notify import send_whatsapp
 
 logger = logging.getLogger("backend.services.reminders")
 
@@ -47,10 +48,15 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
         if uid and token:
             user_tokens.setdefault(uid, []).append(token)
 
-    if not user_tokens:
+    whatsapp_resp = (
+        sb.table("WH_Users").select("user_id").not_.is_("activated_at", "null").execute()
+    )
+    whatsapp_user_ids = {row["user_id"] for row in (whatsapp_resp.data or []) if row.get("user_id")}
+
+    all_user_ids = list(set(user_tokens.keys()) | whatsapp_user_ids)
+    if not all_user_ids:
         return {}
 
-    all_user_ids = list(user_tokens.keys())
     prefs_resp = (
         sb.table("BE_Preference_onboarding_details")
         .select("user_id, breakfast_time, lunch_time, dinner_time")
@@ -63,13 +69,17 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
     now_minutes = now_ist.hour * 60 + now_ist.minute
 
     slot_player_ids: dict[str, list[str]] = {"breakfast": [], "lunch": [], "dinner": []}
-    for uid, player_ids in user_tokens.items():
+    slot_user_ids: dict[str, list[str]] = {"breakfast": [], "lunch": [], "dinner": []}
+    for uid in all_user_ids:
         prefs = user_prefs.get(uid, {})
         for slot, default in _DEFAULTS.items():
             raw_time = prefs.get(f"{slot}_time") or ""
             meal_minutes = _time_to_minutes(raw_time, default) if raw_time else (default[0] * 60 + default[1])
             if abs(now_minutes - meal_minutes) <= window_minutes:
-                slot_player_ids[slot].extend(player_ids)
+                if uid in user_tokens:
+                    slot_player_ids[slot].extend(user_tokens[uid])
+                if uid in whatsapp_user_ids:
+                    slot_user_ids[slot].append(uid)
 
     results: dict[str, int] = {}
     for slot, player_ids in slot_player_ids.items():
@@ -84,5 +94,19 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
         )
         results[slot] = count
         logger.info("Meal reminder sent: slot=%s recipients=%d", slot, count)
+
+    for slot, uids in slot_user_ids.items():
+        if not uids:
+            continue
+        label = _SLOT_LABELS[slot]
+        sent = 0
+        for uid in uids:
+            if send_whatsapp(
+                uid,
+                f"Reminder: Log your {label}",
+                "Keeping an accurate diet log helps the study team track your progress.",
+            ):
+                sent += 1
+        logger.info("WhatsApp meal reminder sent: slot=%s recipients=%d", slot, sent)
 
     return results

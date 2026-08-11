@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications, kpi, users, feedback, weight, preferences
+from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications, kpi, users, feedback, weight, preferences, whatsapp_router
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler()]
 _log_file = os.getenv("BACKEND_LOG_FILE")
@@ -57,6 +57,12 @@ _tags_metadata = [
         "description": "Register/remove device tokens and send push notifications. "
                        "`POST /send-reminders` is cron-protected (X-Cron-Secret header) and sends meal-logging reminders "
                        "to users whose preferred meal time falls within the configured window.",
+    },
+    {
+        "name": "whatsapp",
+        "description": "WhatsApp notification channel (WAHA). Coordinators link/unlink a participant's phone via "
+                       "`POST /link` and `DELETE /link/{user_id}`; `POST /webhook` receives inbound WAHA events "
+                       "(activation via #HELLOADAM, static status commands) and is protected by an X-Webhook-Secret header.",
     },
 ]
 
@@ -137,6 +143,7 @@ app.include_router(users.router,         prefix=V1)
 app.include_router(feedback.router,      prefix=V1)
 app.include_router(weight.router,        prefix=V1)
 app.include_router(preferences.router,   prefix=V1)
+app.include_router(whatsapp_router.router, prefix=V1)
 
 
 @app.get("/health")

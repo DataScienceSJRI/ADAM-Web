@@ -37,14 +37,14 @@ def run_auto_next_week_job(user_id: str, onboarding_id: str, week_no: int, start
     """
     from routers.plan import _run_plan_background
     from services.profile_builder import build_profile
-    from services.push import send_push
+    from services.notify import notify
 
     logger.info(
         "Auto-generating week %d plan for user_id=%s onboarding_id=%s",
         week_no, user_id, onboarding_id,
     )
 
-    send_push(
+    notify(
         user_id=user_id,
         title="Next week's plan is on its way",
         body="We're generating your meal plan for next week. You'll get a notification when it's ready.",
@@ -73,10 +73,10 @@ def run_day4_checkin_job(user_id: str) -> None:
     Fired at 9am IST on day 4 of a plan. Nudges the user to log their weight and review/update
     their meal preferences.
     """
-    from services.push import send_push
+    from services.notify import notify
 
     logger.info("Sending day-4 check-in reminder for user_id=%s", user_id)
-    send_push(
+    notify(
         user_id=user_id,
         title="Time to check in",
         body="Log your weight and update your meal preferences if anything's changed.",

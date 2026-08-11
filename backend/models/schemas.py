@@ -167,6 +167,11 @@ class RegisterTokenRequest(BaseModel):
     model_config = {"json_schema_extra": {"example": {"device_token": "onesignal-player-id-here", "platform": "android"}}}
 
 
+class LinkPhoneRequest(BaseModel):
+    user_id: str
+    phone: str
+
+
 class UserProfileResponse(BaseModel):
     user_id: str
     age: Optional[int] = None
