@@ -138,7 +138,7 @@ def _schedule_next_week_job(user_id: str, onboarding_id: str | None, week_no: in
             failure_ttl=604800,
         )
         supabase.table("BE_Onboarding_Sessions").update(
-            {"next_plan_job_id": job.id}
+            {"next_plan_job_id": job.id, "next_plan_at": trigger_at_ist.isoformat()}
         ).eq("onboarding_id", onboarding_id).execute()
         logger.info(
             "Scheduled auto-generation of week %d for onboarding_id=%s at %s IST (job=%s)",
@@ -379,16 +379,16 @@ def _run_plan_background(
     _schedule_day4_checkin(user_id, effective_start_date)
 
     try:
-        from services.push import send_push
+        from services.notify import notify
 
-        send_push(
+        notify(
             user_id=user_id,
             title="Your meal plan is ready!",
             body="Your personalised 7-day meal plan has been generated. Tap to view it.",
             data={"plan_id": plan_id, "type": "plan_ready"},
         )
     except Exception:
-        logger.warning("Push notification failed for plan_id=%s", plan_id, exc_info=True)
+        logger.warning("Notification failed for plan_id=%s", plan_id, exc_info=True)
 
     logger.info("Plan generation complete for user_id=%s [total %.1fs]", user_id, time.time() - t0)
 
