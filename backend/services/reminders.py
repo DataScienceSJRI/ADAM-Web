@@ -6,11 +6,9 @@ from services.push import send_bulk_push
 
 logger = logging.getLogger("backend.services.reminders")
 
-# Times stored in DB are IST (UTC+5:30); we compare against current IST time
-_IST = timezone(timedelta(hours=5, minutes=30))
+IST = timezone(timedelta(hours=5, minutes=30))
 
-# Default meal times (HH, MM) used when a user has no preference set
-_DEFAULTS: dict[str, tuple[int, int]] = {
+DEFAULT_MEAL_TIMES: dict[str, tuple[int, int]] = {
     "breakfast": (8, 30),
     "lunch": (13, 0),
     "dinner": (19, 30),
@@ -23,7 +21,7 @@ _SLOT_LABELS = {
 }
 
 
-def _time_to_minutes(time_str: str, default: tuple[int, int]) -> int:
+def time_to_minutes(time_str: str, default: tuple[int, int]) -> int:
     try:
         parts = time_str.split(":")
         return int(parts[0]) * 60 + int(parts[1])
@@ -59,15 +57,15 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
     )
     user_prefs: dict[str, dict] = {r["user_id"]: r for r in (prefs_resp.data or [])}
 
-    now_ist = datetime.now(_IST)
+    now_ist = datetime.now(IST)
     now_minutes = now_ist.hour * 60 + now_ist.minute
 
     slot_player_ids: dict[str, list[str]] = {"breakfast": [], "lunch": [], "dinner": []}
     for uid, player_ids in user_tokens.items():
         prefs = user_prefs.get(uid, {})
-        for slot, default in _DEFAULTS.items():
+        for slot, default in DEFAULT_MEAL_TIMES.items():
             raw_time = prefs.get(f"{slot}_time") or ""
-            meal_minutes = _time_to_minutes(raw_time, default) if raw_time else (default[0] * 60 + default[1])
+            meal_minutes = time_to_minutes(raw_time, default) if raw_time else (default[0] * 60 + default[1])
             if abs(now_minutes - meal_minutes) <= window_minutes:
                 slot_player_ids[slot].extend(player_ids)
 
