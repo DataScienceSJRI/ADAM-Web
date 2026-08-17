@@ -174,39 +174,48 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         planned_gl.setdefault(uid, {}).setdefault(slot, {})
         planned_gl[uid][slot][d] = planned_gl[uid][slot].get(d, 0.0) + float(r["GL"])
 
-    all_pending_rows = (
+    all_review_rows = (
         sb.table("MealImageReview")
-        .select("user_id, diet_recall_id")
+        .select("user_id, diet_recall_id, review_status")
         .in_("user_id", lookup_ids)
-        .eq("review_status", "pending")
+        .in_("review_status", ["pending", "approved"])
         .limit(2000)
         .execute()
         .data
     ) or []
-    pending_recall_ids = list({r["diet_recall_id"] for r in all_pending_rows if r.get("diet_recall_id")})
+    review_recall_ids = list({r["diet_recall_id"] for r in all_review_rows if r.get("diet_recall_id")})
 
-    pending_recall_map: dict[str, dict] = {}
-    if pending_recall_ids:
+    review_recall_map: dict[str, dict] = {}
+    if review_recall_ids:
         dr_rows = (
             sb.table("DietRecall")
             .select("ID, Date, meal_slot")
-            .in_("ID", pending_recall_ids)
+            .in_("ID", review_recall_ids)
             .execute()
             .data
         ) or []
-        pending_recall_map = {r["ID"]: r for r in dr_rows}
+        review_recall_map = {r["ID"]: r for r in dr_rows}
 
-    pending_slots: dict[str, dict[str, set]] = {}
-    for r in all_pending_rows:
+    slot_review_statuses: dict[str, dict[str, dict[str, list[str]]]] = {}
+    for r in all_review_rows:
         uid = str(r.get("user_id", "")).split("@")[0]
-        recall = pending_recall_map.get(r.get("diet_recall_id"))
+        recall = review_recall_map.get(r.get("diet_recall_id"))
         if not recall:
             continue
         slot = str(recall.get("meal_slot", "")).strip().lower()
         d = _normalize_date(recall.get("Date") or "")
         if not d or slot not in MEAL_SLOTS:
             continue
-        pending_slots.setdefault(uid, {}).setdefault(slot, set()).add(d)
+        slot_review_statuses.setdefault(uid, {}).setdefault(slot, {}).setdefault(d, []).append(
+            r.get("review_status")
+        )
+
+    pending_slots: dict[str, dict[str, set]] = {}
+    for uid, slots in slot_review_statuses.items():
+        for slot, dates in slots.items():
+            for d, statuses in dates.items():
+                if statuses and all(s == "pending" for s in statuses):
+                    pending_slots.setdefault(uid, {}).setdefault(slot, set()).add(d)
 
     result = []
     for p in participants:
