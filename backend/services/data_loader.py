@@ -26,6 +26,49 @@ _STATIC_TABLES = {
 }
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
+# Manual "shadow" additions to Main1_Main2_Mapping Subcategory (the combination
+# table): subcategories with no entry anywhere in the underlying sheet yet, but
+# that clearly belong wherever a close existing subcategory already appears (same
+# dish role). Applied immediately after every fetch of this table so both plan
+# generation (services/data_loader.load_data_from_supabase) and swap suggestions
+# (services/replacement._new_mapping_subcategories) see the patch without the
+# underlying sheet needing manual edits. If the curator later adds one of the
+# shadowed codes to a new row by hand, the added code follows automatically —
+# this isn't a frozen snapshot of today's rows.
+#
+# (code_to_add, codes_it_shadows)
+_COMBINATION_TABLE_NAME = "Main1_Main2_Mapping Subcategory"
+_COMBINATION_SHADOW_RULES: list[tuple[str, tuple[str, ...]]] = [
+    # Yogurt (H5F): no entry anywhere. Buttermilk (H1A) / Curd (H1B) are the same
+    # dairy-side role and are already correctly placed throughout the table.
+    ("H5F", ("H1A", "H1B")),
+    # "beverages" (H2E): no entry anywhere. Shadows the existing drink family
+    # (Black Coffee, Milk Coffee, Milk, Turmeric milk).
+    ("H2E", ("H5A", "H5B", "H5C", "H5D")),
+]
+_COMBINATION_COLUMNS = ("Main2_Code", "Main3_Code", "Optional")
+
+
+def apply_combination_table_overrides(rows: list[dict]) -> list[dict]:
+    """
+    Apply _COMBINATION_SHADOW_RULES to raw Main1_Main2_Mapping Subcategory rows
+    (list of dicts, the shape Supabase returns before conversion to a DataFrame).
+    Returns a new list of new dicts — does not mutate the input.
+    """
+    patched = [dict(row) for row in rows]
+    for row in patched:
+        for col in _COMBINATION_COLUMNS:
+            codes = [c.strip() for c in str(row.get(col) or "").split(",") if c.strip()]
+            codes_upper = {c.upper() for c in codes}
+            for add_code, shadow_codes in _COMBINATION_SHADOW_RULES:
+                if add_code.upper() in codes_upper:
+                    continue
+                if any(sc in codes_upper for sc in shadow_codes):
+                    codes.append(add_code)
+                    codes_upper.add(add_code.upper())
+            row[col] = ", ".join(codes)
+    return patched
+
 
 def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.DataFrame:
     """Fetch all rows using pagination, with retries on transient connection errors."""
@@ -55,6 +98,9 @@ def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.
                     break
 
                 start += batch_size
+
+            if table == _COMBINATION_TABLE_NAME:
+                all_rows = apply_combination_table_overrides(all_rows)
 
             return pd.DataFrame(all_rows)
 
