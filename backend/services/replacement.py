@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
-from services.data_loader import apply_combination_table_overrides
+from services.data_loader import apply_combination_table_overrides, get_recipes_excluded_by_nonveg_types
 from services.profile_builder import build_profile
 
 VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
@@ -193,9 +193,15 @@ def _fetch_eligible_codes(sb, user_id: str) -> set[str]:
     eligible = _fetch_adam_approved_codes(sb)
 
     profile = build_profile(user_id)
-    diet_allowed = _fetch_diet_allowed_codes(sb, profile.get("diet_type") if profile else None)
+    diet_type = (profile.get("diet_type") if profile else None) or ""
+    diet_allowed = _fetch_diet_allowed_codes(sb, diet_type)
     if diet_allowed is not None:
         eligible &= diet_allowed
+    elif diet_type.strip().lower() == "non-veg":
+        # No Vegetarian/Ovo-vegetarian restriction for non-veg eaters, but narrow
+        # further to the specific meat types selected at onboarding (non_veg_types),
+        # if any — mirrors services/data_loader.py's plan-generation filter.
+        eligible -= get_recipes_excluded_by_nonveg_types(profile.get("non_veg_types") if profile else None)
 
     preferred_codes = _fetch_preferred_subcategory_codes(sb, user_id)
     if preferred_codes is not None:
