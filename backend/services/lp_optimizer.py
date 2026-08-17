@@ -683,7 +683,7 @@ def run_lp(
             if str(candidates.loc[i, "Recipe_Code"]).strip().upper() in millet_codes
         ]
         if millet_ids:
-            required_millet_count = 2 if len(millet_ids) > 4 else 1
+            required_millet_count = min(5, len(millet_ids))
             millet_shortfall = LpVariable("millet_inclusion_shortfall", lowBound=0)
             model += (
                 lpSum(y[(d, i)] for d in days for i in millet_ids) + millet_shortfall
