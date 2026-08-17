@@ -487,13 +487,15 @@ def build_recipe_compliance(user_id: str) -> dict:
       (RecommendationsBackup Food_Qty scaled via the same
       fetch_base_gl_map/fetch_portion_map/gl_for_quantity pipeline
       services/recall.py and the GL trend above use) and that day's actual GL
-      (sum of DietRecall.GL). The occasion is GL-compliant if actual GL is
-      within ±_GL_COMPLIANCE_TOLERANCE of planned GL (floored at
-      ±_GL_COMPLIANCE_FLOOR so near-zero-GL occasions aren't impossible to
-      pass). An occasion with no DietRecall GL data at all defaults to
-      actual GL = 0, so it's not compliant unless planned GL is also ~0 —
-      missing recall means "didn't have it," same rule used everywhere else
-      in this file.
+      (sum of DietRecall.GL). The check is ONE-SIDED, not a symmetric band:
+      actual GL <= planned GL is always compliant, no matter how much lower —
+      eating less/lower-GL than planned is a good outcome, never a violation.
+      Only actual GL EXCEEDING planned counts against it, and only past
+      ±_GL_COMPLIANCE_TOLERANCE (floored at ±_GL_COMPLIANCE_FLOOR so
+      near-zero-GL occasions aren't impossible to pass). An occasion with no
+      DietRecall GL data at all (nothing logged, or logged but not yet
+      identified/computed) is NOT compliant regardless — missing isn't the
+      same as "ate less than planned," so it doesn't get the one-sided pass.
 
     Uses RecommendationsBackup (not Recommendation) since it's the immutable
     history of everything ever planned, unlike Recommendation which only
@@ -591,18 +593,28 @@ def build_recipe_compliance(user_id: str) -> dict:
             key = (d_norm, slot)
             planned_gl_by_occasion[key] = planned_gl_by_occasion.get(key, 0.0) + gl
 
-    # GL-compliance check per occasion: actual GL within ±_GL_COMPLIANCE_TOLERANCE
-    # of planned GL (floored). Missing recall GL defaults to 0, which almost
-    # never passes against a nonzero planned GL — same "missing = not
-    # compliant" rule used elsewhere.
+    # GL-compliance check per occasion — one-sided, not a symmetric band:
+    # actual GL <= planned GL is ALWAYS compliant, no matter how much lower
+    # (eating less/lower-GL than planned is a good outcome in a blood-sugar
+    # app, never a violation). Only actual GL EXCEEDING planned counts
+    # against it, and only past ±_GL_COMPLIANCE_TOLERANCE (floored at
+    # ±_GL_COMPLIANCE_FLOOR). An occasion with no DietRecall GL data at all
+    # (nothing logged, or logged but not yet identified/computed) is NOT
+    # compliant regardless — "missing" isn't the same as "ate less than
+    # planned," so it doesn't get the one-sided pass.
     gl_compliant_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
     for slot in MEAL_SLOTS:
         for d_norm in planned_occasions[slot]:
             key = (d_norm, slot)
+            if key not in actual_gl_by_occasion:
+                continue
             planned_gl = planned_gl_by_occasion.get(key, 0.0)
-            actual_gl = actual_gl_by_occasion.get(key, 0.0)
+            actual_gl = actual_gl_by_occasion[key]
+            if actual_gl <= planned_gl:
+                gl_compliant_occasions[slot].add(d_norm)
+                continue
             tolerance = max(_GL_COMPLIANCE_FLOOR, planned_gl * _GL_COMPLIANCE_TOLERANCE)
-            if abs(actual_gl - planned_gl) <= tolerance:
+            if (actual_gl - planned_gl) <= tolerance:
                 gl_compliant_occasions[slot].add(d_norm)
 
     by_meal_slot = {}
