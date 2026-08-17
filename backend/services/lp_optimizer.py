@@ -485,11 +485,11 @@ def run_lp(
         # Look up how many unique recipes are competing for this specific slot
         unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
         if unique_recipes <= 2:
-            max_recipe_rep = 4  # Scarce choices: allow repeating up to 4 times if forced by macros
+            max_recipe_rep = 3  # Scarce choices: allow repeating up to 3 times if forced by macros
         elif unique_recipes <= 5:
-            max_recipe_rep = 3  # Medium variety: allow up to 3 times absolute maximum
+            max_recipe_rep = 2  # Medium variety: allow up to 2 times absolute maximum
         else:
-            max_recipe_rep = 2  # Abundant choices: force high variety (strict cap of 2 times)
+            max_recipe_rep = 1  # Abundant choices: force high variety (strict cap of 1 time)
 
         # Apply the absolute upper ceiling
         model += lpSum(y[(d, i)] for d in days for i in ids) <= max_recipe_rep
@@ -510,7 +510,7 @@ def run_lp(
     # Global per-recipe hard cap — scales with Main subcategory pool size (Snacks excluded)
     main_df = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"].copy()
     main_subcats = main_df["Preferred_SubCategory_code"].dropna().nunique()
-    global_recipe_cap = 3 if main_subcats <= 5 else 2
+    global_recipe_cap = 2 if main_subcats <= 5 else 1
     for recipe_code, recipe_df in candidates.groupby("Recipe_Code", dropna=False):
         non_snack_ids = [int(i) for i in recipe_df.index.tolist()
                          if str(candidates.loc[i, "Dish_Type"]).strip().lower() != "snacks"]
