@@ -24,6 +24,7 @@ const ACTIVITY_LEVELS_VALUES = [
 const DIETARY_TYPE_VALUES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"] as const;
 const NON_VEG_TYPES = ["Non Veg", "Eggatarian", "Ovo veg"] as const;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+const NON_VEG_MEAT_TYPES = ["Chicken", "Mutton"] as const;
 
 export const BasicDetailsSchema = z.object({
   Age: z.number({ error: "Required" })
@@ -44,6 +45,7 @@ export const BasicDetailsSchema = z.object({
   dietary_type: z.enum(DIETARY_TYPE_VALUES, "Required"),
   diet_restrictions: z.array(z.string()),
   non_veg_days: z.array(z.string()),
+  non_veg_types: z.array(z.string()),
   millets_preferred: z.boolean(),
   breakfast_time: z.string(),
   lunch_time: z.string(),
@@ -51,6 +53,13 @@ export const BasicDetailsSchema = z.object({
   step_count: z.number()
     .min(0)
     .max(100000, "Must be 100,000 or below"),
+}).superRefine((data, ctx) => {
+  if ((NON_VEG_TYPES as readonly string[]).includes(data.dietary_type) && data.non_veg_days.length === 0) {
+    ctx.addIssue({ code: "custom", message: "Select at least one day", path: ["non_veg_days"] });
+  }
+  if (data.dietary_type === "Non Veg" && data.non_veg_types.length === 0) {
+    ctx.addIssue({ code: "custom", message: "Select at least one option", path: ["non_veg_types"] });
+  }
 });
 
 export type BasicDetails = z.infer<typeof BasicDetailsSchema>;
@@ -61,8 +70,6 @@ type FormState = Omit<BasicDetails, "Gender" | "Activity_levels" | "dietary_type
   Activity_levels: string;
   dietary_type: string;
 };
-const DIET_RESTRICTIONS = ["Gluten Free"];
-
 export function BasicDetailsForm({
   defaultValues,
   onNext,
@@ -83,6 +90,7 @@ export function BasicDetailsForm({
       dietary_type: "",
       diet_restrictions: [],
       non_veg_days: [],
+      non_veg_types: [],
       millets_preferred: false,
       breakfast_time: "",
       lunch_time: "",
@@ -246,10 +254,7 @@ export function BasicDetailsForm({
 
         {(NON_VEG_TYPES as readonly string[]).includes(form.dietary_type) && (
           <div className="space-y-1.5">
-            <label className="text-sm font-medium">
-              Preferred Non-Veg Days{" "}
-              <span className="font-normal text-muted-foreground">(optional)</span>
-            </label>
+            <label className="text-sm font-medium">Preferred Non-Veg Days</label>
             <div className="flex gap-1.5 flex-wrap">
               {DAYS.map((day) => (
                 <button
@@ -271,11 +276,44 @@ export function BasicDetailsForm({
                 </button>
               ))}
             </div>
+            {errors.non_veg_days && (
+              <p className="text-xs text-destructive">{errors.non_veg_days}</p>
+            )}
+          </div>
+        )}
+
+        {form.dietary_type === "Non Veg" && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium">Non-Veg Preferences</label>
+            <div className="flex gap-1.5 flex-wrap">
+              {NON_VEG_MEAT_TYPES.map((type) => (
+                <button
+                  key={type}
+                  type="button"
+                  onClick={() => {
+                    const next = form.non_veg_types.includes(type)
+                      ? form.non_veg_types.filter((t) => t !== type)
+                      : [...form.non_veg_types, type];
+                    update("non_veg_types", next);
+                  }}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    form.non_veg_types.includes(type)
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background text-foreground hover:bg-muted"
+                  }`}
+                >
+                  {type}
+                </button>
+              ))}
+            </div>
+            {errors.non_veg_types && (
+              <p className="text-xs text-destructive">{errors.non_veg_types}</p>
+            )}
           </div>
         )}
 
         <div className="space-y-1.5">
-          <label className="text-sm font-medium">Do you prefer millets in your meal plan?</label>
+          <label className="text-sm font-medium">Do you prefer millet recipes?</label>
           <div className="flex gap-2">
             {(["Yes", "No"] as const).map((opt) => (
               <button
@@ -290,28 +328,6 @@ export function BasicDetailsForm({
               >
                 {opt}
               </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">Dietary Restrictions</label>
-          <div className="flex gap-4">
-            {DIET_RESTRICTIONS.map((r) => (
-              <label key={r} className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={form.diet_restrictions.includes(r)}
-                  onChange={(e) => {
-                    const next = e.target.checked
-                      ? [...form.diet_restrictions, r]
-                      : form.diet_restrictions.filter((x) => x !== r);
-                    update("diet_restrictions", next);
-                  }}
-                  className="rounded border"
-                />
-                {r}
-              </label>
             ))}
           </div>
         </div>

@@ -70,6 +70,7 @@ function OnboardingFlow() {
       dietary_type,
       diet_restrictions,
       non_veg_days,
+      non_veg_types,
       millets_preferred,
       breakfast_time,
       lunch_time,
@@ -93,6 +94,8 @@ function OnboardingFlow() {
       .insert({
         dietary_type,
         diet_restrictions: diet_restrictions.length > 0 ? diet_restrictions.join(", ") : null,
+        non_veg_days: non_veg_days.length > 0 ? non_veg_days.join(", ") : null,
+        non_veg_types: non_veg_types.length > 0 ? non_veg_types.join(", ") : null,
         breakfast_time: toTimestamp(breakfast_time),
         lunch_time: toTimestamp(lunch_time),
         dinner_time: toTimestamp(dinner_time),
@@ -102,12 +105,10 @@ function OnboardingFlow() {
         health_details: {
           co_morbidities: healthDetails.co_morbidities,
           medications: healthDetails.medications || null,
-          allergies_dislikes: healthDetails.allergies_dislikes || null,
           allergy_food_codes: healthDetails.allergy_foods.map((f) => f.food_code),
           smoking: healthDetails.smoking,
           tobacco: healthDetails.tobacco,
           alcohol: healthDetails.alcohol,
-          non_veg_days: non_veg_days.length > 0 ? non_veg_days : null,
           millets_preferred,
         },
       });
