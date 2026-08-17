@@ -311,24 +311,25 @@ def _best_qty_combo(
 ) -> list[float] | None:
     """
     Enumerate all combinations of VALID_QUANTITIES for each recipe.
-    Return the quantity list whose (fixed_gl + combo_gl) is closest to target_gl
-    and falls within the ±_GL_TOLERANCE band, or None if no valid combo exists.
+    Return the quantity list whose (fixed_gl + combo_gl) has the lowest total
+    GL among combos that don't exceed target_gl by more than the
+    ±_GL_TOLERANCE band — lower than target_gl is always fine (no lower
+    bound), only exceeding it is restricted. Returns None if no combo stays
+    within the upper bound. Mirrors _rank_candidates' one-sided rule so every
+    suggestion it returns is guaranteed to confirm here.
     """
     tolerance = max(_GL_FLOOR, target_gl * _GL_TOLERANCE)
-    lo = target_gl - tolerance
     hi = target_gl + tolerance
 
     best_combo: list[float] | None = None
-    best_delta = float("inf")
+    best_total_gl = float("inf")
 
     for qtys in itertools.product(VALID_QUANTITIES, repeat=len(gl_per_recipe)):
         combo_gl = sum(g * q for g, q in zip(gl_per_recipe, qtys))
         total_gl = fixed_gl + combo_gl
-        if lo <= total_gl <= hi:
-            delta = abs(total_gl - target_gl)
-            if delta < best_delta:
-                best_delta = delta
-                best_combo = list(qtys)
+        if total_gl <= hi and total_gl < best_total_gl:
+            best_total_gl = total_gl
+            best_combo = list(qtys)
 
     return best_combo
 
@@ -370,18 +371,19 @@ def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[Rec
     """
     Given a pool of Recipe rows and a target original_gl, score each candidate
     at whichever of VALID_QUANTITIES (as a proportion of its own full portion)
-    lands its GL closest to original_gl — so a candidate isn't penalised just
-    because 1 of its own servings has very different carbs than 1 of the
-    original's. Ranks by that gap, returns the top 3 with quantity expressed
-    as an absolute amount (via RecipeTagging.Portion).
+    has the lowest GL among quantities that don't exceed original_gl by more
+    than the tolerance — lower GL than the original is always fine (no lower
+    bound, lower is better), only exceeding the original is restricted to a
+    ±_GL_TOLERANCE band above it. Ranks candidates by that chosen GL
+    (ascending — lowest first), returns the top 3 with quantity expressed as
+    an absolute amount (via RecipeTagging.Portion).
 
-    Only considers quantities that land within the same ±_GL_TOLERANCE band
-    request_on_demand_replacement's confirmation step (_best_qty_combo)
-    requires, and searches the same VALID_QUANTITIES set (not a wider one) —
-    so every suggestion returned here is guaranteed to actually be
-    confirmable via a subsequent swap request. A candidate with no quantity
-    landing in-band is excluded entirely rather than shown as a "closest
-    available but not really close" option.
+    Uses the same one-sided band request_on_demand_replacement's confirmation
+    step (_best_qty_combo) requires, and searches the same VALID_QUANTITIES
+    set (not a wider one) — so every suggestion returned here is guaranteed to
+    actually be confirmable via a subsequent swap request. A candidate with no
+    quantity landing in-band (i.e. every quantity overshoots original_gl by
+    more than tolerance) is excluded entirely.
     """
     if not candidates:
         return []
@@ -411,7 +413,7 @@ def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[Rec
     gl_map = _compute_gl_map(sb, candidates)
 
     tolerance = max(_GL_FLOOR, original_gl * _GL_TOLERANCE)
-    lo, hi = original_gl - tolerance, original_gl + tolerance
+    hi = original_gl + tolerance  # no lower bound — any GL <= original_gl is in-band
 
     scored: list[dict] = []
     for row in candidates:
@@ -419,14 +421,13 @@ def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[Rec
         base_gl = gl_map.get(code, 0.0)
 
         best_q = None
-        best_gap = float("inf")
+        best_gl = float("inf")
         for q in VALID_QUANTITIES:
             gl_at_q = base_gl * q
-            if not (lo <= gl_at_q <= hi):
+            if gl_at_q > hi:
                 continue
-            gap = abs(gl_at_q - original_gl)
-            if gap < best_gap:
-                best_gap = gap
+            if gl_at_q < best_gl:
+                best_gl = gl_at_q
                 best_q = q
 
         if best_q is None:
@@ -440,11 +441,10 @@ def _rank_candidates(sb, candidates: list[dict], original_gl: float) -> list[Rec
             "recipe_name": row.get("Recipe_Name") or "",
             "quantity": abs_quantity,
             "unit": desc_map.get(code, "serving"),
-            "gl": round(base_gl * best_q, 2),
-            "_gap": best_gap,
+            "gl": round(best_gl, 2),
         })
 
-    scored.sort(key=lambda s: s["_gap"])
+    scored.sort(key=lambda s: s["gl"])
 
     return [
         RecipeWithQty(
