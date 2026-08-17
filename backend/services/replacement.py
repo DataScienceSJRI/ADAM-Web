@@ -145,13 +145,49 @@ def _fetch_excluded_recipe_codes(sb, user_id: str) -> set[str]:
     return excluded
 
 
+def _fetch_preferred_subcategory_codes(sb, user_id: str) -> Optional[set[str]]:
+    """
+    Recipe codes whose Recipe_Category is one of the user's onboarding-
+    preferred subcategories — BE_Preference_onboarding.sub_category stores
+    Recipe_Category codes directly (e.g. "A1A"), Reaction != "disliked" (the
+    same table/filter services/data_loader.py uses to constrain the LP model
+    itself). Returns None (no restriction) if the user has no preference rows
+    on file at all, so users who never went through that onboarding step
+    aren't left with zero eligible candidates.
+    """
+    rows = (
+        sb.table("BE_Preference_onboarding")
+        .select("sub_category, Reaction")
+        .eq("user_id", user_id)
+        .execute()
+        .data
+    ) or []
+    preferred_subcats = {
+        str(r["sub_category"]).strip()
+        for r in rows
+        if r.get("sub_category") and str(r.get("Reaction") or "").strip().lower() != "disliked"
+    }
+    if not preferred_subcats:
+        return None
+
+    recipe_rows = (
+        sb.table("Recipe")
+        .select("Recipe_Code, Recipe_Category")
+        .in_("Recipe_Category", list(preferred_subcats))
+        .execute()
+        .data
+    ) or []
+    return {str(r["Recipe_Code"]).strip().upper() for r in recipe_rows if r.get("Recipe_Code")}
+
+
 def _fetch_eligible_codes(sb, user_id: str) -> set[str]:
     """
     Combines all eligibility gates candidates must pass to surface as a swap
-    suggestion: ADAM-approved, matches the user's dietary preference, and
-    isn't disliked or an allergen — the same pool the main plan-generation
-    pipeline draws from (services/data_loader.py), minus the meal-slot tag
-    filter (deliberately not applied here — see _rank_alternatives_for_recipe).
+    suggestion: ADAM-approved, matches the user's dietary preference, from a
+    subcategory the user preferred at onboarding, and isn't disliked or an
+    allergen — the same pool the main plan-generation pipeline draws from
+    (services/data_loader.py), minus the meal-slot tag filter (deliberately
+    not applied here — see _rank_alternatives_for_recipe).
     """
     eligible = _fetch_adam_approved_codes(sb)
 
@@ -159,6 +195,10 @@ def _fetch_eligible_codes(sb, user_id: str) -> set[str]:
     diet_allowed = _fetch_diet_allowed_codes(sb, profile.get("diet_type") if profile else None)
     if diet_allowed is not None:
         eligible &= diet_allowed
+
+    preferred_codes = _fetch_preferred_subcategory_codes(sb, user_id)
+    if preferred_codes is not None:
+        eligible &= preferred_codes
 
     eligible -= _fetch_excluded_recipe_codes(sb, user_id)
     return eligible
