@@ -104,6 +104,7 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         .execute()
         .data
     ) or []
+    participants = [p for p in participants if str(p.get("participant_id") or "").strip().upper().startswith("A")]
     if not participants:
         return _empty_overview()
 
