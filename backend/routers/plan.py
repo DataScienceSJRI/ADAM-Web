@@ -177,10 +177,21 @@ def _schedule_day4_checkin(user_id: str, start_date: date) -> None:
         logger.exception("Failed to schedule day-4 check-in reminder for user_id=%s", user_id)
 
 
-def _round_to_valid_quantity(value: float) -> float:
-    """Snap a raw recipe quantity to the nearest step in VALID_QUANTITIES
-    (0.5 / 1.0 / 1.5 / 2.0 — the same fixed set the replacement/swap flow uses,
-    see services/replacement.py)."""
+_WHOLE_NUMBER_UNITS = {"teaspoon", "tablespoon", "tsp", "tbsp"}
+
+
+def _round_quantity_for_unit(value: float, unit) -> float:
+    """
+    Snap a raw recipe quantity to the appropriate step for its unit:
+      - Teaspoon / Tablespoon (incl. "Tsp"/"Tbsp" spellings in RecipeTagging.
+        Description): nearest whole number, unbounded (e.g. 4.6 -> 5) — half/
+        quarter spoons aren't a natural real-world serving.
+      - Everything else (Cup, Number, etc.): nearest of VALID_QUANTITIES
+        (0.5 / 1.0 / 1.5 / 2.0 — the same fixed set the replacement/swap flow
+        uses, see services/replacement.py).
+    """
+    if str(unit or "").strip().lower() in _WHOLE_NUMBER_UNITS:
+        return float(round(value))
     return min(VALID_QUANTITIES, key=lambda q: abs(q - value))
 
 
@@ -198,7 +209,9 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
 
     Instead:
       1. actual_quantity = Portion * Serving        (e.g. 1.2 * 0.8 = 0.96)
-      2. rounded_quantity = nearest of VALID_QUANTITIES (e.g. 0.96 -> 1.0)
+      2. rounded_quantity = _round_quantity_for_unit(actual_quantity, unit)
+         — nearest of VALID_QUANTITIES normally, or nearest whole number for
+         Teaspoon/Tablespoon recipes (see _round_quantity_for_unit)
       3. corrected_proportion = rounded_quantity / Portion (e.g. 1.0 / 1.2 = 0.833)
 
     `Serving` is overwritten with the corrected_proportion so every place
@@ -217,17 +230,22 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
     tag_df = _fetch_cached("RecipeTagging")
     tag_df = tag_df[tag_df["Recipe_Code"].astype(str).str.strip().isin(
         {str(c).strip() for c in recipe_codes}
-    )][["Recipe_Code", "Portion"]].copy()
+    )][["Recipe_Code", "Portion", "Description"]].copy()
     tag_df["Portion"] = pd.to_numeric(tag_df["Portion"], errors="coerce")
     tag_df = tag_df.dropna(subset=["Portion"]).drop_duplicates(subset=["Recipe_Code"])
     portion_map = dict(zip(tag_df["Recipe_Code"], tag_df["Portion"]))
+    unit_map = dict(zip(tag_df["Recipe_Code"], tag_df["Description"]))
 
     weekly_menu["_tagging_portion"] = weekly_menu["Recipe_Code"].map(portion_map)
+    weekly_menu["_tagging_unit"] = weekly_menu["Recipe_Code"].map(unit_map)
 
     selectable = (weekly_menu["Serving"] > 0) & weekly_menu["_tagging_portion"].notna() & (weekly_menu["_tagging_portion"] > 0)
 
     raw_quantity = weekly_menu["_tagging_portion"] * weekly_menu["Serving"]
-    rounded_quantity = raw_quantity.apply(_round_to_valid_quantity)
+    rounded_quantity = pd.Series(
+        [_round_quantity_for_unit(v, u) for v, u in zip(raw_quantity, weekly_menu["_tagging_unit"])],
+        index=weekly_menu.index,
+    )
     corrected_proportion = rounded_quantity / weekly_menu["_tagging_portion"]
 
     weekly_menu.loc[selectable, "Serving"] = corrected_proportion[selectable]
@@ -240,7 +258,7 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
             unmatched,
         )
 
-    return weekly_menu.drop(columns=["_tagging_portion"])
+    return weekly_menu.drop(columns=["_tagging_portion", "_tagging_unit"])
 
 
 def _run_plan_background(
@@ -258,7 +276,6 @@ def _run_plan_background(
     final_nut_summary = None
     opt_summary: dict = {}
     weekly_menu = None
-    top_choices = None
     weekly_min = None
 
     try:
@@ -285,7 +302,6 @@ def _run_plan_background(
                 'Recipe_Name'
             ] = weekly_menu['Recipe_Code'].map(name_map)
 
-            top_choices = output_paths.get("top_personalized_choices")
             weekly_min = output_paths.get("weekly_min")
             summary = output_paths.get("weekly_optimization_summary")
             if summary.get("status") == "Optimal":
@@ -314,42 +330,16 @@ def _run_plan_background(
         return
 
     try:
-        if top_choices is not None and not top_choices.empty and "Meal_Time" in top_choices.columns:
-            present_times = set(weekly_menu["Meal_Time"].astype(str).str.strip().unique())
-            all_slots = (
-                top_choices[["Meal_Time", "Dish_Type"]]
-                .dropna()
-                .drop_duplicates()
-                .values.tolist()
-            )
-
-            weekly_menu["Optimal proportion"] = weekly_menu.get("Serving", 0.0)
-            weekly_menu["Energy_ENERC_Kcal"] = weekly_menu["Energy_ENERC_Kcal"] * weekly_menu["Optimal proportion"]
-
-            days = sorted(weekly_menu["Day"].dropna().unique()) if "Day" in weekly_menu.columns else list(range(1, 8))
-            extra_rows = []
-            for meal_time, dish_type in all_slots:
-                if str(meal_time).strip() not in present_times:
-                    slot_cands = top_choices[
-                        (top_choices["Meal_Time"].astype(str).str.strip() == str(meal_time).strip()) &
-                        (top_choices["Dish_Type"].astype(str).str.strip() == str(dish_type).strip())
-                    ]
-                    if slot_cands.empty:
-                        continue
-                    best = slot_cands.iloc[0].to_dict()
-                    for d in days:
-                        row = dict(best)
-                        row["Day"] = d
-                        row.setdefault("Serving", 1.0)
-                        extra_rows.append(row)
-            if extra_rows:
-                weekly_menu = pd.concat(
-                    [weekly_menu, pd.DataFrame(extra_rows)], ignore_index=True
-                ).sort_values(["Day", "Meal_Time", "Dish_Type"]).reset_index(drop=True)
-                logger.info("Supplemented weekly_menu with %d rows for missing meal times: %s",
-                            len(extra_rows), [m for m, _ in all_slots if str(m).strip() not in present_times])
+        # Real data shows this doesn't reliably backfill missing slots (e.g.
+        # Snacks was still missing entirely in saved plans that should have
+        # triggered it), so the gap-fill logic itself was removed. The Energy
+        # scaling below is unrelated and still needed — it used to be
+        # incorrectly gated behind the (unrelated) top_choices check, so it
+        # silently never ran whenever top_choices was empty; now it always runs.
+        weekly_menu["Optimal proportion"] = weekly_menu.get("Serving", 0.0)
+        weekly_menu["Energy_ENERC_Kcal"] = weekly_menu["Energy_ENERC_Kcal"] * weekly_menu["Optimal proportion"]
     except Exception as _supp_err:
-        logger.warning("Could not supplement missing meal times: %s", _supp_err)
+        logger.warning("Could not scale Energy_ENERC_Kcal by Optimal proportion: %s", _supp_err)
 
     try:
         unique_days = sorted(weekly_menu["Day"].dropna().unique().tolist()) if "Day" in weekly_menu.columns else []
@@ -504,7 +494,9 @@ def Recomendation_formatting(weekly_menu_df):
         merged["Portion original"] = merged.get("Portion")
 
         merged["Optimal proportion"] = merged.get("Serving", 0.0)
-        merged["Recipe weight Optimal (g)"] = (merged["Recipe weight Original (g)"].fillna(0.0) * merged["Optimal proportion"].fillna(0.0)).round(2)
+        _raw_weight_optimal_g = merged["Recipe weight Original (g)"].fillna(0.0) * merged["Optimal proportion"].fillna(0.0)
+        # Round to the nearest 5g, whole number — raw weights display in 5's in the menu.
+        merged["Recipe weight Optimal (g)"] = (np.round(_raw_weight_optimal_g / 5) * 5).round(0)
 
         # Parse numeric portion count from 'Portion' (e.g. '2.0 Number' -> 2.0)
         try:
