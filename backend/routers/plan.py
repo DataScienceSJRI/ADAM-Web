@@ -4,6 +4,7 @@ import os
 import time
 import tempfile
 import json
+import math
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -270,6 +271,29 @@ def _run_plan_background(
     """Runs the model in the RQ worker and writes results."""
     t0 = time.time()
     effective_start_date = start_date or (date.today() + timedelta(days=1))
+
+    # Non-veg-days constraint prep: BE_Preference_onboarding_details.non_veg_days
+    # is a set of real weekdays (e.g. ["Wed","Thu","Fri","Sat"]) the user is OK
+    # having non-veg on — the LP only knows abstract Day 1-7, so this is the one
+    # place that knows both the plan's actual calendar dates AND runs before
+    # model.run(), making it the only place that can resolve weekday -> Day
+    # number. Stashed onto `profile` (which already flows unchanged all the way
+    # into services/lp_optimizer.run_lp) rather than threading a new parameter
+    # through model.run() / optimize_weekly_menu_with_constraints() / run_lp().
+    if str((profile or {}).get("diet_type", "")).strip().lower() == "non-veg":
+        non_veg_days = {str(d).strip() for d in (profile.get("non_veg_days") or []) if str(d).strip()}
+        if non_veg_days:
+            nonveg_eligible_days = [
+                d for d in range(1, 8)
+                if (effective_start_date + timedelta(days=d - 1)).strftime("%a") in non_veg_days
+            ]
+            profile["_nonveg_eligible_days"] = nonveg_eligible_days
+            profile["_nonveg_required_count"] = math.ceil(len(nonveg_eligible_days) / 2)
+            logger.info(
+                "user_id=%s non_veg_days=%s -> eligible Day numbers=%s, required_count=%d",
+                user_id, sorted(non_veg_days), nonveg_eligible_days, profile["_nonveg_required_count"],
+            )
+
     _write_plan_status(body.onboarding_id, "generating")
 
     finall_summary = None

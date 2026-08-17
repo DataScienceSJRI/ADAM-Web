@@ -47,7 +47,7 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
 
     pref_query = (
         supabase.table("BE_Preference_onboarding_details")
-        .select("dietary_type, diet_restrictions, breakfast_time, lunch_time, dinner_time, non_veg_types")
+        .select("dietary_type, diet_restrictions, breakfast_time, lunch_time, dinner_time, non_veg_types, non_veg_days")
         .eq("user_id", user_id)
     )
     if onboarding_id:
@@ -71,6 +71,7 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
     lunch_time     = pref_row.get("lunch_time")
     dinner_time    = pref_row.get("dinner_time")
     non_veg_types  = pref_row.get("non_veg_types") or []
+    non_veg_days   = pref_row.get("non_veg_days") or []
 
     bmi = None
     if height and height > 0 and weight and weight > 0:
@@ -89,6 +90,7 @@ def build_profile(user_id: str, onboarding_id: str | None = None) -> Optional[di
         "activity_levels": activity,
         "diet_type": diet_type,
         "non_veg_types": non_veg_types,
+        "non_veg_days": non_veg_days,
         "age_group_col": age_group_col,
         "breakfast_time": breakfast_time,
         "lunch_time": lunch_time,
