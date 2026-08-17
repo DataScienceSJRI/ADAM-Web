@@ -112,6 +112,80 @@ def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.
                 return pd.DataFrame()
 
 
+def _fetch_nonveg_code_to_items(sb) -> dict[str, set[str]]:
+    """
+    Nonveg_Options.Codes -> the set of Food Item names (Chicken/Beef/Pork/Fish/
+    Goat/sheep/Egg) that code belongs to. A handful of codes (mixed-meat broth
+    ingredients etc.) belong to more than one item, so this must be set-valued —
+    a single-value map would silently pick the wrong item for those.
+
+    Codes match against Recipes_ingredient in one of two columns depending on
+    recipe source: ADAM-native recipes via Food_Code (alpha-prefixed, e.g.
+    "N001"), USDA-imported recipes via Ing_Id (plain numeric, e.g. "4542").
+    """
+    rows = sb.table("Nonveg_Options").select("*").execute().data or []
+    code_to_items: dict[str, set[str]] = {}
+    for row in rows:
+        # lowercased for case-insensitive matching against non_veg_types — the
+        # source table itself is inconsistent ("Chicken" vs "sheep")
+        item = str(row.get("Food Item") or "").strip().lower()
+        if not item:
+            continue
+        for code in str(row.get("Codes") or "").split(","):
+            code = code.strip().upper()
+            if code:
+                code_to_items.setdefault(code, set()).add(item)
+    return code_to_items
+
+
+def get_recipes_excluded_by_nonveg_types(non_veg_types: list) -> set[str]:
+    """
+    Recipe codes to exclude because they contain a non-veg ingredient OUTSIDE the
+    user's selected non_veg_types (e.g. selected ["Goat", "Fish", "Pork"] excludes
+    any recipe with a Chicken, Beef, sheep, or Egg ingredient) — even if the same
+    recipe ALSO contains an allowed ingredient. A recipe made of both chicken and
+    pork is excluded when only Pork is selected, since it isn't exclusively made
+    of selected types.
+
+    Only meant to restrict the non-veg portion of the catalog on top of the base
+    Vegetarian/Ovo-vegetarian diet filter — vegetarian-flagged recipes are never
+    looked at here, callers should apply this only to already non-veg-filtered
+    candidates. Returns an empty set (no restriction) when non_veg_types is
+    empty/missing, matching today's behavior for the vast majority of users who
+    haven't set this onboarding field yet.
+    """
+    selected = {str(t).strip().lower() for t in (non_veg_types or []) if str(t).strip()}
+    if not selected:
+        return set()
+
+    sb = get_supabase()
+    code_to_items = _fetch_nonveg_code_to_items(sb)
+    if not code_to_items:
+        return set()
+
+    ing_df = _fetch_cached("Recipes_ingredient")
+    if ing_df.empty or "Recipe_Code" not in ing_df.columns:
+        return set()
+
+    excluded: set[str] = set()
+    for col in ("Food_Code", "Ing_Id"):
+        if col not in ing_df.columns:
+            continue
+        codes = ing_df[col].astype(str).str.strip().str.upper()
+        matched_mask = codes.isin(code_to_items.keys())
+        if not matched_mask.any():
+            continue
+        matched = ing_df.loc[matched_mask, ["Recipe_Code"]].copy()
+        matched["_items"] = codes[matched_mask].map(code_to_items)
+        # exclude if ANY matched item for this ingredient row isn't in the selected set
+        disallowed_mask = matched["_items"].apply(lambda items: bool(items - selected))
+        excluded.update(
+            matched.loc[disallowed_mask, "Recipe_Code"].astype(str).str.strip().str.upper().unique()
+        )
+
+    return excluded
+
+
 def _fetch_cached(table: str) -> pd.DataFrame:
     """Fetch a static table, returning a cached copy while the cache is fresh."""
     if table not in _STATIC_TABLES:
@@ -321,6 +395,24 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                                     .str.strip()
                                     .str.upper()
                                     .isin(valid_codes)
+                                ].copy()
+                    elif col == "Non vegetarian":
+                        # No Vegetarian/Ovo-vegetarian restriction for non-veg eaters, but
+                        # narrow further to the specific meat types they selected at
+                        # onboarding (non_veg_types), if any — e.g. selecting only
+                        # Goat/Fish/Pork removes chicken- or beef-based recipes too.
+                        excluded_nonveg = get_recipes_excluded_by_nonveg_types(profile.get("non_veg_types"))
+                        if excluded_nonveg:
+                            ds["recipe_tag"] = rt[
+                                ~rt["Recipe_Code"].astype(str).str.strip().str.upper().isin(excluded_nonveg)
+                            ].copy()
+                            if "Recipe_Code" in ds["recipes"].columns:
+                                ds["recipes"] = ds["recipes"][
+                                    ~ds["recipes"]["Recipe_Code"]
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    .isin(excluded_nonveg)
                                 ].copy()
         print("No of recipes - AFTER",len(ds["recipes"]))
     except Exception:
