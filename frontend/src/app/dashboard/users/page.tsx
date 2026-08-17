@@ -74,10 +74,12 @@ export default function UsersPage() {
     const supabase = createClient();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) { router.push("/login"); return; }
-    setIsAdmin(session.user.email === "test@example.com");
+    const admin = session.user.email === "test@example.com";
+    setIsAdmin(admin);
     const res = await fetch("/api/users", { headers: { Authorization: `Bearer ${session.access_token}` } });
     if (!res.ok) { setError("Failed to load participants"); setLoading(false); return; }
-    setParticipants(await res.json());
+    const data: Participant[] = await res.json();
+    setParticipants(admin ? data : data.filter((p) => p.participant_id?.toUpperCase().startsWith("A")));
     setLoading(false);
   }, [router]);
 

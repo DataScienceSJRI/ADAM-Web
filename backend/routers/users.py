@@ -101,13 +101,13 @@ def list_participants(
     user_id: str = Depends(get_current_user),
     role: str = Depends(require_coordinator),
 ):
-    """List participants. Admin sees all; coordinator sees only their own."""
+    """List participants. Admin sees all whereas the coordinators will only see thei own participants without the prefix P"""
     sb = get_supabase()
     query = sb.table("UserRoles").select(
         "user_id, participant_id, display_name, coordinator_id, created_at"
     ).eq("role", "participant")
     if role == "coordinator":
-        query = query.eq("coordinator_id", user_id)
+        query = query.eq("coordinator_id", user_id).ilike("participant_id", "A%")
     participants = query.order("created_at", desc=True).execute().data or []
 
     if not participants:

@@ -260,7 +260,7 @@ def list_coordinator_participants(
 
     q = sb.table("UserRoles").select("user_id, participant_id, display_name").eq("role", "participant")
     if role == "coordinator":
-        q = q.eq("coordinator_id", user_id)
+        q = q.eq("coordinator_id", user_id).ilike("participant_id", "A%")
     participants = q.execute().data or []
 
     if not participants:

@@ -94,8 +94,8 @@ function OnboardingFlow() {
       .insert({
         dietary_type,
         diet_restrictions: diet_restrictions.length > 0 ? diet_restrictions.join(", ") : null,
-        non_veg_days: non_veg_days.length > 0 ? non_veg_days.join(", ") : null,
-        non_veg_types: non_veg_types.length > 0 ? non_veg_types.join(", ") : null,
+        non_veg_days: non_veg_days.length > 0 ? non_veg_days : null,
+        non_veg_types: non_veg_types.length > 0 ? non_veg_types : null,
         breakfast_time: toTimestamp(breakfast_time),
         lunch_time: toTimestamp(lunch_time),
         dinner_time: toTimestamp(dinner_time),
