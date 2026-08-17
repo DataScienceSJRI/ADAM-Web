@@ -466,6 +466,10 @@ def build_gl_by_meal(user_id: str, target_date: str) -> dict:
     return result
 
 
+_GL_COMPLIANCE_TOLERANCE = 0.20   # ±20% band around planned GL
+_GL_COMPLIANCE_FLOOR = 1.0        # minimum absolute tolerance when planned GL is near zero
+
+
 def build_recipe_compliance(user_id: str) -> dict:
     """
     Compliance against everything planned in RecommendationsBackup over the
@@ -476,29 +480,24 @@ def build_recipe_compliance(user_id: str) -> dict:
       how many days had a plan for that slot vs how many of those days had
       ANY DietRecall entry logged at all (any identified-or-not entry counts
       — "just an entry is enough", it doesn't need to match the plan).
-    - Recipe-level (recipes_recommended / recipes_followed / following_compliance_pct):
-      checked per PLANNED RECIPE, not per occasion. For each recipe planned
-      for a given (Date, slot), it counts as followed if it's found anywhere
-      in that same (Date, slot)'s DietRecall entries — either an exact
-      Recipe_Code match, or a Recipe_Name match whose Carbohydrate_g is
-      within _NAME_MATCH_CARB_TOLERANCE of the planned recipe's (covers the
-      same dish existing as two different near-duplicate recipe entries in
-      the catalog under different codes, while rejecting name matches where
-      the catalog itself is inconsistent — e.g. two recipes both called
-      "Ragi dosa" but with carbs 56% apart; a scan of the Recipe table found
-      26+ such same-name/same-category/different-nutrition pairs, so name
-      alone isn't a safe signal without a nutrition check backing it up).
-
-      Each planned recipe is scored independently: recommending 3 dishes and
-      eating 2 of them credits those 2 as followed (partial credit, not
-      all-or-nothing). Anything recalled that ISN'T on the plan is simply
-      ignored — it doesn't cost the occasion's other, genuinely-matched
-      recipes any credit.
+    - GL-level (gl_compliant_slots / gl_compliance_pct): also per (Date, slot)
+      occasion, same denominator as slots_recommended (no separate "recommended"
+      count — it'd just be a duplicate of slots_recommended, so it isn't
+      repeated here). For each occasion, sum that day's planned GL
+      (RecommendationsBackup Food_Qty scaled via the same
+      fetch_base_gl_map/fetch_portion_map/gl_for_quantity pipeline
+      services/recall.py and the GL trend above use) and that day's actual GL
+      (sum of DietRecall.GL). The occasion is GL-compliant if actual GL is
+      within ±_GL_COMPLIANCE_TOLERANCE of planned GL (floored at
+      ±_GL_COMPLIANCE_FLOOR so near-zero-GL occasions aren't impossible to
+      pass). An occasion with no DietRecall GL data at all defaults to
+      actual GL = 0, so it's not compliant unless planned GL is also ~0 —
+      missing recall means "didn't have it," same rule used everywhere else
+      in this file.
 
     Uses RecommendationsBackup (not Recommendation) since it's the immutable
     history of everything ever planned, unlike Recommendation which only
-    holds the current/live plan. Quantity doesn't affect whether a planned
-    recipe counts as followed.
+    holds the current/live plan.
 
     Window is the trailing 14 days ending yesterday (today/future dates can't
     have been complied with yet), same width as the GL trend elsewhere in
@@ -516,22 +515,13 @@ def build_recipe_compliance(user_id: str) -> dict:
         "slots_recommended": 0,
         "slots_logged": 0,
         "logging_compliance_pct": None,
-        "recipes_recommended": 0,
-        "recipes_followed": 0,
-        "following_compliance_pct": None,
+        "gl_compliant_slots": 0,
+        "gl_compliance_pct": None,
     }
-
-    def _norm_name(name) -> str:
-        return str(name or "").strip().lower()
-
-    # Name matches only count if the two recipes' carbs are also this close —
-    # closes the "Ragi dosa" loophole (two same-named, same-category recipes
-    # with very different actual nutrition; see build_recipe_compliance's docstring).
-    _NAME_MATCH_CARB_TOLERANCE = 0.20
 
     planned_rows = (
         sb.table("RecommendationsBackup")
-        .select("Date, Timings, Food_Name_desc, Food_Name")
+        .select("Date, Timings, Food_Name_desc, Food_Qty")
         .eq("user_id", user_id)
         .gte("Date", start)
         .lte("Date", yesterday)
@@ -547,7 +537,7 @@ def build_recipe_compliance(user_id: str) -> dict:
 
     recall_rows = (
         sb.table("DietRecall")
-        .select("Date, meal_slot, Food_Name_desc, Food_Name")
+        .select("Date, meal_slot, GL")
         .eq("user_id", user_id)
         .gte("Date", start)
         .lte("Date", yesterday)
@@ -563,49 +553,24 @@ def build_recipe_compliance(user_id: str) -> dict:
         if slot in logged_occasions and d:
             logged_occasions[slot].add(str(d)[:10])
 
-    # Identified recall items grouped by (date, slot) — keep (code, name) pairs
-    # so the compliance check below can match on either.
-    recalled_by_occasion: dict[tuple[str, str], list] = {}
+    # Actual GL summed per (date, slot) — only rows with a computed GL contribute.
+    actual_gl_by_occasion: dict[tuple[str, str], float] = {}
     for r in recall_rows:
         d = r.get("Date")
-        code = r.get("Food_Name_desc")
         slot = str(r.get("meal_slot") or "").strip().lower()
-        if not d or not code or slot not in MEAL_SLOTS:
+        gl = r.get("GL")
+        if not d or slot not in MEAL_SLOTS or gl is None:
             continue
-        recalled_by_occasion.setdefault((str(d)[:10], slot), []).append(
-            (str(code).strip(), _norm_name(r.get("Food_Name")))
-        )
+        key = (str(d)[:10], slot)
+        actual_gl_by_occasion[key] = actual_gl_by_occasion.get(key, 0.0) + float(gl)
 
-    # Carbohydrate_g for every code that appears on either side, so a
-    # name-only match can be checked for nutrition similarity.
-    all_codes = {str(row["Food_Name_desc"]).strip() for row in planned_rows if row.get("Food_Name_desc")}
-    all_codes |= {code for items in recalled_by_occasion.values() for code, _ in items}
-    carb_map: dict[str, float] = {}
-    if all_codes:
-        carb_rows = (
-            sb.table("Recipe").select("Recipe_Code, Carbohydrate_g").in_("Recipe_Code", list(all_codes)).execute().data
-        ) or []
-        for r in carb_rows:
-            try:
-                carb_map[str(r["Recipe_Code"]).strip()] = float(r["Carbohydrate_g"])
-            except (TypeError, ValueError, KeyError):
-                continue
+    # Planned GL per recipe: base GL (per full portion) x proportion (Food_Qty / RecipeTagging.Portion).
+    planned_codes = list({str(row["Food_Name_desc"]).strip() for row in planned_rows if row.get("Food_Name_desc")})
+    base_gl_map = fetch_base_gl_map(sb, planned_codes)
+    portion_map = fetch_portion_map(sb, planned_codes)
 
-    def _carbs_close(code_a: str, code_b: str) -> bool:
-        ca, cb = carb_map.get(code_a), carb_map.get(code_b)
-        if ca is None or cb is None:
-            return False
-        hi = max(ca, cb)
-        return hi == 0 or abs(ca - cb) / hi <= _NAME_MATCH_CARB_TOLERANCE
-
-    # Per-recipe scoring: each planned recipe is checked independently against
-    # that (date, slot)'s recall — found by exact code, or by name+carb-close
-    # match. Anything else recalled (extra/off-plan items) is simply ignored;
-    # it doesn't cost this or any other planned recipe its credit.
     planned_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
-    recipe_totals: dict[str, dict] = {slot: {"planned": 0, "matched": 0} for slot in MEAL_SLOTS}
-    total = 0
-    matched = 0
+    planned_gl_by_occasion: dict[tuple[str, str], float] = {}
 
     for row in planned_rows:
         d = row.get("Date")
@@ -619,46 +584,50 @@ def build_recipe_compliance(user_id: str) -> dict:
 
         d_norm = str(d)[:10]
         code_norm = str(code).strip()
-        name_norm = _norm_name(row.get("Food_Name"))
         planned_occasions[slot].add(d_norm)
 
-        recipe_totals[slot]["planned"] += 1
-        total += 1
+        gl = gl_for_quantity(base_gl_map.get(code_norm), portion_map.get(code_norm), row.get("Food_Qty"))
+        if gl is not None:
+            key = (d_norm, slot)
+            planned_gl_by_occasion[key] = planned_gl_by_occasion.get(key, 0.0) + gl
 
-        recalled_items = recalled_by_occasion.get((d_norm, slot), [])
-        followed = any(
-            r_code == code_norm or (name_norm and r_name == name_norm and _carbs_close(r_code, code_norm))
-            for r_code, r_name in recalled_items
-        )
-        if followed:
-            recipe_totals[slot]["matched"] += 1
-            matched += 1
+    # GL-compliance check per occasion: actual GL within ±_GL_COMPLIANCE_TOLERANCE
+    # of planned GL (floored). Missing recall GL defaults to 0, which almost
+    # never passes against a nonzero planned GL — same "missing = not
+    # compliant" rule used elsewhere.
+    gl_compliant_occasions: dict[str, set] = {slot: set() for slot in MEAL_SLOTS}
+    for slot in MEAL_SLOTS:
+        for d_norm in planned_occasions[slot]:
+            key = (d_norm, slot)
+            planned_gl = planned_gl_by_occasion.get(key, 0.0)
+            actual_gl = actual_gl_by_occasion.get(key, 0.0)
+            tolerance = max(_GL_COMPLIANCE_FLOOR, planned_gl * _GL_COMPLIANCE_TOLERANCE)
+            if abs(actual_gl - planned_gl) <= tolerance:
+                gl_compliant_occasions[slot].add(d_norm)
 
     by_meal_slot = {}
     for slot in MEAL_SLOTS:
         slots_recommended = len(planned_occasions[slot])
         slots_logged = len(logged_occasions[slot] & planned_occasions[slot])
-        recipes_recommended = recipe_totals[slot]["planned"]
-        recipes_followed = recipe_totals[slot]["matched"]
+        gl_compliant_slots = len(gl_compliant_occasions[slot])
         by_meal_slot[slot] = {
             "slots_recommended": slots_recommended,
             "slots_logged": slots_logged,
             "logging_compliance_pct": _pct(slots_logged, slots_recommended),
-            "recipes_recommended": recipes_recommended,
-            "recipes_followed": recipes_followed,
-            "following_compliance_pct": _pct(recipes_followed, recipes_recommended),
+            "gl_compliant_slots": gl_compliant_slots,
+            "gl_compliance_pct": _pct(gl_compliant_slots, slots_recommended),
         }
 
     total_slots_recommended = sum(v["slots_recommended"] for v in by_meal_slot.values())
     total_slots_logged = sum(v["slots_logged"] for v in by_meal_slot.values())
+    total_gl_compliant_slots = sum(v["gl_compliant_slots"] for v in by_meal_slot.values())
 
     overall = {
         "slots_recommended": total_slots_recommended,
         "slots_logged": total_slots_logged,
         "logging_compliance_pct": _pct(total_slots_logged, total_slots_recommended),
-        "recipes_recommended": total,
-        "recipes_followed": matched,
-        "following_compliance_pct": _pct(matched, total),
+        "gl_compliant_slots": total_gl_compliant_slots,
+        "gl_compliance_pct": _pct(total_gl_compliant_slots, total_slots_recommended),
     }
 
     return {
