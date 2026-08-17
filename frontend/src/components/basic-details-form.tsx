@@ -24,7 +24,7 @@ const ACTIVITY_LEVELS_VALUES = [
 const DIETARY_TYPE_VALUES = ["Veg", "Non Veg", "Vegan", "Eggatarian", "Ovo veg"] as const;
 const NON_VEG_TYPES = ["Non Veg", "Eggatarian", "Ovo veg"] as const;
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
-const NON_VEG_MEAT_TYPES = ["Chicken", "Mutton"] as const;
+const NON_VEG_MEAT_TYPES = ["Chicken", "Beef", "Pork", "Fish", "Goat", "Sheep", "Egg"] as const;
 
 export const BasicDetailsSchema = z.object({
   Age: z.number({ error: "Required" })
