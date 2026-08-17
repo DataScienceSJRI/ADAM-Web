@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from core.supabase import get_supabase
 from models.schemas import ContactParticipantRequest
 from services.push import send_push
+from services.recall import fetch_base_gl_map, fetch_portion_map, gl_for_quantity
 from services.reminders import DEFAULT_MEAL_TIMES, IST, time_to_minutes
 
 router = APIRouter(prefix="/status", tags=["status"])
@@ -18,6 +19,9 @@ _MEAL_TIME_TO_SLOT = {"Breakfast": "breakfast", "Lunch": "lunch", "Dinner": "din
 _AT_RISK_DAYS = 3
 _SNACK_DUE_AFTER_SLOT = "dinner"
 _PENDING_REVIEW_STALE_HOURS = 24
+_GL_COMPLIANCE_TOLERANCE = 0.20
+_GL_COMPLIANCE_FLOOR = 1.0
+_GL_COMPLIANCE_WINDOW_DAYS = 14
 
 
 def _format_slot_list(slots: list[str]) -> str:
@@ -72,6 +76,87 @@ def _earliest_dates(sb, table: str, lookup_ids: list[str]) -> dict[str, str]:
         if uid not in earliest or d < earliest[uid]:
             earliest[uid] = d
     return earliest
+
+
+def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[str, Optional[float]]:
+    window_end = today - timedelta(days=1)
+    window_start = str(window_end - timedelta(days=_GL_COMPLIANCE_WINDOW_DAYS - 1))
+    window_end_str = str(window_end)
+
+    planned_rows = (
+        sb.table("RecommendationsBackup")
+        .select("user_id, Date, Timings, Food_Name_desc, Food_Qty")
+        .in_("user_id", lookup_ids)
+        .gte("Date", window_start)
+        .lte("Date", window_end_str)
+        .limit(20000)
+        .execute()
+        .data
+    ) or []
+    if not planned_rows:
+        return {}
+
+    recall_rows = (
+        sb.table("DietRecall")
+        .select("user_id, Date, meal_slot, GL")
+        .in_("user_id", lookup_ids)
+        .gte("Date", window_start)
+        .lte("Date", window_end_str)
+        .limit(20000)
+        .execute()
+        .data
+    ) or []
+
+    actual_gl: dict[tuple[str, str, str], float] = {}
+    for r in recall_rows:
+        uid = str(r.get("user_id", "")).split("@")[0]
+        d = _normalize_date(r.get("Date") or "")
+        slot = str(r.get("meal_slot", "")).strip().lower()
+        gl = r.get("GL")
+        if not d or slot not in MEAL_SLOTS or gl is None:
+            continue
+        key = (uid, d, slot)
+        actual_gl[key] = actual_gl.get(key, 0.0) + float(gl)
+
+    codes = list({str(row["Food_Name_desc"]).strip() for row in planned_rows if row.get("Food_Name_desc")})
+    base_gl_map = fetch_base_gl_map(sb, codes)
+    portion_map = fetch_portion_map(sb, codes)
+
+    planned_occasions: dict[str, set] = {}
+    planned_gl: dict[tuple[str, str, str], float] = {}
+    for row in planned_rows:
+        uid = str(row.get("user_id", "")).split("@")[0]
+        d = _normalize_date(row.get("Date") or "")
+        code = row.get("Food_Name_desc")
+        if not d or not code:
+            continue
+        slot = _MEAL_TIME_TO_SLOT.get(str(row.get("Timings") or "").strip())
+        if slot is None:
+            continue
+        planned_occasions.setdefault(uid, set()).add((d, slot))
+        code_norm = str(code).strip()
+        gl = gl_for_quantity(base_gl_map.get(code_norm), portion_map.get(code_norm), row.get("Food_Qty"))
+        if gl is not None:
+            key = (uid, d, slot)
+            planned_gl[key] = planned_gl.get(key, 0.0) + gl
+
+    pct_by_uid: dict[str, Optional[float]] = {}
+    for uid, occasions in planned_occasions.items():
+        compliant = 0
+        for d, slot in occasions:
+            actual = actual_gl.get((uid, d, slot))
+            if actual is None:
+                continue
+            planned = planned_gl.get((uid, d, slot), 0.0)
+            if actual <= planned:
+                compliant += 1
+                continue
+            tolerance = max(_GL_COMPLIANCE_FLOOR, planned * _GL_COMPLIANCE_TOLERANCE)
+            if (actual - planned) <= tolerance:
+                compliant += 1
+        pct_by_uid[uid] = round(100 * compliant / len(occasions), 1) if occasions else None
+
+    return pct_by_uid
 
 
 def _empty_overview() -> dict:
@@ -173,6 +258,8 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
             continue
         planned_gl.setdefault(uid, {}).setdefault(slot, {})
         planned_gl[uid][slot][d] = planned_gl[uid][slot].get(d, 0.0) + float(r["GL"])
+
+    gl_compliant_pct_by_uid = _bulk_gl_compliant_pct(sb, lookup_ids, today)
 
     all_review_rows = (
         sb.table("MealImageReview")
@@ -300,6 +387,7 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
             "avg_gl_planned": avg_planned,
             "avg_gl_actual": avg_actual,
             "gl_adherence_pct": gl_adherence_pct,
+            "gl_compliant_pct": gl_compliant_pct_by_uid.get(uid),
             "last_logged_date": last_logged_overall,
         })
 

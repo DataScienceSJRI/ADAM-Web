@@ -48,6 +48,7 @@ type ParticipantOverview = {
   avg_gl_planned: number | null;
   avg_gl_actual: number | null;
   gl_adherence_pct: number | null;
+  gl_compliant_pct: number | null;
   last_logged_date: string | null;
 };
 
@@ -766,7 +767,7 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
 
       <div className="flex">
         <div className="shrink-0 w-24 border-r bg-muted/10">
-          <div className="h-12 border-b" />
+          <div className="h-16 border-b" />
           {MEAL_ROWS.map((row) => (
             <div key={row.key} className="h-12 flex items-center px-3 text-xs font-medium border-t">
               {row.label}
@@ -779,7 +780,7 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
             <div key={p.user_id} className="border-r last:border-r-0">
               <div
                 title={p.display_name ?? p.participant_id ?? p.user_id}
-                className="h-12 flex flex-col items-center justify-center border-b bg-muted/10 px-1"
+                className="h-16 flex flex-col items-center justify-center border-b bg-muted/10 px-1"
               >
                 <span
                   title={p.display_name ?? p.participant_id ?? p.user_id}
@@ -789,6 +790,9 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
                 </span>
                 <span className="text-[10px] text-muted-foreground tabular-nums">
                   avg {p.avg_gl_planned ?? "—"}/{p.avg_gl_actual ?? "—"}
+                </span>
+                <span className={`text-[10px] font-semibold tabular-nums ${complianceTone(p.gl_compliant_pct)}`}>
+                  {p.gl_compliant_pct === null ? "—" : `${p.gl_compliant_pct}% compliant`}
                 </span>
               </div>
               {MEAL_ROWS.map((row) => (
