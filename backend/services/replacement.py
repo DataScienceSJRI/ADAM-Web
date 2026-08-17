@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
+from services.data_loader import apply_combination_table_overrides
 from services.profile_builder import build_profile
 
 VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
@@ -623,7 +624,9 @@ def _new_mapping_subcategories(sb, target_subcat: str, companion_subcats: set[st
     it's a loose "goes with almost anything" bucket, so a companion only found
     there isn't a real pairing signal either.
     """
-    mapping_rows = sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+    mapping_rows = apply_combination_table_overrides(
+        sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+    )
     role = _find_column_role(mapping_rows, target_subcat)
     if role is None or not companion_subcats:
         return set()
