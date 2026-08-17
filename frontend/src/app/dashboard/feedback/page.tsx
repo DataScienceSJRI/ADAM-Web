@@ -20,6 +20,7 @@ type Review = {
   reviewed_at: string | null;
   created_at: string;
   meal_slot: string | null;
+  participant_note: string | null;
 };
 
 type ParticipantGroup = {

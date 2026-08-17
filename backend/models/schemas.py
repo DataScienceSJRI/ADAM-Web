@@ -134,8 +134,9 @@ class DietRecallImageRequest(BaseModel):
     meal_slot: MealSlot
     image_url_pre: Optional[str] = None
     image_url_post: Optional[str] = None
+    note: Optional[str] = None
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None, "note": "Had less rice than usual"}}}
 
 
 class RecipeWithQty(BaseModel):

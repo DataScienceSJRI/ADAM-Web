@@ -548,6 +548,7 @@ def log_recall_image(
     meal_slot: MealSlot,
     image_url_pre: Optional[str],
     image_url_post: Optional[str],
+    note: Optional[str] = None,
 ) -> tuple[str, str]:
     """Upload pre/post meal photo URLs. Writes the same placeholder row (same
     ID) to both DietRecall — with Food_Name="Pending" so it shows up in
@@ -591,7 +592,10 @@ def log_recall_image(
             )
             if existing_review:
                 review_id = existing_review[0]["id"]
-                sb.table("MealImageReview").update({"post_image_id": image_url_post}).eq("id", review_id).execute()
+                post_patch: dict = {"post_image_id": image_url_post}
+                if note is not None:
+                    post_patch["participant_note"] = note
+                sb.table("MealImageReview").update(post_patch).eq("id", review_id).execute()
                 if existing_review[0].get("review_status") == "pending":
                     _enqueue_post_identification(sb, review_id, image_url_post)
                 return recall_id, review_id
@@ -628,6 +632,7 @@ def log_recall_image(
         "post_image_id": image_url_post,
         "review_status": "pending",
         "created_at": now.isoformat(),
+        "participant_note": note,
     }).execute()
 
     # Auto-enqueue food identification when a pre-meal image is present.
