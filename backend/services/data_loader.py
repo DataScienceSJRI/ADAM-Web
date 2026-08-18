@@ -566,6 +566,23 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                 combo_liked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
             )
 
+        # Recipes the user actually logged eating (DietRecall.Food_Name_desc).
+        # This column holds ADAM recipe codes (A/B-prefixed, some USDA-prefixed
+        # too) as well as blanks and USDA lookup-only codes that aren't eligible
+        # ADAM candidates — intersecting against ds["recipes"] (already
+        # eligibility-filtered) keeps only codes usable as recipe candidates,
+        # regardless of prefix.
+        dietrecall_logged = _fetch("DietRecall", {"user_id": user_id})
+        if not dietrecall_logged.empty and "Food_Name_desc" in dietrecall_logged.columns:
+            logged_codes = set(
+                dietrecall_logged["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+            logged_codes.discard("")
+            known_recipe_codes = set(
+                ds["recipes"]["Recipe_Code"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+            liked_codes.update(logged_codes & known_recipe_codes)
+
         # Millet-based recipes are always treated as liked for every user
         # (not tied to any actual reaction), so _inject_liked_recipes gives
         # them the same candidate-pool/objective-bonus treatment.
