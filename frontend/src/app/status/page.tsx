@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   Activity,
@@ -900,7 +901,7 @@ function MissedLogsPanel({ items, token }: { items: MissedLog[]; token: string }
             <div key={m.user_id} className="px-4 py-3 flex items-start gap-2">
               <AlertTriangle className="h-3.5 w-3.5 text-amber-500 shrink-0 mt-0.5" />
               <p className="text-xs leading-snug flex-1">
-                <span className="font-semibold">{m.participant_id ?? m.user_id}_{m.display_name ?? "—"}</span> has not logged{" "}
+                <span className="font-semibold">{m.participant_id ?? m.display_name ?? m.user_id}</span> has not logged{" "}
                 {formatSlotList(m.missing_slots)} today.
               </p>
               <ContactButton onContact={() => contact(m)} />
@@ -919,10 +920,10 @@ function PendingReviewsPanel({ items }: { items: PendingReview[] }) {
     <div className="rounded-xl border bg-card overflow-hidden">
       <div className="px-4 py-2.5 border-b bg-muted/20">
         <p className="text-sm font-semibold">Pending Image Reviews</p>
-        <p className="text-[11px] text-muted-foreground">Waiting more than 24 hours</p>
+        <p className="text-[11px] text-muted-foreground">Live · all pending</p>
       </div>
       {items.length === 0 ? (
-        <p className="px-4 py-6 text-xs text-muted-foreground text-center">No stale pending reviews.</p>
+        <p className="px-4 py-6 text-xs text-muted-foreground text-center">No pending reviews.</p>
       ) : (
         <div className="divide-y max-h-[420px] overflow-y-auto">
           {items.map((r) => (
@@ -930,10 +931,10 @@ function PendingReviewsPanel({ items }: { items: PendingReview[] }) {
               <ImageOff className="h-3.5 w-3.5 text-rose-500 shrink-0 mt-0.5" />
               <p className="text-xs leading-snug flex-1">
                 Logged image{r.pending_count > 1 ? `s (${r.pending_count})` : ""} for{" "}
-                <span className="font-semibold">{r.participant_id ?? r.user_id}_{r.display_name ?? "—"}</span> has not been
+                <span className="font-semibold">{r.participant_id ?? r.display_name ?? r.user_id}</span> has not been
                 approved.{" "}
                 <span className="text-muted-foreground">
-                  ({r.oldest_pending_hours !== null ? `${Math.round(r.oldest_pending_hours)}h` : "24h+"})
+                  ({r.oldest_pending_hours !== null ? `${Math.round(r.oldest_pending_hours)}h` : "—"})
                 </span>
               </p>
             </div>
@@ -1172,7 +1173,14 @@ export default function StatusDashboardPage() {
               {data?.today ? `As of ${formatDateLabel(data.today)}` : "Meal-logging and glycemic-load compliance across all participants."}
             </p>
           </div>
-          {!loading && !error && participants.length > 0 && (
+          <div className="flex items-center gap-3">
+            <Link
+              href="/status/developers"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-md border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+            >
+              For developers
+            </Link>
+            {!loading && !error && participants.length > 0 && (
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
               <input
@@ -1207,7 +1215,8 @@ export default function StatusDashboardPage() {
                 </div>
               )}
             </div>
-          )}
+            )}
+          </div>
         </div>
 
         {loading && (

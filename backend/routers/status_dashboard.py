@@ -18,7 +18,6 @@ MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snacks"]
 _MEAL_TIME_TO_SLOT = {"Breakfast": "breakfast", "Lunch": "lunch", "Dinner": "dinner", "Snacks": "snacks"}
 _AT_RISK_DAYS = 3
 _SNACK_DUE_AFTER_SLOT = "dinner"
-_PENDING_REVIEW_STALE_HOURS = 24
 _GL_COMPLIANCE_TOLERANCE = 0.20
 _GL_COMPLIANCE_FLOOR = 1.0
 _GL_COMPLIANCE_WINDOW_DAYS = 14
@@ -303,7 +302,7 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
     all_review_rows = (
         sb.table("MealImageReview")
-        .select("user_id, diet_recall_id, review_status")
+        .select("user_id, diet_recall_id, review_status, created_at")
         .in_("user_id", lookup_ids)
         .in_("review_status", ["pending", "approved"])
         .limit(2000)
@@ -324,6 +323,11 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         review_recall_map = {r["ID"]: r for r in dr_rows}
 
     slot_review_statuses: dict[str, dict[str, dict[str, list[str]]]] = {}
+    # created_at of each *pending* row within a (uid, slot, date) group — used
+    # below to decide staleness for groups that turn out to be fully pending.
+    # Rows in an already-partially-approved group are irrelevant to staleness
+    # since that group no longer counts as pending at all.
+    slot_review_pending_created_at: dict[str, dict[str, dict[str, list[str]]]] = {}
     for r in all_review_rows:
         uid = str(r.get("user_id", "")).split("@")[0]
         recall = review_recall_map.get(r.get("diet_recall_id"))
@@ -333,9 +337,15 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         d = _normalize_date(recall.get("Date") or "")
         if not d or slot not in MEAL_SLOTS:
             continue
-        slot_review_statuses.setdefault(uid, {}).setdefault(slot, {}).setdefault(d, []).append(
-            r.get("review_status")
-        )
+        uid_window = window.get(uid)
+        if uid_window and not (uid_window[0] <= d <= uid_window[1]):
+            continue
+        status = r.get("review_status")
+        slot_review_statuses.setdefault(uid, {}).setdefault(slot, {}).setdefault(d, []).append(status)
+        if status == "pending" and r.get("created_at"):
+            slot_review_pending_created_at.setdefault(uid, {}).setdefault(slot, {}).setdefault(d, []).append(
+                r["created_at"]
+            )
 
     pending_slots: dict[str, dict[str, set]] = {}
     for uid, slots in slot_review_statuses.items():
@@ -514,22 +524,15 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
             })
     missed_logs_today.sort(key=lambda m: (-len(m["missing_slots"]), m["display_name"] or ""))
     now_utc = datetime.now(timezone.utc)
-    stale_cutoff = (now_utc - timedelta(hours=_PENDING_REVIEW_STALE_HOURS)).isoformat()
-    review_rows = (
-        sb.table("MealImageReview")
-        .select("user_id, created_at")
-        .in_("user_id", lookup_ids)
-        .eq("review_status", "pending")
-        .lt("created_at", stale_cutoff)
-        .limit(2000)
-        .execute()
-        .data
-    ) or []
-
     pending_by_uid: dict[str, list[str]] = {}
-    for r in review_rows:
-        uid = str(r.get("user_id", "")).split("@")[0]
-        pending_by_uid.setdefault(uid, []).append(r.get("created_at") or "")
+    for uid, slots in pending_slots.items():
+        for slot, dates in slots.items():
+            for d in dates:
+                group_created_ats = [
+                    c for c in slot_review_pending_created_at.get(uid, {}).get(slot, {}).get(d, []) if c
+                ]
+                if group_created_ats:
+                    pending_by_uid.setdefault(uid, []).append(min(group_created_ats))
 
     pending_reviews_24h = []
     for p in participants:
@@ -565,6 +568,117 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         "participants": result,
         "missed_logs_today": missed_logs_today,
         "pending_reviews_24h": pending_reviews_24h,
+    }
+
+
+@router.get("/infeasible/{token}")
+def infeasible_generations(token: str):
+    _check_token(token)
+    sb = get_supabase()
+
+    participants = (
+        sb.table("UserRoles")
+        .select("user_id, participant_id, display_name")
+        .eq("role", "participant")
+        .execute()
+        .data
+    ) or []
+    participants = [p for p in participants if str(p.get("participant_id") or "").strip().upper().startswith("A")]
+    if not participants:
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "entries": []}
+
+    all_uids = [p["user_id"] for p in participants]
+    lookup_ids = _lookup_ids(all_uids)
+    participant_by_uid = {p["user_id"]: p for p in participants}
+
+    sessions = (
+        sb.table("BE_Onboarding_Sessions")
+        .select("onboarding_id, user_id, plan_status, created_at")
+        .in_("user_id", lookup_ids)
+        .execute()
+        .data
+    ) or []
+
+    # Most recent generation attempt per participant.
+    latest_session: dict[str, dict] = {}
+    for s in sessions:
+        uid = str(s.get("user_id", "")).split("@")[0]
+        if uid not in participant_by_uid:
+            continue
+        created_at = s.get("created_at") or ""
+        if uid not in latest_session or created_at > (latest_session[uid].get("created_at") or ""):
+            latest_session[uid] = s
+
+    failed_uids = [
+        uid for uid, s in latest_session.items()
+        if s.get("plan_status") and not str(s["plan_status"]).startswith("ok:")
+    ]
+    if not failed_uids:
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "entries": []}
+
+    failed_lookup_ids = _lookup_ids(failed_uids)
+    plan_rows = (
+        sb.table("Recommendation")
+        .select("user_id, WeekNo, Date, Timings, Food_Name_desc, Food_Qty, Energy_kcal")
+        .in_("user_id", failed_lookup_ids)
+        .limit(20000)
+        .execute()
+        .data
+    ) or []
+
+    # Keep only each participant's highest WeekNo (their current/last plan).
+    max_week: dict[str, int] = {}
+    for r in plan_rows:
+        uid = str(r.get("user_id", "")).split("@")[0]
+        wk = r.get("WeekNo")
+        if wk is None:
+            continue
+        wk = int(wk)
+        if uid not in max_week or wk > max_week[uid]:
+            max_week[uid] = wk
+
+    previous_plan_rows: dict[str, list[dict]] = {}
+    for r in plan_rows:
+        uid = str(r.get("user_id", "")).split("@")[0]
+        if r.get("WeekNo") is None or int(r["WeekNo"]) != max_week.get(uid):
+            continue
+        previous_plan_rows.setdefault(uid, []).append({
+            "date": _normalize_date(r.get("Date") or ""),
+            "timings": r.get("Timings"),
+            "food_name_desc": r.get("Food_Name_desc"),
+            "food_qty": r.get("Food_Qty"),
+            "energy_kcal": r.get("Energy_kcal"),
+        })
+
+    entries = []
+    for uid in failed_uids:
+        p = participant_by_uid[uid]
+        s = latest_session[uid]
+        prev_week_no = max_week.get(uid)
+        rows = sorted(
+            previous_plan_rows.get(uid, []),
+            key=lambda r: (r["date"] or "", str(r["timings"] or "")),
+        )
+        entries.append({
+            "user_id": uid,
+            "participant_id": p.get("participant_id"),
+            "display_name": p.get("display_name"),
+            "plan_status": s.get("plan_status"),
+            "failed_at": s.get("created_at"),
+            "attempted_week_no": (prev_week_no + 1) if prev_week_no is not None else 1,
+            "previous_plan": {
+                "week_no": prev_week_no,
+                "start_date": rows[0]["date"] if rows else None,
+                "end_date": rows[-1]["date"] if rows else None,
+                "meals": rows,
+            } if rows else None,
+        })
+
+    entries.sort(key=lambda e: e["failed_at"] or "", reverse=True)
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "entries": entries,
     }
 
 
