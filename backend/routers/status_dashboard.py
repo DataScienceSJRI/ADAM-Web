@@ -37,6 +37,21 @@ def _check_token(token: str) -> None:
         raise HTTPException(status_code=403, detail="Invalid or missing status dashboard token")
 
 
+def _weighted_avg_gl(day_gl: dict[str, float], day_energy: dict[str, float]) -> Optional[float]:
+    """Energy-weighted average of per-day GL totals: Σ(GL_day * Energy_day) /
+    Σ(Energy_day) — a day the user ate more counts more toward "their typical
+    GL" than a day they barely ate. Same formula as routers/kpi.py's
+    _weighted_avg_gl_per_day. Falls back to a plain mean if no day has energy
+    data at all."""
+    if not day_gl:
+        return None
+    weighted_sum = sum(gl * day_energy.get(d, 0.0) for d, gl in day_gl.items())
+    weight_total = sum(day_energy.values())
+    if weight_total > 0:
+        return round(weighted_sum / weight_total, 1)
+    return round(sum(day_gl.values()) / len(day_gl), 1)
+
+
 def _normalize_date(raw: str) -> Optional[str]:
     if not raw:
         return None
@@ -216,7 +231,7 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
     recalls = (
         sb.table("DietRecall")
-        .select("user_id, Date, meal_slot, GL")
+        .select("user_id, Date, meal_slot, GL, Energy_Kcal")
         .in_("user_id", lookup_ids)
         .gte("Date", global_start)
         .limit(20000)
@@ -226,6 +241,7 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
     counts: dict[str, dict[str, dict[str, int]]] = {}
     actual_gl: dict[str, dict[str, dict[str, float]]] = {}
+    actual_energy: dict[str, dict[str, dict[str, float]]] = {}
     for r in recalls:
         uid = str(r.get("user_id", "")).split("@")[0]
         slot = str(r.get("meal_slot", "")).strip().lower()
@@ -237,10 +253,19 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         if r.get("GL") is not None:
             actual_gl.setdefault(uid, {}).setdefault(slot, {})
             actual_gl[uid][slot][d] = actual_gl[uid][slot].get(d, 0.0) + float(r["GL"])
+        if r.get("Energy_Kcal") is not None:
+            actual_energy.setdefault(uid, {}).setdefault(slot, {})
+            actual_energy[uid][slot][d] = actual_energy[uid][slot].get(d, 0.0) + float(r["Energy_Kcal"])
 
+    # Sourced from RecommendationsBackup (the immutable original plan), same
+    # table and same recomputation via gl_for_quantity as _bulk_gl_compliant_pct
+    # / routers/kpi.py's build_recipe_compliance — so the displayed planned-GL
+    # averages always agree with the compliance percentage shown alongside
+    # them. FinalSummary reflects the *current* plan (post-swap), which can
+    # legitimately diverge from RecommendationsBackup after a recipe swap.
     plan_rows = (
-        sb.table("FinalSummary")
-        .select("user_id, Date, Meal_Time, GL")
+        sb.table("RecommendationsBackup")
+        .select("user_id, Date, Timings, Food_Name_desc, Food_Qty, Energy_kcal")
         .in_("user_id", lookup_ids)
         .gte("Date", global_start)
         .limit(20000)
@@ -248,16 +273,31 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         .data
     ) or []
 
-    # planned_gl[uid][slot][date] = summed planned GL for that meal slot
+    plan_codes = list({str(r["Food_Name_desc"]).strip() for r in plan_rows if r.get("Food_Name_desc")})
+    plan_base_gl_map = fetch_base_gl_map(sb, plan_codes)
+    plan_portion_map = fetch_portion_map(sb, plan_codes)
+
+    # planned_gl[uid][slot][date] = summed planned GL for that meal slot.
+    # planned_energy alongside it (also from RecommendationsBackup, same rows)
+    # so avg_gl_planned/avg_gl_actual below can use the same energy-weighted
+    # average as routers/kpi.py's build_gl_by_meal, not a plain mean.
     planned_gl: dict[str, dict[str, dict[str, float]]] = {}
+    planned_energy: dict[str, dict[str, dict[str, float]]] = {}
     for r in plan_rows:
         uid = str(r.get("user_id", "")).split("@")[0]
         d = _normalize_date(r.get("Date") or "")
-        slot = _MEAL_TIME_TO_SLOT.get(str(r.get("Meal_Time", "")).strip())
-        if not d or slot is None or r.get("GL") is None:
+        code = r.get("Food_Name_desc")
+        slot = _MEAL_TIME_TO_SLOT.get(str(r.get("Timings") or "").strip())
+        if not d or slot is None or not code:
             continue
-        planned_gl.setdefault(uid, {}).setdefault(slot, {})
-        planned_gl[uid][slot][d] = planned_gl[uid][slot].get(d, 0.0) + float(r["GL"])
+        code_norm = str(code).strip()
+        gl = gl_for_quantity(plan_base_gl_map.get(code_norm), plan_portion_map.get(code_norm), r.get("Food_Qty"))
+        if gl is not None:
+            planned_gl.setdefault(uid, {}).setdefault(slot, {})
+            planned_gl[uid][slot][d] = planned_gl[uid][slot].get(d, 0.0) + gl
+        if r.get("Energy_kcal") is not None:
+            planned_energy.setdefault(uid, {}).setdefault(slot, {})
+            planned_energy[uid][slot][d] = planned_energy[uid][slot].get(d, 0.0) + float(r["Energy_kcal"])
 
     gl_compliant_pct_by_uid = _bulk_gl_compliant_pct(sb, lookup_ids, today)
 
@@ -311,6 +351,8 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         participant_counts = counts.get(uid, {})
         participant_actual_gl = actual_gl.get(uid, {})
         participant_planned_gl = planned_gl.get(uid, {})
+        participant_actual_energy = actual_energy.get(uid, {})
+        participant_planned_energy = planned_energy.get(uid, {})
         participant_pending = pending_slots.get(uid, {})
 
         days_list = []
@@ -318,6 +360,14 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         end_d = date_type.fromisoformat(end)
         logged_total = expected_total = 0
         gl_pairs: list[tuple[float, float]] = []
+        # Per-day (GL, Energy) totals, planned and actual tracked separately —
+        # feeds the energy-weighted average below (same formula as
+        # routers/kpi.py's _weighted_avg_gl_per_day: a day you ate more counts
+        # more toward "your typical GL" than a day you barely ate).
+        planned_day_gl: dict[str, float] = {}
+        planned_day_energy: dict[str, float] = {}
+        actual_day_gl: dict[str, float] = {}
+        actual_day_energy: dict[str, float] = {}
         while d <= end_d:
             key = str(d)
             meal_counts = {slot: participant_counts.get(slot, {}).get(key, 0) for slot in MEAL_SLOTS}
@@ -356,6 +406,25 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
                 logged_total += logged_count
             if gl_planned is not None and gl_actual is not None:
                 gl_pairs.append((gl_planned, gl_actual))
+            # avg_gl_planned/avg_gl_actual below must compare like with like —
+            # only occasions (this exact day + meal slot) where BOTH a plan
+            # and a log exist, not "every planned slot" vs "every logged
+            # slot" independently (those can be different-sized, barely
+            # overlapping sets when a lot goes unlogged, which would make the
+            # two averages not actually comparable to each other).
+            for slot in MEAL_SLOTS:
+                slot_planned = gl_planned_by_meal[slot]
+                slot_actual = gl_actual_by_meal[slot]
+                if slot_planned is None or slot_actual is None:
+                    continue
+                planned_day_gl[key] = planned_day_gl.get(key, 0.0) + slot_planned
+                actual_day_gl[key] = actual_day_gl.get(key, 0.0) + slot_actual
+                slot_planned_energy = participant_planned_energy.get(slot, {}).get(key)
+                if slot_planned_energy is not None:
+                    planned_day_energy[key] = planned_day_energy.get(key, 0.0) + slot_planned_energy
+                slot_actual_energy = participant_actual_energy.get(slot, {}).get(key)
+                if slot_actual_energy is not None:
+                    actual_day_energy[key] = actual_day_energy.get(key, 0.0) + slot_actual_energy
             d += timedelta(days=1)
 
         last_logged_overall = None
@@ -367,8 +436,8 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
                     last_logged_overall = slot_last
 
         compliance_pct = round(100 * logged_total / expected_total, 1) if expected_total else None
-        avg_planned = round(sum(g for g, _ in gl_pairs) / len(gl_pairs), 1) if gl_pairs else None
-        avg_actual = round(sum(a for _, a in gl_pairs) / len(gl_pairs), 1) if gl_pairs else None
+        avg_planned = _weighted_avg_gl(planned_day_gl, planned_day_energy)
+        avg_actual = _weighted_avg_gl(actual_day_gl, actual_day_energy)
         # "On target" = actual GL didn't exceed planned that day (lower GL is
         # better for blood sugar control, same convention as routers/kpi.py's
         # _gl_indicator).

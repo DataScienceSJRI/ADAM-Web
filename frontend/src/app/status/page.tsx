@@ -632,7 +632,17 @@ const MEAL_ROWS: { key: "overall" | MealSlotKey; label: string }[] = [
   { key: "snacks", label: "Snacks" },
 ];
 
-type MealExpandState = { participant: ParticipantOverview; row: (typeof MEAL_ROWS)[number] };
+// Meal-Logging table has no single meaningful "Overall" row (logging any one
+// meal isn't comparable to logging GL totals), so it uses its own row list —
+// the GL table below still uses the full MEAL_ROWS (with Overall).
+const MEAL_LOGGING_ROWS: { key: MealSlotKey; label: string }[] = [
+  { key: "breakfast", label: "Breakfast" },
+  { key: "lunch", label: "Lunch" },
+  { key: "dinner", label: "Dinner" },
+  { key: "snacks", label: "Snacks" },
+];
+
+type MealExpandState = { participant: ParticipantOverview; row: (typeof MEAL_LOGGING_ROWS)[number] };
 
 function MealComplianceTable({ participants }: { participants: ParticipantOverview[] }) {
   const pager = usePagination(participants.length);
@@ -674,7 +684,7 @@ function MealComplianceTable({ participants }: { participants: ParticipantOvervi
         {/* Sticky row-label column */}
         <div className="shrink-0 w-24 border-r bg-muted/10">
           <div className="h-12 border-b" />
-          {MEAL_ROWS.map((row) => (
+          {MEAL_LOGGING_ROWS.map((row) => (
             <div key={row.key} className="h-12 flex items-center px-3 text-xs font-medium border-t">
               {row.label}
             </div>
@@ -699,7 +709,7 @@ function MealComplianceTable({ participants }: { participants: ParticipantOvervi
                   {p.compliance_pct === null ? "—" : `${p.compliance_pct}%`}
                 </span>
               </div>
-              {MEAL_ROWS.map((row) => (
+              {MEAL_LOGGING_ROWS.map((row) => (
                 <div key={row.key} className="h-12 flex items-center justify-center border-t">
                   <MiniStrip points={mealStripPoints(p, row.key)} dotClass={MEAL_LEVEL_DOT} onExpand={() => setExpandState({ participant: p, row })} />
                 </div>
@@ -752,6 +762,9 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
           <p className="text-sm font-semibold">Glycemic Load — Planned vs Actual</p>
           <p className="text-[11px] text-muted-foreground">
             Actual GL compared to planned per day · Click a strip for the full history
+          </p>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            * All values below are based on recorded meal slots only — slots that were never logged are excluded from the calculations.
           </p>
         </div>
         <Pager
