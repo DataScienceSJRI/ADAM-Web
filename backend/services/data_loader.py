@@ -186,6 +186,46 @@ def get_recipes_excluded_by_nonveg_types(non_veg_types: list) -> set[str]:
     return excluded
 
 
+def get_recipe_nonveg_type_map() -> dict[str, set[str]]:
+    """
+    Recipe_Code -> set of Nonveg_Options "Food Item" types it's made of
+    (e.g. {"chicken"}, {"egg"}), using the same Food_Code/Ing_Id ingredient
+    matching as get_recipes_excluded_by_nonveg_types. Items are lowercased
+    (matching _fetch_nonveg_code_to_items). A recipe absent from the result
+    (or vegetarian) has no matched non-veg ingredient.
+
+    Used by services/lp_optimizer.py to softly encourage variety across the
+    user's selected non_veg_types (e.g. not letting "Egg" dominate every
+    non-veg slot just because its GI happens to be 0 for every recipe in
+    that subcategory) — a separate concern from get_recipes_excluded_by_
+    nonveg_types, which only decides what's allowed at all, not how varied
+    the allowed choices should be.
+    """
+    sb = get_supabase()
+    code_to_items = _fetch_nonveg_code_to_items(sb)
+    if not code_to_items:
+        return {}
+
+    ing_df = _fetch_cached("Recipes_ingredient")
+    if ing_df.empty or "Recipe_Code" not in ing_df.columns:
+        return {}
+
+    result: dict[str, set[str]] = {}
+    for col in ("Food_Code", "Ing_Id"):
+        if col not in ing_df.columns:
+            continue
+        codes = ing_df[col].astype(str).str.strip().str.upper()
+        matched_mask = codes.isin(code_to_items.keys())
+        if not matched_mask.any():
+            continue
+        matched = ing_df.loc[matched_mask, ["Recipe_Code"]].copy()
+        matched["_items"] = codes[matched_mask].map(code_to_items)
+        for rc, items in zip(matched["Recipe_Code"], matched["_items"]):
+            rc_norm = str(rc).strip().upper()
+            result.setdefault(rc_norm, set()).update(items)
+    return result
+
+
 def _fetch_cached(table: str) -> pd.DataFrame:
     """Fetch a static table, returning a cached copy while the cache is fresh."""
     if table not in _STATIC_TABLES:
@@ -546,6 +586,21 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
         logger.exception("Liked recipe lookup failed for user_id=%s — liked recipes won't be force-included", user_id)
         ds["liked_recipe_codes"] = set()
         ds["millet_recipe_codes"] = set()
+
+    # Only computed when it can actually matter: non-veg diet with more than
+    # one selected meat type. Feeds services/lp_optimizer.py's non-veg-type
+    # variety constraint — skipped entirely for the vast majority of users
+    # (vegetarian, or non-veg with 0-1 types selected) to avoid the extra
+    # ingredient-matching work for nothing.
+    selected_nonveg_types = (profile or {}).get("non_veg_types") or []
+    if str((profile or {}).get("diet_type", "")).strip().lower() == "non-veg" and len(selected_nonveg_types) > 1:
+        try:
+            ds["nonveg_type_map"] = get_recipe_nonveg_type_map()
+        except Exception:
+            logger.exception("Non-veg type classification failed for user_id=%s — variety constraint will be skipped", user_id)
+            ds["nonveg_type_map"] = {}
+    else:
+        ds["nonveg_type_map"] = {}
 
     return ds
 

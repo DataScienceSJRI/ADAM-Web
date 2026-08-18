@@ -262,6 +262,91 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
     return weekly_menu.drop(columns=["_tagging_portion", "_tagging_unit"])
 
 
+def _apply_weekend_nonveg_swap(
+    weekly_menu: pd.DataFrame, profile: dict, effective_start_date: date
+) -> pd.DataFrame:
+    """
+    Post-optimization fixup: the LP only guarantees "at least half of the
+    user's eligible non-veg days end up with a non-veg recipe" (see the
+    non_veg_days constraint in services/lp_optimizer.py) — it doesn't
+    guarantee any *specific* day. If the user's non_veg_days includes
+    Saturday and/or Sunday specifically, this makes sure those exact days
+    got one, swapping with a currently-non-veg weekday if not.
+
+    Whole-day swap only (every Meal_Time/Dish_Type slot for that Day number,
+    exchanged as a block) — every constraint the solver already satisfied is
+    either per-day (doesn't care which Day number it's labeled) or a weekly
+    aggregate (doesn't care about day order), so relabeling two full days
+    can't violate anything the solve already produced. A single-meal swap
+    would risk breaking Main/Main2/Main3 pairing within a day; this avoids
+    that by never splitting a day apart.
+    """
+    if weekly_menu is None or weekly_menu.empty or "Day" not in weekly_menu.columns:
+        return weekly_menu
+    if str((profile or {}).get("diet_type", "")).strip().lower() != "non-veg":
+        return weekly_menu
+
+    non_veg_days = {str(d).strip() for d in (profile.get("non_veg_days") or []) if str(d).strip()}
+    weekend_targets = [wd for wd in ("Sat", "Sun") if wd in non_veg_days]
+    if not weekend_targets:
+        return weekly_menu
+
+    eligible_days = set(profile.get("_nonveg_eligible_days") or [])
+    if not eligible_days:
+        return weekly_menu
+
+    day_to_weekday = {
+        d: (effective_start_date + timedelta(days=d - 1)).strftime("%a") for d in range(1, 8)
+    }
+    weekday_to_day = {wd: d for d, wd in day_to_weekday.items()}
+
+    tag_df = _fetch_cached("RecipeTagging")
+    veg_map = dict(zip(tag_df["Recipe_Code"], tag_df.get("Vegetarian")))
+
+    def _is_nonveg(code) -> bool:
+        return str(veg_map.get(code)) not in ("1", "1.0")
+
+    def _day_has_nonveg(day_num: int) -> bool:
+        day_rows = weekly_menu[(weekly_menu["Day"] == day_num) & (weekly_menu["Serving"] > 0)]
+        return bool(day_rows["Recipe_Code"].apply(_is_nonveg).any())
+
+    weekly_menu = weekly_menu.copy()
+    target_days_this_week = {weekday_to_day[wd] for wd in weekend_targets if wd in weekday_to_day}
+
+    for wd in weekend_targets:
+        target_day = weekday_to_day.get(wd)
+        if target_day is None or target_day not in eligible_days:
+            continue  # this weekday isn't in this particular 7-day window, or not eligible
+        if _day_has_nonveg(target_day):
+            continue  # already satisfied, nothing to swap
+
+        donor_day = next(
+            (
+                d for d in sorted(eligible_days)
+                if d != target_day and d not in target_days_this_week and _day_has_nonveg(d)
+            ),
+            None,
+        )
+        if donor_day is None:
+            logger.warning(
+                "_apply_weekend_nonveg_swap: no non-veg donor day found to move onto %s (Day %d) — leaving as-is",
+                wd, target_day,
+            )
+            continue
+
+        target_mask = weekly_menu["Day"] == target_day
+        donor_mask = weekly_menu["Day"] == donor_day
+        weekly_menu.loc[target_mask, "Day"] = -1
+        weekly_menu.loc[donor_mask, "Day"] = target_day
+        weekly_menu.loc[weekly_menu["Day"] == -1, "Day"] = donor_day
+        logger.info(
+            "_apply_weekend_nonveg_swap: swapped Day %d <-> Day %d (%s) to move non-veg onto %s",
+            donor_day, target_day, wd, wd,
+        )
+
+    return weekly_menu
+
+
 def _run_plan_background(
     user_id: str,
     body: GeneratePlanRequest,
@@ -318,6 +403,7 @@ def _run_plan_background(
 
             weekly_menu = output_paths.get("weekly_menu")
             weekly_menu = _apply_rounded_quantity(weekly_menu)
+            weekly_menu = _apply_weekend_nonveg_swap(weekly_menu, profile, effective_start_date)
             recipe_name_changed = _fetch_cached("USER_Recipes_name_changed")
 
             name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))

@@ -733,6 +733,45 @@ def run_lp(
                 if d not in nonveg_eligible_days:
                     model += lpSum(y[(d, i)] for i in nonveg_ids) == 0
 
+    # Non-veg-type variety: when the user selected more than one non-veg type
+    # (profile["non_veg_types"], e.g. ["Chicken","Fish","Egg"]), softly
+    # discourage any single type from dominating the week's non-veg
+    # selections. Without this, GL-minimization alone tends to always pick
+    # whichever type happens to have the lowest (sometimes exactly 0) GI in
+    # the reference data — e.g. every "Egg and omlettes" recipe currently has
+    # GI_Avg=0 — regardless of what the user actually selected.
+    # Free allowance: any one type can be at most half of the week's total
+    # non-veg selections; going over that is absorbed by a penalized slack
+    # per type (same pattern as everywhere else here), so a pool dominated
+    # by one type can never make the week infeasible.
+    nonveg_type_penalty_terms = []
+    selected_types = {
+        str(t).strip().lower() for t in ((profile or {}).get("non_veg_types") or []) if str(t).strip()
+    }
+    nonveg_type_map = ds.get("nonveg_type_map") or {}
+    if len(selected_types) > 1 and nonveg_type_map and "Vegetarian" in candidates.columns:
+        all_nonveg_ids = [
+            int(i) for i in candidates.index
+            if pd.to_numeric(candidates.loc[i, "Vegetarian"], errors="coerce") != 1
+        ]
+        if all_nonveg_ids:
+            total_nonveg_selected = lpSum(y[(d, i)] for d in days for i in all_nonveg_ids)
+            type_penalty_weight = 3000.0
+            for t in selected_types:
+                type_ids = [
+                    i for i in all_nonveg_ids
+                    if t in nonveg_type_map.get(str(candidates.loc[i, "Recipe_Code"]).strip().upper(), set())
+                ]
+                if not type_ids:
+                    continue
+                safe_t = t.replace(" ", "_")
+                v_type = LpVariable(f"nonveg_type_excess_{safe_t}", lowBound=0)
+                model += (
+                    lpSum(y[(d, i)] for d in days for i in type_ids) - 0.5 * total_nonveg_selected
+                    <= v_type
+                )
+                nonveg_type_penalty_terms.append(type_penalty_weight * v_type)
+
     # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
     if variety_penalties:
         model.objective += lpSum(variety_penalties)
@@ -742,6 +781,8 @@ def run_lp(
         model.objective += lpSum(millet_penalty_terms)
     if nonveg_penalty_terms:
         model.objective += lpSum(nonveg_penalty_terms)
+    if nonveg_type_penalty_terms:
+        model.objective += lpSum(nonveg_type_penalty_terms)
 
 
 
