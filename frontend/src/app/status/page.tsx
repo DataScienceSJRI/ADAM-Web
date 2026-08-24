@@ -1144,7 +1144,11 @@ export default function StatusDashboardPage() {
     };
   }, [unlocked]);
 
-  const participants = useMemo(() => data?.participants ?? [], [data]);
+  const participants = useMemo(() => {
+    return [...(data?.participants ?? [])].sort((a, b) =>
+      (a.participant_id ?? "").localeCompare(b.participant_id ?? "", undefined, { numeric: true })
+    );
+  }, [data]);
 
   const searchMatches = useMemo(() => {
     const q = search.trim().toLowerCase();

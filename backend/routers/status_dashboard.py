@@ -200,6 +200,7 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
         sb.table("UserRoles")
         .select("user_id, participant_id, display_name")
         .eq("role", "participant")
+        .order("participant_id")
         .execute()
         .data
     ) or []
@@ -580,6 +581,7 @@ def infeasible_generations(token: str):
         sb.table("UserRoles")
         .select("user_id, participant_id, display_name")
         .eq("role", "participant")
+        .order("participant_id")
         .execute()
         .data
     ) or []
