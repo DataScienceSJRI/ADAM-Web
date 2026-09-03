@@ -78,6 +78,7 @@ def run_lp(
 
     required_cols = [
         "Recipe_Code","Recipe_Name","Recipe_Category", "Code_cooccurence", "Preferred_SubCategory_code", "Preference_Row_ID", "Meal_Time", "Dish_Type",
+        "Vegetarian",
         "GL", "Avg_TimeAbove160_pct", "Avg_Delta_Glucose", "Energy_ENERC_Kcal", "Energy_ENERC_KJ",
         "Protein_PROTCNT_g", "TotalFat_FATCE_g", "TotalDietaryFibre_FIBTG_g", "CalciumCa_CA_mg", "ZincZn_ZN_mg",
         "IronFe_FE_mg", "MagnesiumMg_MG_mg", "VA_RAE_mcg", "TotalFolatesB9_FOLSUM_mcg", "VB12_mcg",
@@ -484,11 +485,11 @@ def run_lp(
         # Look up how many unique recipes are competing for this specific slot
         unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
         if unique_recipes <= 2:
-            max_recipe_rep = 4  # Scarce choices: allow repeating up to 4 times if forced by macros
+            max_recipe_rep = 3  # Scarce choices: allow repeating up to 3 times if forced by macros
         elif unique_recipes <= 5:
-            max_recipe_rep = 3  # Medium variety: allow up to 3 times absolute maximum
+            max_recipe_rep = 2  # Medium variety: allow up to 2 times absolute maximum
         else:
-            max_recipe_rep = 2  # Abundant choices: force high variety (strict cap of 2 times)
+            max_recipe_rep = 1  # Abundant choices: force high variety (strict cap of 1 time)
 
         # Apply the absolute upper ceiling
         model += lpSum(y[(d, i)] for d in days for i in ids) <= max_recipe_rep
@@ -509,7 +510,7 @@ def run_lp(
     # Global per-recipe hard cap — scales with Main subcategory pool size (Snacks excluded)
     main_df = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"].copy()
     main_subcats = main_df["Preferred_SubCategory_code"].dropna().nunique()
-    global_recipe_cap = 3 if main_subcats <= 5 else 2
+    global_recipe_cap = 2 if main_subcats <= 5 else 1
     for recipe_code, recipe_df in candidates.groupby("Recipe_Code", dropna=False):
         non_snack_ids = [int(i) for i in recipe_df.index.tolist()
                          if str(candidates.loc[i, "Dish_Type"]).strip().lower() != "snacks"]
@@ -682,7 +683,7 @@ def run_lp(
             if str(candidates.loc[i, "Recipe_Code"]).strip().upper() in millet_codes
         ]
         if millet_ids:
-            required_millet_count = 2 if len(millet_ids) > 4 else 1
+            required_millet_count = min(5, len(millet_ids))
             millet_shortfall = LpVariable("millet_inclusion_shortfall", lowBound=0)
             model += (
                 lpSum(y[(d, i)] for d in days for i in millet_ids) + millet_shortfall
@@ -691,6 +692,86 @@ def run_lp(
             millet_penalty_weight = 1_000_000.0
             millet_penalty_terms.append(millet_penalty_weight * millet_shortfall)
 
+    # Non-veg-days soft-forced inclusion: the user selected specific weekdays
+    # they're OK having non-veg on (profile["non_veg_days"], resolved to Day
+    # 1-7 numbers in routers/plan.py._run_plan_background — the only place
+    # that knows the plan's actual calendar dates before this runs). Requires
+    # at least half of those eligible days to include >=1 non-veg recipe, not
+    # every one of them (an eligible day is still fine to end up vegetarian) —
+    # absorbed by a heavily-penalized slack, same pattern as the millet
+    # requirement above, so this never makes the whole week infeasible.
+    nonveg_penalty_terms = []
+    nonveg_eligible_days = [d for d in ((profile or {}).get("_nonveg_eligible_days") or []) if d in days]
+    nonveg_required_count = int((profile or {}).get("_nonveg_required_count") or 0)
+    if nonveg_eligible_days and nonveg_required_count > 0 and "Vegetarian" in candidates.columns:
+        nonveg_ids = [
+            int(i) for i in candidates.index
+            if pd.to_numeric(candidates.loc[i, "Vegetarian"], errors="coerce") != 1
+        ]
+        if nonveg_ids:
+            day_ok = {}
+            for d in nonveg_eligible_days:
+                day_ok[d] = LpVariable(f"nonveg_day_ok_{d}", lowBound=0, upBound=1, cat="Binary")
+                # day_ok[d] can only be 1 if at least one non-veg recipe was
+                # actually selected that day; the aggregate constraint below is
+                # what gives the solver a reason to turn it on.
+                model += day_ok[d] <= lpSum(y[(d, i)] for i in nonveg_ids)
+            nonveg_shortfall = LpVariable("nonveg_days_shortfall", lowBound=0)
+            model += (
+                lpSum(day_ok[d] for d in nonveg_eligible_days) + nonveg_shortfall
+                >= nonveg_required_count
+            )
+            nonveg_penalty_weight = 1_000_000.0
+            nonveg_penalty_terms.append(nonveg_penalty_weight * nonveg_shortfall)
+
+            # non_veg_days means non-veg is ONLY allowed on those days — every
+            # other day must be strictly vegetarian, no exceptions. Hard (not
+            # penalized): a vegetarian-only day is always feasible on its own
+            # (the model already runs fine end-to-end for fully-vegetarian
+            # users across all 7 days), so this can't introduce infeasibility.
+            for d in days:
+                if d not in nonveg_eligible_days:
+                    model += lpSum(y[(d, i)] for i in nonveg_ids) == 0
+
+    # Non-veg-type variety: when the user selected more than one non-veg type
+    # (profile["non_veg_types"], e.g. ["Chicken","Fish","Egg"]), softly
+    # discourage any single type from dominating the week's non-veg
+    # selections. Without this, GL-minimization alone tends to always pick
+    # whichever type happens to have the lowest (sometimes exactly 0) GI in
+    # the reference data — e.g. every "Egg and omlettes" recipe currently has
+    # GI_Avg=0 — regardless of what the user actually selected.
+    # Free allowance: any one type can be at most half of the week's total
+    # non-veg selections; going over that is absorbed by a penalized slack
+    # per type (same pattern as everywhere else here), so a pool dominated
+    # by one type can never make the week infeasible.
+    nonveg_type_penalty_terms = []
+    selected_types = {
+        str(t).strip().lower() for t in ((profile or {}).get("non_veg_types") or []) if str(t).strip()
+    }
+    nonveg_type_map = ds.get("nonveg_type_map") or {}
+    if len(selected_types) > 1 and nonveg_type_map and "Vegetarian" in candidates.columns:
+        all_nonveg_ids = [
+            int(i) for i in candidates.index
+            if pd.to_numeric(candidates.loc[i, "Vegetarian"], errors="coerce") != 1
+        ]
+        if all_nonveg_ids:
+            total_nonveg_selected = lpSum(y[(d, i)] for d in days for i in all_nonveg_ids)
+            type_penalty_weight = 3000.0
+            for t in selected_types:
+                type_ids = [
+                    i for i in all_nonveg_ids
+                    if t in nonveg_type_map.get(str(candidates.loc[i, "Recipe_Code"]).strip().upper(), set())
+                ]
+                if not type_ids:
+                    continue
+                safe_t = t.replace(" ", "_")
+                v_type = LpVariable(f"nonveg_type_excess_{safe_t}", lowBound=0)
+                model += (
+                    lpSum(y[(d, i)] for d in days for i in type_ids) - 0.5 * total_nonveg_selected
+                    <= v_type
+                )
+                nonveg_type_penalty_terms.append(type_penalty_weight * v_type)
+
     # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
     if variety_penalties:
         model.objective += lpSum(variety_penalties)
@@ -698,6 +779,10 @@ def run_lp(
         model.objective += lpSum(penalty_terms)
     if millet_penalty_terms:
         model.objective += lpSum(millet_penalty_terms)
+    if nonveg_penalty_terms:
+        model.objective += lpSum(nonveg_penalty_terms)
+    if nonveg_type_penalty_terms:
+        model.objective += lpSum(nonveg_type_penalty_terms)
 
 
 
