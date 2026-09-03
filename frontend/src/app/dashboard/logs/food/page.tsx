@@ -654,13 +654,15 @@ export default function FoodLogsPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session?.access_token) { router.push("/login"); return; }
       setToken(session.access_token);
+      const admin = session.user.email === "test@example.com";
       const res = await fetch("/api/logs/food", {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
       if (res.ok) {
         const data: ParticipantSummary[] = await res.json();
-        setParticipants(data);
-        if (data.length > 0) setSelectedId(data[0].user_id);
+        const filtered = admin ? data : data.filter((p) => p.participant_id?.toUpperCase().startsWith("A"));
+        setParticipants(filtered);
+        if (filtered.length > 0) setSelectedId(filtered[0].user_id);
       }
       setLoadingList(false);
     }

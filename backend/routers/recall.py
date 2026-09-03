@@ -185,6 +185,7 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         meal_slot=body.meal_slot,
         image_url_pre=body.image_url_pre,
         image_url_post=body.image_url_post,
+        note=body.note,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
 
@@ -260,7 +261,7 @@ def list_coordinator_participants(
 
     q = sb.table("UserRoles").select("user_id, participant_id, display_name").eq("role", "participant")
     if role == "coordinator":
-        q = q.eq("coordinator_id", user_id)
+        q = q.eq("coordinator_id", user_id).ilike("participant_id", "A%")
     participants = q.execute().data or []
 
     if not participants:

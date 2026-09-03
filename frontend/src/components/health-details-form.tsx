@@ -26,7 +26,6 @@ const LIFESTYLE_OPTIONS = ["None", "Occasional", "Regular"] as const;
 export type HealthDetails = {
   co_morbidities: string[];
   medications: string;
-  allergies_dislikes: string;
   allergy_foods: AllergyFood[];
   smoking: string;
   tobacco: string;
@@ -36,7 +35,6 @@ export type HealthDetails = {
 export const HEALTH_DETAILS_DEFAULT: HealthDetails = {
   co_morbidities: [],
   medications: "",
-  allergies_dislikes: "",
   allergy_foods: [],
   smoking: "None",
   tobacco: "None",
@@ -139,33 +137,18 @@ export function HealthDetailsForm({
           />
         </div>
 
-        {/* Allergies / Dislikes */}
+        {/* Allergies or Dislikes */}
         <div className="space-y-1.5">
           <label className="text-sm font-medium">
-            Allergies{" "}
+            Allergies or Dislikes{" "}
             <span className="font-normal text-muted-foreground">(optional)</span>
           </label>
           <p className="text-xs text-muted-foreground">
-            Search and select foods you&apos;re allergic to — these will never be recommended in your meal plan.
+            Search and select foods you&apos;re allergic to or any dislikes you have.
           </p>
           <AllergySearch
             selected={form.allergy_foods}
             onChange={(next) => setForm((prev) => ({ ...prev, allergy_foods: next }))}
-          />
-        </div>
-
-        {/* Other dislikes (notes only — not used to filter the meal plan) */}
-        <div className="space-y-1.5">
-          <label className="text-sm font-medium">
-            Other Food Dislikes{" "}
-            <span className="font-normal text-muted-foreground">(optional, notes only)</span>
-          </label>
-          <textarea
-            value={form.allergies_dislikes}
-            onChange={(e) => setForm((prev) => ({ ...prev, allergies_dislikes: e.target.value }))}
-            placeholder="e.g. Bitter gourd…"
-            rows={2}
-            className="w-full rounded-md border bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none"
           />
         </div>
 

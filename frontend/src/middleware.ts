@@ -31,8 +31,11 @@ export async function middleware(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
+  // Public, token-gated status dashboard — no Supabase login required
+  const isPublicStatus = pathname.startsWith("/status") || pathname.startsWith("/api/status");
+
   // Redirect unauthenticated users to login (allow auth callback through)
-  if (!user && !pathname.startsWith("/login") && !pathname.startsWith("/auth/")) {
+  if (!user && !pathname.startsWith("/login") && !pathname.startsWith("/auth/") && !isPublicStatus) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 

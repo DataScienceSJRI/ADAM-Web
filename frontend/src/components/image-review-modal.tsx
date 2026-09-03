@@ -25,6 +25,7 @@ export type MealImageReview = {
   reviewed_at: string | null;
   created_at: string;
   meal_slot?: string;
+  participant_note: string | null;
 };
 
 type PlannedItem = {
@@ -821,6 +822,13 @@ export function ImageReviewModal({
                 </div>
               ))}
             </div>
+
+            {review.participant_note && (
+              <div className="rounded-xl border bg-muted/30 px-3.5 py-3 space-y-1">
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Participant&apos;s note</p>
+                <p className="text-xs whitespace-pre-wrap">{review.participant_note}</p>
+              </div>
+            )}
 
             <div className="border-t" />
 

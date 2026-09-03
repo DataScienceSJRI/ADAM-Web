@@ -26,6 +26,49 @@ _STATIC_TABLES = {
 }
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
+# Manual "shadow" additions to Main1_Main2_Mapping Subcategory (the combination
+# table): subcategories with no entry anywhere in the underlying sheet yet, but
+# that clearly belong wherever a close existing subcategory already appears (same
+# dish role). Applied immediately after every fetch of this table so both plan
+# generation (services/data_loader.load_data_from_supabase) and swap suggestions
+# (services/replacement._new_mapping_subcategories) see the patch without the
+# underlying sheet needing manual edits. If the curator later adds one of the
+# shadowed codes to a new row by hand, the added code follows automatically —
+# this isn't a frozen snapshot of today's rows.
+#
+# (code_to_add, codes_it_shadows)
+_COMBINATION_TABLE_NAME = "Main1_Main2_Mapping Subcategory"
+_COMBINATION_SHADOW_RULES: list[tuple[str, tuple[str, ...]]] = [
+    # Yogurt (H5F): no entry anywhere. Buttermilk (H1A) / Curd (H1B) are the same
+    # dairy-side role and are already correctly placed throughout the table.
+    ("H5F", ("H1A", "H1B")),
+    # "beverages" (H2E): no entry anywhere. Shadows the existing drink family
+    # (Black Coffee, Milk Coffee, Milk, Turmeric milk).
+    ("H2E", ("H5A", "H5B", "H5C", "H5D")),
+]
+_COMBINATION_COLUMNS = ("Main2_Code", "Main3_Code", "Optional")
+
+
+def apply_combination_table_overrides(rows: list[dict]) -> list[dict]:
+    """
+    Apply _COMBINATION_SHADOW_RULES to raw Main1_Main2_Mapping Subcategory rows
+    (list of dicts, the shape Supabase returns before conversion to a DataFrame).
+    Returns a new list of new dicts — does not mutate the input.
+    """
+    patched = [dict(row) for row in rows]
+    for row in patched:
+        for col in _COMBINATION_COLUMNS:
+            codes = [c.strip() for c in str(row.get(col) or "").split(",") if c.strip()]
+            codes_upper = {c.upper() for c in codes}
+            for add_code, shadow_codes in _COMBINATION_SHADOW_RULES:
+                if add_code.upper() in codes_upper:
+                    continue
+                if any(sc in codes_upper for sc in shadow_codes):
+                    codes.append(add_code)
+                    codes_upper.add(add_code.upper())
+            row[col] = ", ".join(codes)
+    return patched
+
 
 def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.DataFrame:
     """Fetch all rows using pagination, with retries on transient connection errors."""
@@ -56,6 +99,9 @@ def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.
 
                 start += batch_size
 
+            if table == _COMBINATION_TABLE_NAME:
+                all_rows = apply_combination_table_overrides(all_rows)
+
             return pd.DataFrame(all_rows)
 
         except Exception as e:
@@ -64,6 +110,120 @@ def _fetch(table: str, filters: Optional[dict] = None, _retries: int = 3) -> pd.
                 time.sleep(2 ** attempt)  # 2s, 4s backoff
             else:
                 return pd.DataFrame()
+
+
+def _fetch_nonveg_code_to_items(sb) -> dict[str, set[str]]:
+    """
+    Nonveg_Options.Codes -> the set of Food Item names (Chicken/Beef/Pork/Fish/
+    Goat/sheep/Egg) that code belongs to. A handful of codes (mixed-meat broth
+    ingredients etc.) belong to more than one item, so this must be set-valued —
+    a single-value map would silently pick the wrong item for those.
+
+    Codes match against Recipes_ingredient in one of two columns depending on
+    recipe source: ADAM-native recipes via Food_Code (alpha-prefixed, e.g.
+    "N001"), USDA-imported recipes via Ing_Id (plain numeric, e.g. "4542").
+    """
+    rows = sb.table("Nonveg_Options").select("*").execute().data or []
+    code_to_items: dict[str, set[str]] = {}
+    for row in rows:
+        # lowercased for case-insensitive matching against non_veg_types — the
+        # source table itself is inconsistent ("Chicken" vs "sheep")
+        item = str(row.get("Food Item") or "").strip().lower()
+        if not item:
+            continue
+        for code in str(row.get("Codes") or "").split(","):
+            code = code.strip().upper()
+            if code:
+                code_to_items.setdefault(code, set()).add(item)
+    return code_to_items
+
+
+def get_recipes_excluded_by_nonveg_types(non_veg_types: list) -> set[str]:
+    """
+    Recipe codes to exclude because they contain a non-veg ingredient OUTSIDE the
+    user's selected non_veg_types (e.g. selected ["Goat", "Fish", "Pork"] excludes
+    any recipe with a Chicken, Beef, sheep, or Egg ingredient) — even if the same
+    recipe ALSO contains an allowed ingredient. A recipe made of both chicken and
+    pork is excluded when only Pork is selected, since it isn't exclusively made
+    of selected types.
+
+    Only meant to restrict the non-veg portion of the catalog on top of the base
+    Vegetarian/Ovo-vegetarian diet filter — vegetarian-flagged recipes are never
+    looked at here, callers should apply this only to already non-veg-filtered
+    candidates. Returns an empty set (no restriction) when non_veg_types is
+    empty/missing, matching today's behavior for the vast majority of users who
+    haven't set this onboarding field yet.
+    """
+    selected = {str(t).strip().lower() for t in (non_veg_types or []) if str(t).strip()}
+    if not selected:
+        return set()
+
+    sb = get_supabase()
+    code_to_items = _fetch_nonveg_code_to_items(sb)
+    if not code_to_items:
+        return set()
+
+    ing_df = _fetch_cached("Recipes_ingredient")
+    if ing_df.empty or "Recipe_Code" not in ing_df.columns:
+        return set()
+
+    excluded: set[str] = set()
+    for col in ("Food_Code", "Ing_Id"):
+        if col not in ing_df.columns:
+            continue
+        codes = ing_df[col].astype(str).str.strip().str.upper()
+        matched_mask = codes.isin(code_to_items.keys())
+        if not matched_mask.any():
+            continue
+        matched = ing_df.loc[matched_mask, ["Recipe_Code"]].copy()
+        matched["_items"] = codes[matched_mask].map(code_to_items)
+        # exclude if ANY matched item for this ingredient row isn't in the selected set
+        disallowed_mask = matched["_items"].apply(lambda items: bool(items - selected))
+        excluded.update(
+            matched.loc[disallowed_mask, "Recipe_Code"].astype(str).str.strip().str.upper().unique()
+        )
+
+    return excluded
+
+
+def get_recipe_nonveg_type_map() -> dict[str, set[str]]:
+    """
+    Recipe_Code -> set of Nonveg_Options "Food Item" types it's made of
+    (e.g. {"chicken"}, {"egg"}), using the same Food_Code/Ing_Id ingredient
+    matching as get_recipes_excluded_by_nonveg_types. Items are lowercased
+    (matching _fetch_nonveg_code_to_items). A recipe absent from the result
+    (or vegetarian) has no matched non-veg ingredient.
+
+    Used by services/lp_optimizer.py to softly encourage variety across the
+    user's selected non_veg_types (e.g. not letting "Egg" dominate every
+    non-veg slot just because its GI happens to be 0 for every recipe in
+    that subcategory) — a separate concern from get_recipes_excluded_by_
+    nonveg_types, which only decides what's allowed at all, not how varied
+    the allowed choices should be.
+    """
+    sb = get_supabase()
+    code_to_items = _fetch_nonveg_code_to_items(sb)
+    if not code_to_items:
+        return {}
+
+    ing_df = _fetch_cached("Recipes_ingredient")
+    if ing_df.empty or "Recipe_Code" not in ing_df.columns:
+        return {}
+
+    result: dict[str, set[str]] = {}
+    for col in ("Food_Code", "Ing_Id"):
+        if col not in ing_df.columns:
+            continue
+        codes = ing_df[col].astype(str).str.strip().str.upper()
+        matched_mask = codes.isin(code_to_items.keys())
+        if not matched_mask.any():
+            continue
+        matched = ing_df.loc[matched_mask, ["Recipe_Code"]].copy()
+        matched["_items"] = codes[matched_mask].map(code_to_items)
+        for rc, items in zip(matched["Recipe_Code"], matched["_items"]):
+            rc_norm = str(rc).strip().upper()
+            result.setdefault(rc_norm, set()).update(items)
+    return result
 
 
 def _fetch_cached(table: str) -> pd.DataFrame:
@@ -276,6 +436,24 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                                     .str.upper()
                                     .isin(valid_codes)
                                 ].copy()
+                    elif col == "Non vegetarian":
+                        # No Vegetarian/Ovo-vegetarian restriction for non-veg eaters, but
+                        # narrow further to the specific meat types they selected at
+                        # onboarding (non_veg_types), if any — e.g. selecting only
+                        # Goat/Fish/Pork removes chicken- or beef-based recipes too.
+                        excluded_nonveg = get_recipes_excluded_by_nonveg_types(profile.get("non_veg_types"))
+                        if excluded_nonveg:
+                            ds["recipe_tag"] = rt[
+                                ~rt["Recipe_Code"].astype(str).str.strip().str.upper().isin(excluded_nonveg)
+                            ].copy()
+                            if "Recipe_Code" in ds["recipes"].columns:
+                                ds["recipes"] = ds["recipes"][
+                                    ~ds["recipes"]["Recipe_Code"]
+                                    .astype(str)
+                                    .str.strip()
+                                    .str.upper()
+                                    .isin(excluded_nonveg)
+                                ].copy()
         print("No of recipes - AFTER",len(ds["recipes"]))
     except Exception:
         logger.exception("Vegetarian recipe filtering failed for user_id=%s — serving unfiltered recipes", user_id)
@@ -388,6 +566,23 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                 combo_liked["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
             )
 
+        # Recipes the user actually logged eating (DietRecall.Food_Name_desc).
+        # This column holds ADAM recipe codes (A/B-prefixed, some USDA-prefixed
+        # too) as well as blanks and USDA lookup-only codes that aren't eligible
+        # ADAM candidates — intersecting against ds["recipes"] (already
+        # eligibility-filtered) keeps only codes usable as recipe candidates,
+        # regardless of prefix.
+        dietrecall_logged = _fetch("DietRecall", {"user_id": user_id})
+        if not dietrecall_logged.empty and "Food_Name_desc" in dietrecall_logged.columns:
+            logged_codes = set(
+                dietrecall_logged["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+            logged_codes.discard("")
+            known_recipe_codes = set(
+                ds["recipes"]["Recipe_Code"].dropna().astype(str).str.strip().str.upper().unique()
+            )
+            liked_codes.update(logged_codes & known_recipe_codes)
+
         # Millet-based recipes are always treated as liked for every user
         # (not tied to any actual reaction), so _inject_liked_recipes gives
         # them the same candidate-pool/objective-bonus treatment.
@@ -408,6 +603,21 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
         logger.exception("Liked recipe lookup failed for user_id=%s — liked recipes won't be force-included", user_id)
         ds["liked_recipe_codes"] = set()
         ds["millet_recipe_codes"] = set()
+
+    # Only computed when it can actually matter: non-veg diet with more than
+    # one selected meat type. Feeds services/lp_optimizer.py's non-veg-type
+    # variety constraint — skipped entirely for the vast majority of users
+    # (vegetarian, or non-veg with 0-1 types selected) to avoid the extra
+    # ingredient-matching work for nothing.
+    selected_nonveg_types = (profile or {}).get("non_veg_types") or []
+    if str((profile or {}).get("diet_type", "")).strip().lower() == "non-veg" and len(selected_nonveg_types) > 1:
+        try:
+            ds["nonveg_type_map"] = get_recipe_nonveg_type_map()
+        except Exception:
+            logger.exception("Non-veg type classification failed for user_id=%s — variety constraint will be skipped", user_id)
+            ds["nonveg_type_map"] = {}
+    else:
+        ds["nonveg_type_map"] = {}
 
     return ds
 
