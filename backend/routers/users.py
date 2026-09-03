@@ -31,6 +31,8 @@ class ParticipantResponse(BaseModel):
     last_plan_at: str | None = None
     created_at: str | None = None
     password: str | None = None
+    whatsapp_phone: str | None = None
+    whatsapp_activated: bool = False
 
 
 @router.post("", response_model=ParticipantResponse)
@@ -130,9 +132,19 @@ def list_participants(
         if uid and uid not in session_map:
             session_map[uid] = s
 
+    whatsapp_rows = (
+        sb.table("WH_Users")
+        .select("user_id, phone, activated_at")
+        .in_("user_id", p_ids)
+        .execute()
+        .data or []
+    )
+    whatsapp_map = {w["user_id"]: w for w in whatsapp_rows if w.get("user_id")}
+
     result = []
     for p in participants:
         s = session_map.get(p["user_id"], {})
+        w = whatsapp_map.get(p["user_id"], {})
         result.append(ParticipantResponse(
             user_id=p["user_id"],
             participant_id=p.get("participant_id") or "",
@@ -141,6 +153,8 @@ def list_participants(
             plan_status=s.get("plan_status"),
             last_plan_at=s.get("created_at"),
             created_at=p.get("created_at"),
+            whatsapp_phone=w.get("phone"),
+            whatsapp_activated=bool(w.get("activated_at")),
         ))
     return result
 
