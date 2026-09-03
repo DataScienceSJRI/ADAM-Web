@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { CheckCircle, Clock, AlertCircle, Users, Search } from "lucide-react";
+import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle } from "lucide-react";
 import { formatIST } from "@/lib/utils";
 
 type Participant = {
@@ -14,6 +14,8 @@ type Participant = {
   plan_status: string | null;
   last_plan_at: string | null;
   created_at: string | null;
+  whatsapp_phone: string | null;
+  whatsapp_activated: boolean;
 };
 
 type CreatedUser = { participant_id: string; display_name: string; user_id: string; password?: string };
@@ -69,6 +71,10 @@ export default function UsersPage() {
   const [addError, setAddError] = useState<string | null>(null);
   const [created, setCreated] = useState<CreatedUser | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [linkingUser, setLinkingUser] = useState<Participant | null>(null);
+  const [waPhone, setWaPhone] = useState("");
+  const [waSubmitting, setWaSubmitting] = useState(false);
+  const [waError, setWaError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const supabase = createClient();
@@ -115,6 +121,43 @@ export default function UsersPage() {
     setCreated(data);
     setSubmitting(false);
     load();
+  }
+
+  async function handleLinkWhatsapp(e: React.FormEvent) {
+    e.preventDefault();
+    if (!linkingUser || !waPhone.trim()) return;
+    setWaSubmitting(true);
+    setWaError(null);
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) { router.push("/login"); return; }
+    const res = await fetch("/api/whatsapp/link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ user_id: linkingUser.user_id, phone: waPhone.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) { setWaError(data.detail ?? "Failed to link WhatsApp"); setWaSubmitting(false); return; }
+    setWaSubmitting(false);
+    closeWaModal();
+    load();
+  }
+
+  async function handleUnlinkWhatsapp(userId: string) {
+    const supabase = createClient();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) { router.push("/login"); return; }
+    await fetch(`/api/whatsapp/link/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    load();
+  }
+
+  function closeWaModal() {
+    setLinkingUser(null);
+    setWaPhone("");
+    setWaError(null);
   }
 
   function closeModal() {
@@ -248,6 +291,26 @@ export default function UsersPage() {
                     <td className="px-4 py-3.5 text-xs text-muted-foreground">{fmtDate(p.created_at)}</td>
                     <td className="px-4 py-3.5 text-right">
                       <div className="flex items-center justify-end gap-3">
+                        {p.whatsapp_phone ? (
+                          <button
+                            onClick={() => handleUnlinkWhatsapp(p.user_id)}
+                            title={p.whatsapp_activated ? "Activated — click to unlink" : "Linked, awaiting #HELLOADAM — click to unlink"}
+                            className={`inline-flex items-center gap-1 text-xs transition-colors ${
+                              p.whatsapp_activated ? "text-emerald-600 hover:text-destructive" : "text-muted-foreground hover:text-destructive"
+                            }`}
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" />
+                            {p.whatsapp_phone}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setLinkingUser(p)}
+                            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" />
+                            Link WhatsApp
+                          </button>
+                        )}
                         {(hasReady || inProgress) && (
                           <Link
                             href={`/dashboard/preferences?user=${encodeURIComponent(p.user_id)}`}
@@ -378,6 +441,61 @@ export default function UsersPage() {
                 </form>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Link WhatsApp modal */}
+      {linkingUser && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) closeWaModal(); }}
+        >
+          <div className="relative w-full max-w-sm rounded-xl border bg-background p-6 shadow-lg space-y-5">
+            <button
+              onClick={closeWaModal}
+              className="absolute top-3 right-3 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+            <div className="space-y-0.5">
+              <p className="text-base font-semibold">Link WhatsApp</p>
+              <p className="text-xs text-muted-foreground">
+                {linkingUser.display_name ?? linkingUser.participant_id} will need to send
+                <span className="font-mono"> #HELLOADAM </span>
+                to activate reminders on this number.
+              </p>
+            </div>
+            <form onSubmit={handleLinkWhatsapp} className="space-y-3">
+              <div className="space-y-1">
+                <label className="text-xs font-medium">Phone number</label>
+                <input
+                  value={waPhone}
+                  onChange={(e) => setWaPhone(e.target.value)}
+                  placeholder="919876543210"
+                  required
+                  autoFocus
+                  className="w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+                />
+                <p className="text-xs text-muted-foreground">Country code + number, digits only — no spaces or +.</p>
+              </div>
+              {waError && (
+                <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{waError}</p>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="submit"
+                  disabled={waSubmitting || !waPhone.trim()}
+                  className="flex-1 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                >
+                  {waSubmitting ? "Linking…" : "Link"}
+                </button>
+                <button type="button" onClick={closeWaModal} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors">
+                  Cancel
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
