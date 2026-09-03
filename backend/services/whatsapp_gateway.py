@@ -47,6 +47,15 @@ class WAHAGateway(WhatsAppGateway):
         if not raw_from or raw_from.endswith(_SKIP_SUFFIXES):
             return None
 
+        # WhatsApp's LID (Linked Identity) privacy system reports the sender as an
+        # opaque "<id>@lid" instead of their real number. Baileys/WAHA exposes the
+        # real phone-number JID alongside it as _data.key.remoteJidAlt — use that
+        # when present so we don't treat the LID digits as a phone number.
+        if raw_from.endswith("@lid"):
+            alt = ((data.get("_data") or {}).get("key") or {}).get("remoteJidAlt") or ""
+            if alt.endswith("@s.whatsapp.net"):
+                raw_from = alt
+
         phone = raw_from
         for suffix in _PHONE_SUFFIXES:
             if phone.endswith(suffix):
