@@ -20,9 +20,9 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 _NOT_LINKED_REPLY = (
     "This number isn't linked to an ADAM account yet. Ask your study coordinator to "
-    "link it, then send #HELLOADAM to activate."
+    "link it, then send START ADAM to activate."
 )
-_NOT_ACTIVATED_REPLY = "Send #HELLOADAM to activate meal reminders and plan updates on this number."
+_NOT_ACTIVATED_REPLY = "Send START ADAM to activate meal reminders and plan updates on this number."
 _WELCOME_REPLY = "You're activated! You'll get meal reminders and plan updates here."
 _FALLBACK_REPLY = (
     "This line sends meal reminders and plan updates only — for help, contact your study coordinator."
@@ -48,7 +48,7 @@ def handle_message(msg: IncomingMessage) -> None:
     text = (msg.text or "").strip()
     text_upper = text.upper()
 
-    if text_upper == "#HELLOADAM":
+    if text_upper == "START ADAM":
         if not link.get("activated_at"):
             sb.table("WH_Users").update(
                 {"activated_at": datetime.now(timezone.utc).isoformat()}

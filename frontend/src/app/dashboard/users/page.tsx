@@ -4,8 +4,15 @@ import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle } from "lucide-react";
+import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle, Copy, Check, X } from "lucide-react";
 import { formatIST } from "@/lib/utils";
+import { QrCode } from "@/components/qr-code";
+
+const ACTIVATION_KEYWORD = "START ADAM";
+const BOT_NUMBER = process.env.NEXT_PUBLIC_WHATSAPP_BOT_NUMBER ?? "";
+const ACTIVATION_LINK = BOT_NUMBER
+  ? `https://wa.me/${BOT_NUMBER}?text=${encodeURIComponent(ACTIVATION_KEYWORD)}`
+  : null;
 
 type Participant = {
   user_id: string;
@@ -75,6 +82,16 @@ export default function UsersPage() {
   const [waPhone, setWaPhone] = useState("");
   const [waSubmitting, setWaSubmitting] = useState(false);
   const [waError, setWaError] = useState<string | null>(null);
+  const [waJustLinked, setWaJustLinked] = useState(false);
+  const [copiedFor, setCopiedFor] = useState<string | null>(null);
+
+  function copyActivationLink(key: string) {
+    if (!ACTIVATION_LINK) return;
+    navigator.clipboard.writeText(ACTIVATION_LINK).then(() => {
+      setCopiedFor(key);
+      setTimeout(() => setCopiedFor((k) => (k === key ? null : k)), 2000);
+    });
+  }
 
   const load = useCallback(async () => {
     const supabase = createClient();
@@ -139,11 +156,14 @@ export default function UsersPage() {
     const data = await res.json();
     if (!res.ok) { setWaError(data.detail ?? "Failed to link WhatsApp"); setWaSubmitting(false); return; }
     setWaSubmitting(false);
-    closeWaModal();
+    setWaJustLinked(true);
     load();
   }
 
-  async function handleUnlinkWhatsapp(userId: string) {
+  async function handleUnlinkWhatsapp(userId: string, phone: string) {
+    if (!window.confirm(`Unlink WhatsApp number ${phone}? This can't be undone — the participant would need to be re-linked and reactivated.`)) {
+      return;
+    }
     const supabase = createClient();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.access_token) { router.push("/login"); return; }
@@ -158,6 +178,7 @@ export default function UsersPage() {
     setLinkingUser(null);
     setWaPhone("");
     setWaError(null);
+    setWaJustLinked(false);
   }
 
   function closeModal() {
@@ -292,16 +313,33 @@ export default function UsersPage() {
                     <td className="px-4 py-3.5 text-right">
                       <div className="flex items-center justify-end gap-3">
                         {p.whatsapp_phone ? (
-                          <button
-                            onClick={() => handleUnlinkWhatsapp(p.user_id)}
-                            title={p.whatsapp_activated ? "Activated — click to unlink" : "Linked, awaiting #HELLOADAM — click to unlink"}
-                            className={`inline-flex items-center gap-1 text-xs transition-colors ${
-                              p.whatsapp_activated ? "text-emerald-600 hover:text-destructive" : "text-muted-foreground hover:text-destructive"
-                            }`}
-                          >
-                            <MessageCircle className="h-3.5 w-3.5" />
-                            {p.whatsapp_phone}
-                          </button>
+                          <div className="inline-flex items-center gap-1.5">
+                            <span
+                              title={p.whatsapp_activated ? "Activated" : `Linked, awaiting "${ACTIVATION_KEYWORD}"`}
+                              className={`inline-flex items-center gap-1 text-xs ${
+                                p.whatsapp_activated ? "text-emerald-600" : "text-muted-foreground"
+                              }`}
+                            >
+                              <MessageCircle className="h-3.5 w-3.5" />
+                              {p.whatsapp_phone}
+                            </span>
+                            {!p.whatsapp_activated && ACTIVATION_LINK && (
+                              <button
+                                onClick={() => copyActivationLink(p.user_id)}
+                                title="Copy activation link to send this participant"
+                                className="text-muted-foreground hover:text-foreground transition-colors"
+                              >
+                                {copiedFor === p.user_id ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleUnlinkWhatsapp(p.user_id, p.whatsapp_phone!)}
+                              title="Unlink this WhatsApp number"
+                              className="text-muted-foreground hover:text-destructive transition-colors"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                         ) : (
                           <button
                             onClick={() => setLinkingUser(p)}
@@ -459,43 +497,84 @@ export default function UsersPage() {
             >
               ✕
             </button>
-            <div className="space-y-0.5">
-              <p className="text-base font-semibold">Link WhatsApp</p>
-              <p className="text-xs text-muted-foreground">
-                {linkingUser.display_name ?? linkingUser.participant_id} will need to send
-                <span className="font-mono"> #HELLOADAM </span>
-                to activate reminders on this number.
-              </p>
-            </div>
-            <form onSubmit={handleLinkWhatsapp} className="space-y-3">
-              <div className="space-y-1">
-                <label className="text-xs font-medium">Phone number</label>
-                <input
-                  value={waPhone}
-                  onChange={(e) => setWaPhone(e.target.value)}
-                  placeholder="919876543210"
-                  required
-                  autoFocus
-                  className="w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-                />
-                <p className="text-xs text-muted-foreground">Country code + number, digits only — no spaces or +.</p>
-              </div>
-              {waError && (
-                <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{waError}</p>
-              )}
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="submit"
-                  disabled={waSubmitting || !waPhone.trim()}
-                  className="flex-1 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
-                >
-                  {waSubmitting ? "Linking…" : "Link"}
+            {waJustLinked ? (
+              <>
+                <div className="space-y-0.5">
+                  <p className="text-base font-semibold">Number linked</p>
+                  <p className="text-xs text-muted-foreground">
+                    Send {linkingUser.display_name ?? linkingUser.participant_id} this link — one tap opens
+                    WhatsApp with <span className="font-mono">{ACTIVATION_KEYWORD}</span> pre-filled, they just
+                    tap Send to activate.
+                  </p>
+                </div>
+                {ACTIVATION_LINK ? (
+                  <div className="flex flex-col items-center gap-3 rounded-xl border bg-muted/30 p-4">
+                    <QrCode value={ACTIVATION_LINK} size={160} />
+                    <p className="text-xs text-muted-foreground text-center">
+                      If the participant is with you now, have them scan this with their own phone.
+                    </p>
+                    <div className="flex items-center gap-2 w-full">
+                      <span className="flex-1 truncate text-xs font-mono">{ACTIVATION_LINK}</span>
+                      <button
+                        onClick={() => copyActivationLink("modal")}
+                        className="shrink-0 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted transition-colors"
+                      >
+                        {copiedFor === "modal" ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
+                        {copiedFor === "modal" ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    NEXT_PUBLIC_WHATSAPP_BOT_NUMBER isn&apos;t configured — can&apos;t build the activation link.
+                    Coordinator can still ask the participant to text {ACTIVATION_KEYWORD} manually.
+                  </p>
+                )}
+                <button onClick={closeWaModal} className="w-full rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors">
+                  Done
                 </button>
-                <button type="button" onClick={closeWaModal} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors">
-                  Cancel
-                </button>
-              </div>
-            </form>
+              </>
+            ) : (
+              <>
+                <div className="space-y-0.5">
+                  <p className="text-base font-semibold">Link WhatsApp</p>
+                  <p className="text-xs text-muted-foreground">
+                    {linkingUser.display_name ?? linkingUser.participant_id} will need to send
+                    <span className="font-mono"> {ACTIVATION_KEYWORD} </span>
+                    to activate reminders on this number.
+                  </p>
+                </div>
+                <form onSubmit={handleLinkWhatsapp} className="space-y-3">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium">Phone number</label>
+                    <input
+                      value={waPhone}
+                      onChange={(e) => setWaPhone(e.target.value)}
+                      placeholder="919876543210"
+                      required
+                      autoFocus
+                      className="w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+                    />
+                    <p className="text-xs text-muted-foreground">Country code + number, digits only — no spaces or +.</p>
+                  </div>
+                  {waError && (
+                    <p className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{waError}</p>
+                  )}
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="submit"
+                      disabled={waSubmitting || !waPhone.trim()}
+                      className="flex-1 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                    >
+                      {waSubmitting ? "Linking…" : "Link"}
+                    </button>
+                    <button type="button" onClick={closeWaModal} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors">
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
           </div>
         </div>
       )}
