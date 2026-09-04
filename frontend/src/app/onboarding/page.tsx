@@ -7,8 +7,9 @@ import { BasicDetailsForm, type BasicDetails } from "@/components/basic-details-
 import { HealthDetailsForm, type HealthDetails, HEALTH_DETAILS_DEFAULT } from "@/components/health-details-form";
 import { MealPreferencesForm, type MealSelection } from "@/components/meal-preferences-form";
 import { ReviewStep } from "@/components/review-step";
+import { WhatsAppLinkStep } from "@/components/whatsapp-link-step";
 
-const STEPS = ["Basic Details", "Health Details", "Meal Preferences", "Review & Confirm"];
+const STEPS = ["Basic Details", "Health Details", "Meal Preferences", "Review & Confirm", "Link WhatsApp"];
 
 export default function OnboardingPage() {
   return (
@@ -28,6 +29,8 @@ function OnboardingFlow() {
   const [selections, setSelections] = useState<MealSelection[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingRedirect, setPendingRedirect] = useState<string | null>(null);
+  const [linkTargetUserId, setLinkTargetUserId] = useState<string | null>(null);
 
   function handleBasicDetailsNext(data: BasicDetails) {
     setBasicDetails(data);
@@ -147,7 +150,9 @@ function OnboardingFlow() {
         .eq("onboarding_id", onboardingId);
     };
 
-    router.push(redirectUrl);
+    setPendingRedirect(redirectUrl);
+    setLinkTargetUserId(targetUserId);
+    setStep(4);
 
     void fetch("/api/plan", {
       method: "POST",
@@ -170,6 +175,10 @@ function OnboardingFlow() {
       .catch(async () => {
         await markPlanStatus("error queueing plan: Could not reach the plan generation server");
       });
+  }
+
+  function finishOnboarding() {
+    if (pendingRedirect) router.push(pendingRedirect);
   }
 
   return (
@@ -249,6 +258,14 @@ function OnboardingFlow() {
           onSubmit={handleSubmit}
           submitting={submitting}
           error={error}
+        />
+      )}
+
+      {step === 4 && linkTargetUserId && (
+        <WhatsAppLinkStep
+          userId={linkTargetUserId}
+          displayName={participantUserId ?? undefined}
+          onFinish={finishOnboarding}
         />
       )}
     </div>
