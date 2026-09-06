@@ -1,12 +1,11 @@
 ﻿"use client";
 
-import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import {
   ChevronLeft,
   ChevronRight,
-  ChevronDown,
   Pencil,
   X,
   Check,
@@ -27,6 +26,16 @@ type ParticipantSummary = {
   compliance_pct: number | null;
   last_logged_date: string | null;
 };
+
+type CohortFilter = "actual" | "test";
+
+function isTestParticipant(participantId: string | null) {
+  return participantId?.toUpperCase().startsWith("P") ?? false;
+}
+
+function isActualParticipant(participantId: string | null) {
+  return !isTestParticipant(participantId);
+}
 
 type PlanItem = {
   Pkey?: number;
@@ -73,10 +82,10 @@ type SlotStatus = "as_planned" | "modified" | "skipped" | "not_logged";
 const SLOTS = ["breakfast", "lunch", "dinner", "snacks"] as const;
 
 const SLOT_META: Record<string, { label: string; color: string; bg: string; dot: string }> = {
-  breakfast: { label: "Breakfast", color: "text-orange-700 dark:text-orange-400", bg: "bg-orange-50 border-orange-200 dark:bg-orange-950/40 dark:border-orange-800", dot: "bg-orange-400" },
-  lunch:     { label: "Lunch",     color: "text-blue-700 dark:text-blue-400",     bg: "bg-blue-50 border-blue-200 dark:bg-blue-950/40 dark:border-blue-800",         dot: "bg-blue-400"   },
-  dinner:    { label: "Dinner",    color: "text-indigo-700 dark:text-indigo-400", bg: "bg-indigo-50 border-indigo-200 dark:bg-indigo-950/40 dark:border-indigo-800", dot: "bg-indigo-400" },
-  snacks:    { label: "Snacks",    color: "text-emerald-700 dark:text-emerald-400",bg: "bg-emerald-50 border-emerald-200 dark:bg-emerald-950/40 dark:border-emerald-800",dot: "bg-emerald-400"},
+  breakfast: { label: "Breakfast", color: "text-foreground", bg: "bg-muted/35", dot: "bg-muted-foreground/45" },
+  lunch:     { label: "Lunch",     color: "text-foreground", bg: "bg-muted/35", dot: "bg-muted-foreground/45" },
+  dinner:    { label: "Dinner",    color: "text-foreground", bg: "bg-muted/35", dot: "bg-muted-foreground/45" },
+  snacks:    { label: "Snacks",    color: "text-foreground", bg: "bg-muted/35", dot: "bg-muted-foreground/45" },
 };
 
 function getPlanForSlot(plan: PlanItem[], date: string, slot: string): PlanItem[] {
@@ -140,15 +149,15 @@ function StatusBadge({ status }: { status: SlotStatus }) {
   return <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${cls}`}>{label}</span>;
 }
 
-function ComplianceBar({ pct }: { pct: number | null }) {
+function ComplianceBar({ pct, active = false }: { pct: number | null; active?: boolean }) {
   const value = pct ?? 0;
-  const color = value >= 75 ? "bg-emerald-500" : value >= 50 ? "bg-amber-400" : "bg-red-400";
+  const color = active ? "bg-primary-foreground" : value >= 75 ? "bg-emerald-500" : value >= 50 ? "bg-amber-400" : "bg-red-400";
   return (
     <div className="flex items-center gap-1.5 mt-1.5">
-      <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
+      <div className={`flex-1 h-1 rounded-full overflow-hidden ${active ? "bg-primary-foreground/25" : "bg-muted"}`}>
         <div className={`h-full rounded-full ${color}`} style={{ width: `${value}%` }} />
       </div>
-      <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">
+      <span className={`text-[10px] tabular-nums shrink-0 ${active ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
         {pct !== null ? `${pct}%` : "—"}
       </span>
     </div>
@@ -374,14 +383,12 @@ function EditModal({
 
 function MealSlotCard({
   slot,
-  date,
   planItems,
   logItems,
   reviewsForSlot,
   onEdit,
 }: {
   slot: string;
-  date: string;
   planItems: PlanItem[];
   logItems: LogItem[];
   reviewsForSlot: MealImageReview[];
@@ -522,22 +529,28 @@ function MealSlotCard({
   );
 }
 
-// ─── Participant combobox ─────────────────────────────────────────────────────
+// ─── Participant rail ─────────────────────────────────────────────────────
 
-function ParticipantCombobox({
+function ParticipantRail({
   participants,
   selectedId,
   onSelect,
+  showCohortSwitch,
+  cohortFilter,
+  onCohortChange,
+  actualCount,
+  testCount,
 }: {
   participants: ParticipantSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  showCohortSwitch: boolean;
+  cohortFilter: CohortFilter;
+  onCohortChange: (cohort: CohortFilter) => void;
+  actualCount: number;
+  testCount: number;
 }) {
-  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-
-  const selected = participants.find((p) => p.user_id === selectedId);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -549,87 +562,82 @@ function ParticipantCombobox({
     );
   }, [participants, query]);
 
-  useEffect(() => {
-    function onMouseDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-        setQuery("");
-      }
-    }
-    document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
-  }, []);
-
   return (
-    <div ref={ref} className="relative w-full max-w-sm">
-      <button
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between gap-2 rounded-xl border bg-background px-4 py-2.5 text-sm hover:bg-muted/40 transition-colors"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-muted-foreground shrink-0 text-xs">Participant</span>
-          {selected ? (
-            <span className="font-mono font-medium truncate text-sm">
-              {selected.participant_id ?? selected.user_id}
-              {selected.display_name ? ` — ${selected.display_name}` : ""}
-            </span>
-          ) : (
-            <span className="text-muted-foreground italic text-xs">Select participant…</span>
-          )}
-        </div>
-        <ChevronDown className={`h-4 w-4 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`} />
-      </button>
-
-      {open && (
-        <div className="absolute z-20 mt-1 w-full min-w-[22rem] rounded-xl border bg-popover shadow-lg overflow-hidden">
-          <div className="p-2 border-b">
-            <input
-              autoFocus
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search by name or ID…"
-              className="w-full rounded-lg border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
-          <div className="max-h-72 overflow-y-auto divide-y">
-            {filtered.length === 0 && (
-              <p className="px-4 py-3 text-xs text-muted-foreground italic text-center">No participants found</p>
-            )}
-            {filtered.map((p) => (
-              <button
-                key={p.user_id}
-                onClick={() => { onSelect(p.user_id); setOpen(false); setQuery(""); }}
-                className={`w-full text-left flex items-center justify-between gap-3 px-4 py-2.5 hover:bg-muted/40 transition-colors ${
-                  p.user_id === selectedId ? "bg-primary/10" : ""
-                }`}
-              >
-                <div className="min-w-0">
-                  <p className="font-mono font-medium text-xs truncate">{p.participant_id ?? p.user_id}</p>
-                  {p.display_name && <p className="text-muted-foreground text-[11px] truncate">{p.display_name}</p>}
-                  <ComplianceBar pct={p.compliance_pct} />
-                </div>
-                <div className="text-right shrink-0">
-                  {p.compliance_pct !== null && (
-                    <p className={`font-semibold tabular-nums text-xs ${
-                      p.compliance_pct >= 75 ? "text-emerald-600" :
-                      p.compliance_pct >= 50 ? "text-amber-600" : "text-red-500"
-                    }`}>
-                      {p.compliance_pct}%
-                    </p>
-                  )}
-                  {p.last_logged_date && (
-                    <p className="text-muted-foreground text-[10px] mt-0.5">
-                      {formatIST(p.last_logged_date, { day: "numeric", month: "short" })}
-                    </p>
-                  )}
-                </div>
-              </button>
-            ))}
-          </div>
+    <aside className="flex max-h-[28rem] min-h-0 flex-col overflow-hidden rounded-2xl border bg-card/90 p-3 shadow-sm shadow-black/[0.03] lg:sticky lg:top-4 lg:h-[calc(100vh-8rem)] lg:max-h-none">
+      <div className="mb-3 shrink-0">
+        <p className="text-sm font-semibold">Participants</p>
+        <p className="text-xs text-muted-foreground">{participants.length} in food logs</p>
+      </div>
+      {showCohortSwitch && (
+        <div className="mb-3 inline-flex w-full shrink-0 rounded-xl border bg-background/60 p-1">
+          {[
+            { key: "actual" as const, label: "Actual", count: actualCount },
+            { key: "test" as const, label: "Test", count: testCount },
+          ].map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => onCohortChange(item.key)}
+              className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                cohortFilter === item.key
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {item.label}
+              <span className="ml-2 opacity-75">{item.count}</span>
+            </button>
+          ))}
         </div>
       )}
-    </div>
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search participant"
+        className="mb-3 h-9 w-full shrink-0 rounded-xl border bg-background/70 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring/30"
+      />
+      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+        {filtered.length === 0 && (
+          <p className="rounded-xl border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">No participants found</p>
+        )}
+        {filtered.map((p) => {
+          const active = p.user_id === selectedId;
+          return (
+            <button
+              key={p.user_id}
+              type="button"
+              onClick={() => onSelect(p.user_id)}
+              className={`w-full rounded-xl px-3 py-2.5 text-left transition-colors ${
+                active ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs font-semibold">{p.participant_id ?? p.user_id}</p>
+                  {p.display_name && (
+                    <p className={`truncate text-xs ${active ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+                      {p.display_name}
+                    </p>
+                  )}
+                </div>
+                {p.compliance_pct !== null && (
+                  <p className={`shrink-0 text-xs font-semibold tabular-nums ${active ? "text-primary-foreground" : p.compliance_pct >= 75 ? "text-emerald-600" : p.compliance_pct >= 50 ? "text-amber-600" : "text-red-500"}`}>
+                    {p.compliance_pct}%
+                  </p>
+                )}
+              </div>
+              <ComplianceBar pct={p.compliance_pct} active={active} />
+              {p.last_logged_date && (
+                <p className={`mt-1 text-[10px] ${active ? "text-primary-foreground/65" : "text-muted-foreground"}`}>
+                  Last log {formatIST(p.last_logged_date, { day: "numeric", month: "short" })}
+                </p>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </aside>
   );
 }
 
@@ -639,6 +647,8 @@ export default function FoodLogsPage() {
   const router = useRouter();
   const [token, setToken] = useState<string | null>(null);
   const [participants, setParticipants] = useState<ParticipantSummary[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [cohortFilter, setCohortFilter] = useState<CohortFilter>("actual");
   const [loadingList, setLoadingList] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [participantData, setParticipantData] = useState<ParticipantData | null>(null);
@@ -655,6 +665,7 @@ export default function FoodLogsPage() {
       if (!session?.access_token) { router.push("/login"); return; }
       setToken(session.access_token);
       const admin = session.user.email === "test@example.com";
+      setIsAdmin(admin);
       const res = await fetch("/api/logs/food", {
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
@@ -662,7 +673,8 @@ export default function FoodLogsPage() {
         const data: ParticipantSummary[] = await res.json();
         const filtered = admin ? data : data.filter((p) => p.participant_id?.toUpperCase().startsWith("A"));
         setParticipants(filtered);
-        if (filtered.length > 0) setSelectedId(filtered[0].user_id);
+        const defaultList = admin ? filtered.filter((p) => isActualParticipant(p.participant_id)) : filtered;
+        if (defaultList.length > 0) setSelectedId(defaultList[0].user_id);
       }
       setLoadingList(false);
     }
@@ -672,6 +684,8 @@ export default function FoodLogsPage() {
   // Load participant data when selection changes
   useEffect(() => {
     if (!selectedId || !token) return;
+    // This effect owns the async participant-detail request, including its loading state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadingData(true);
     setParticipantData(null);
     setDateIndex(0);
@@ -686,25 +700,14 @@ export default function FoodLogsPage() {
   const dates = participantData?.dates ?? [];
   const currentDate = dates[dateIndex] ?? null;
 
-  const dayStats = useMemo(() => {
-    if (!participantData || !currentDate) return null;
+  const daySlotData = useMemo(() => {
+    if (!participantData || !currentDate) return [];
     const { plan, logs } = participantData;
-    const slotData = SLOTS.map((slot) => ({
+    return SLOTS.map((slot) => ({
       slot,
       planItems: getPlanForSlot(plan, currentDate, slot),
       logItems: getLogsForSlot(logs, currentDate, slot),
     })).filter((s) => s.planItems.length > 0 || s.logItems.length > 0);
-
-    const statuses = slotData.map((s) => slotStatus(s.planItems, s.logItems));
-    return {
-      slotData,
-      total: slotData.length,
-      logged: statuses.filter((s) => s !== "not_logged").length,
-      asPlanned: statuses.filter((s) => s === "as_planned").length,
-      modified: statuses.filter((s) => s === "modified").length,
-      skipped: statuses.filter((s) => s === "skipped").length,
-      notLogged: statuses.filter((s) => s === "not_logged").length,
-    };
   }, [participantData, currentDate]);
 
   // Load all image reviews for coordinator's participants
@@ -725,6 +728,31 @@ export default function FoodLogsPage() {
       })
       .catch(() => {});
   }, [token]);
+
+  const actualParticipants = useMemo(
+    () => participants.filter((p) => isActualParticipant(p.participant_id)),
+    [participants]
+  );
+  const testParticipants = useMemo(
+    () => participants.filter((p) => isTestParticipant(p.participant_id)),
+    [participants]
+  );
+  const visibleParticipants = isAdmin && cohortFilter === "test" ? testParticipants : actualParticipants;
+
+  useEffect(() => {
+    if (loadingList) return;
+    if (visibleParticipants.length === 0) {
+      // Keep the detail pane aligned with the selected cohort.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSelectedId(null);
+      setParticipantData(null);
+      return;
+    }
+    if (!selectedId || !visibleParticipants.some((p) => p.user_id === selectedId)) {
+      // Cohort changes should immediately focus the first participant in that group.
+      setSelectedId(visibleParticipants[0].user_id);
+    }
+  }, [loadingList, selectedId, visibleParticipants]);
 
 
   const handleDeleted = useCallback((id: string) => {
@@ -801,15 +829,20 @@ export default function FoodLogsPage() {
             </p>
           </div>
         ) : (
-          <div className="space-y-4">
-            <ParticipantCombobox
-              participants={participants}
+          <div className="grid gap-4 lg:grid-cols-[19rem_minmax(0,1fr)]">
+            <ParticipantRail
+              participants={visibleParticipants}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              showCohortSwitch={isAdmin}
+              cohortFilter={cohortFilter}
+              onCohortChange={setCohortFilter}
+              actualCount={actualParticipants.length}
+              testCount={testParticipants.length}
             />
 
             {/* ─── Main panel ─── */}
-            <div className="space-y-4">
+            <div className="min-w-0 space-y-4">
               {selectedId && (
                 <>
                   {/* Participant heading */}
@@ -871,23 +904,6 @@ export default function FoodLogsPage() {
                     </div>
                   )}
 
-                  {/* Day summary stats */}
-                  {dayStats && (
-                    <div className="grid grid-cols-4 gap-2">
-                      {[
-                        { label: "Logged", value: `${dayStats.logged}/${dayStats.total}`, cls: "text-foreground" },
-                        { label: "As planned", value: dayStats.asPlanned, cls: "text-emerald-600" },
-                        { label: "Modified", value: dayStats.modified, cls: "text-amber-600" },
-                        { label: "Skipped", value: dayStats.skipped, cls: "text-red-500" },
-                      ].map(({ label, value, cls }) => (
-                        <div key={label} className="rounded-xl border bg-muted/10 px-3 py-2.5 text-center">
-                          <p className={`text-lg font-bold tabular-nums ${cls}`}>{value}</p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">{label}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
                   {/* Loading state */}
                   {loadingData && (
                     <div className="space-y-3">
@@ -908,9 +924,9 @@ export default function FoodLogsPage() {
                   )}
 
                   {/* Meal slot cards for the day */}
-                  {!loadingData && dayStats && currentDate && (
+                  {!loadingData && currentDate && (
                     <div className="space-y-3">
-                      {dayStats.slotData.map(({ slot, planItems, logItems }) => {
+                      {daySlotData.map(({ slot, planItems, logItems }) => {
                         const reviewsForSlot = logItems
                           .map((l) => reviewsMap[l.ID])
                           .filter((r): r is MealImageReview => !!r);
@@ -918,7 +934,6 @@ export default function FoodLogsPage() {
                           <MealSlotCard
                             key={slot}
                             slot={slot}
-                            date={currentDate}
                             planItems={planItems}
                             logItems={logItems}
                             reviewsForSlot={reviewsForSlot}
@@ -929,7 +944,7 @@ export default function FoodLogsPage() {
                         );
                       })}
 
-                      {dayStats.slotData.length === 0 && (
+                      {daySlotData.length === 0 && (
                         <div className="flex items-center justify-center rounded-xl border border-dashed py-12">
                           <p className="text-sm text-muted-foreground">
                             No plan or logs for this date.

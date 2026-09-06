@@ -1,5 +1,3 @@
-import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/app-sidebar";
 import { DashboardHeader } from "@/components/dashboard-header";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
@@ -39,12 +37,9 @@ export default async function DashboardLayout({
   }
 
   return (
-    <SidebarProvider className="h-screen overflow-hidden">
-      <AppSidebar role={role} />
-      <SidebarInset className="flex flex-col min-h-0">
-        <DashboardHeader />
-        <main className="flex-1 overflow-y-auto p-6">{children}</main>
-      </SidebarInset>
-    </SidebarProvider>
+    <div className="flex h-screen flex-col overflow-hidden bg-transparent">
+      <DashboardHeader role={role} />
+      <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">{children}</main>
+    </div>
   );
 }

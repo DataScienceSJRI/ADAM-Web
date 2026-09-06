@@ -20,6 +20,7 @@ import {
   LayoutDashboard,
   Heart,
   Utensils,
+  Activity,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -45,17 +46,26 @@ export function AppSidebar({ role }: { role: string }) {
 
   return (
     <Sidebar>
-      <SidebarHeader className="p-4">
-        <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+      <SidebarHeader className="border-b border-sidebar-border/70 p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sidebar-primary text-sidebar-primary-foreground shadow-sm shadow-black/20">
             <UtensilsCrossed className="h-4 w-4" />
           </div>
-          <div>
-            <span className="text-lg font-semibold tracking-tight">ADAM</span>
+          <div className="min-w-0">
+            <span className="block text-lg font-semibold tracking-tight">ADAM</span>
             {isCoordinator && (
-              <p className="text-[10px] text-muted-foreground capitalize">{role}</p>
+              <p className="text-[10px] font-medium uppercase tracking-[0.18em] text-sidebar-foreground/55">{role}</p>
             )}
           </div>
+        </div>
+        <div className="mt-5 rounded-2xl border border-sidebar-border/80 bg-sidebar-accent/80 p-3">
+          <div className="flex items-center gap-2 text-xs font-semibold text-sidebar-accent-foreground">
+            <Activity className="h-3.5 w-3.5 text-sidebar-primary" />
+            Care overview
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-sidebar-foreground/65">
+            Participant plans, recalls, and signals at a glance.
+          </p>
         </div>
       </SidebarHeader>
 
@@ -118,10 +128,10 @@ export function AppSidebar({ role }: { role: string }) {
         )}
       </SidebarContent>
 
-      <SidebarFooter className="p-4 space-y-3">
+      <SidebarFooter className="space-y-3 border-t border-sidebar-border/70 p-4">
         <UserNav />
         {process.env.NEXT_PUBLIC_APP_VERSION && (
-          <p className="text-[10px] text-muted-foreground text-center select-none">
+          <p className="select-none text-center text-[10px] text-sidebar-foreground/45">
             v{process.env.NEXT_PUBLIC_APP_VERSION}
           </p>
         )}

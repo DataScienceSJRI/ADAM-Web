@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
-import { AlertTriangle, ChevronLeft, ChevronRight, ChevronDown, Trash2 } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
 import { formatIST } from "@/lib/utils";
 
@@ -30,6 +30,16 @@ type ParticipantGroup = {
   pending_count: number;
   reviews: Review[];
 };
+
+type CohortFilter = "actual" | "test";
+
+function isTestParticipant(participantId: string | null) {
+  return participantId?.toUpperCase().startsWith("P") ?? false;
+}
+
+function isActualParticipant(participantId: string | null) {
+  return !isTestParticipant(participantId);
+}
 
 type MealGroup = {
   key: string;
@@ -80,20 +90,17 @@ function isoWeek(dateStr: string): number {
 }
 
 function MealSlotBadge({ slot }: { slot: string }) {
-  const colours: Record<string, string> = {
-    breakfast: "bg-orange-100 text-orange-700",
-    lunch: "bg-blue-100 text-blue-700",
-    dinner: "bg-indigo-100 text-indigo-700",
-    snacks: "bg-purple-100 text-purple-700",
-  };
-  const c = colours[slot.toLowerCase()] ?? "bg-muted text-muted-foreground";
-  return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium capitalize ${c}`}>{slot}</span>;
+  return (
+    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium capitalize text-muted-foreground">
+      {slot}
+    </span>
+  );
 }
 
 function StatusBadge({ status }: { status: Review["review_status"] }) {
   const styles = {
-    pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-    approved: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
+    pending: "bg-muted text-muted-foreground ring-1 ring-border",
+    approved: "bg-[#D9F5EF] text-[#2F5D57] dark:bg-[#26352f] dark:text-[#D9F5EF]",
     rejected: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400",
   };
   return (
@@ -129,20 +136,26 @@ function mealGroupToReviews(g: MealGroup): MealImageReview[] {
 const PAGE_SIZE = 20;
 const SLOT_ORDER: Record<string, number> = { breakfast: 0, lunch: 1, dinner: 2, snacks: 3 };
 
-function FeedbackParticipantCombobox({
+function FeedbackParticipantRail({
   participants,
   selectedId,
   onSelect,
+  showCohortSwitch,
+  cohortFilter,
+  onCohortChange,
+  actualCount,
+  testCount,
 }: {
   participants: ParticipantGroup[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  showCohortSwitch: boolean;
+  cohortFilter: CohortFilter;
+  onCohortChange: (cohort: CohortFilter) => void;
+  actualCount: number;
+  testCount: number;
 }) {
-  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-
-  const selected = participants.find(p => p.user_id === selectedId);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -153,97 +166,93 @@ function FeedbackParticipantCombobox({
     );
   }, [participants, query]);
 
-  useEffect(() => {
-    function onMouseDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-        setQuery("");
-      }
-    }
-    document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
-  }, []);
-
   return (
-    <div ref={ref} className="relative w-full max-w-sm">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center justify-between gap-2 rounded-xl border bg-background px-4 py-2.5 text-sm hover:bg-muted/40 transition-colors"
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-muted-foreground shrink-0 text-xs">Participant</span>
-          {selected ? (
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="font-mono font-medium truncate text-sm">
-                {selected.participant_id ?? selected.user_id}
-                {selected.display_name ? ` — ${selected.display_name}` : ""}
-              </span>
-              {selected.pending_count > 0 && (
-                <span className="rounded-full bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 shrink-0">
-                  {selected.pending_count}
-                </span>
-              )}
-            </div>
-          ) : (
-            <span className="text-muted-foreground italic text-xs">Select participant…</span>
-          )}
-        </div>
-        <ChevronDown className={`h-4 w-4 text-muted-foreground shrink-0 transition-transform duration-150 ${open ? "rotate-180" : ""}`} />
-      </button>
-
-      {open && (
-        <div className="absolute z-20 mt-1 w-full min-w-[22rem] rounded-xl border bg-popover shadow-lg overflow-hidden">
-          <div className="p-2 border-b">
-            <input
-              autoFocus
-              type="text"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              placeholder="Search by name or ID…"
-              className="w-full rounded-lg border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-ring"
-            />
-          </div>
-          <div className="max-h-72 overflow-y-auto divide-y">
-            {filtered.length === 0 && (
-              <p className="px-4 py-3 text-xs text-muted-foreground italic text-center">No participants found</p>
-            )}
-            {filtered.map(pg => {
-              const mgs = groupReviews(pg.reviews);
-              const total = mgs.length;
-              const reviewed = mgs.filter(g => groupStatus(g) !== "pending").length;
-              const pct = total > 0 ? (reviewed / total) * 100 : 0;
-              return (
-                <button
-                  key={pg.user_id}
-                  onClick={() => { onSelect(pg.user_id); setOpen(false); setQuery(""); }}
-                  className={`w-full text-left flex items-center gap-3 px-4 py-2.5 hover:bg-muted/40 transition-colors ${
-                    pg.user_id === selectedId ? "bg-primary/10" : ""
-                  }`}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <p className="font-mono font-medium text-xs truncate">{pg.participant_id ?? pg.user_id}</p>
-                      {pg.pending_count > 0 && (
-                        <span className="rounded-full bg-amber-500 text-white text-[10px] font-bold px-1.5 py-0.5 shrink-0">
-                          {pg.pending_count}
-                        </span>
-                      )}
-                    </div>
-                    {pg.display_name && <p className="text-muted-foreground text-[11px] truncate">{pg.display_name}</p>}
-                    <div className="flex items-center gap-1.5 mt-1.5">
-                      <div className="flex-1 h-1 rounded-full bg-muted overflow-hidden">
-                        <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="text-[10px] text-muted-foreground tabular-nums shrink-0">{reviewed}/{total}</span>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+    <aside className="flex max-h-[28rem] min-h-0 flex-col overflow-hidden rounded-2xl border bg-card/90 p-3 shadow-sm shadow-black/[0.03] lg:sticky lg:top-4 lg:h-[calc(100vh-8rem)] lg:max-h-none">
+      <div className="mb-3 shrink-0">
+        <p className="text-sm font-semibold">Participants</p>
+        <p className="text-xs text-muted-foreground">{participants.length} with meal images</p>
+      </div>
+      {showCohortSwitch && (
+        <div className="mb-3 inline-flex w-full shrink-0 rounded-xl border bg-background/60 p-1">
+          {[
+            { key: "actual" as const, label: "Actual", count: actualCount },
+            { key: "test" as const, label: "Test", count: testCount },
+          ].map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              onClick={() => onCohortChange(item.key)}
+              className={`flex-1 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                cohortFilter === item.key
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {item.label}
+              <span className="ml-2 opacity-75">{item.count}</span>
+            </button>
+          ))}
         </div>
       )}
-    </div>
+      <input
+        type="text"
+        value={query}
+        onChange={e => setQuery(e.target.value)}
+        placeholder="Search participant"
+        className="mb-3 h-9 w-full shrink-0 rounded-xl border bg-background/70 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring/30"
+      />
+      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto pr-1">
+        {filtered.length === 0 && (
+          <p className="rounded-xl border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">No participants found</p>
+        )}
+        {filtered.map(pg => {
+          const mgs = groupReviews(pg.reviews);
+          const total = mgs.length;
+          const reviewed = mgs.filter(g => groupStatus(g) !== "pending").length;
+          const pct = total > 0 ? Math.round((reviewed / total) * 100) : 0;
+          const active = pg.user_id === selectedId;
+          return (
+            <button
+              key={pg.user_id}
+              type="button"
+              onClick={() => onSelect(pg.user_id)}
+              className={`w-full rounded-xl px-3 py-2.5 text-left transition-colors ${
+                active ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate font-mono text-xs font-semibold">{pg.participant_id ?? pg.user_id}</p>
+                  {pg.display_name && (
+                    <p className={`truncate text-xs ${active ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+                      {pg.display_name}
+                    </p>
+                  )}
+                </div>
+                {pg.pending_count > 0 && (
+                  <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                    active ? "bg-primary-foreground text-primary" : "bg-muted text-muted-foreground ring-1 ring-border"
+                  }`}>
+                    {pg.pending_count}
+                  </span>
+                )}
+              </div>
+              <div className="mt-2 flex items-center gap-1.5">
+                <div className={`h-1 flex-1 overflow-hidden rounded-full ${active ? "bg-primary-foreground/25" : "bg-muted"}`}>
+                  <div
+                    className={`h-full rounded-full transition-all ${active ? "bg-primary-foreground" : "bg-primary"}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className={`shrink-0 text-[10px] tabular-nums ${active ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+                  {reviewed}/{total}
+                </span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </aside>
   );
 }
 
@@ -251,6 +260,8 @@ export default function FeedbackPage() {
   const router = useRouter();
   const [token, setToken] = useState<string | null>(null);
   const [participants, setParticipants] = useState<ParticipantGroup[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [cohortFilter, setCohortFilter] = useState<CohortFilter>("actual");
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "approved" | "rejected">("all");
@@ -270,14 +281,16 @@ export default function FeedbackPage() {
       if (!session?.access_token) { router.push("/login"); return; }
       setToken(session.access_token);
       const admin = session.user.email === "test@example.com";
+      setIsAdmin(admin);
       const res = await fetch("/api/feedback", { headers: { Authorization: `Bearer ${session.access_token}` } });
       if (res.ok) {
         const data: ParticipantGroup[] = await res.json();
         const filtered = admin ? data : data.filter((g) => g.participant_id?.toUpperCase().startsWith("A"));
         setParticipants(filtered);
-        if (filtered.length > 0) {
-          const firstPending = filtered.find(g => g.pending_count > 0);
-          setSelectedId((firstPending ?? filtered[0]).user_id);
+        const defaultList = admin ? filtered.filter((g) => isActualParticipant(g.participant_id)) : filtered;
+        if (defaultList.length > 0) {
+          const firstPending = defaultList.find(g => g.pending_count > 0);
+          setSelectedId((firstPending ?? defaultList[0]).user_id);
         }
       }
       setLoading(false);
@@ -342,13 +355,37 @@ export default function FeedbackPage() {
     }
   }
 
-  // Sidebar sorted by pending count descending
-  const sortedParticipants = useMemo(
-    () => [...participants].sort((a, b) => b.pending_count - a.pending_count),
+  const actualParticipants = useMemo(
+    () => participants.filter((p) => isActualParticipant(p.participant_id)),
     [participants]
   );
+  const testParticipants = useMemo(
+    () => participants.filter((p) => isTestParticipant(p.participant_id)),
+    [participants]
+  );
+  const visibleParticipants = isAdmin && cohortFilter === "test" ? testParticipants : actualParticipants;
 
-  const selected = participants.find(g => g.user_id === selectedId);
+  useEffect(() => {
+    if (loading) return;
+    if (visibleParticipants.length === 0) {
+      // Keep the review pane aligned with the selected cohort.
+      setSelectedId(null);
+      return;
+    }
+    if (!selectedId || !visibleParticipants.some((p) => p.user_id === selectedId)) {
+      const firstPending = visibleParticipants.find(g => g.pending_count > 0);
+      // Cohort changes should immediately focus the highest-priority participant.
+      setSelectedId((firstPending ?? visibleParticipants[0]).user_id);
+    }
+  }, [loading, selectedId, visibleParticipants]);
+
+  // Sidebar sorted by pending count descending
+  const sortedParticipants = useMemo(
+    () => [...visibleParticipants].sort((a, b) => b.pending_count - a.pending_count),
+    [visibleParticipants]
+  );
+
+  const selected = visibleParticipants.find(g => g.user_id === selectedId);
   const mealGroups = useMemo(() => groupReviews(selected?.reviews ?? []), [selected]);
 
   // Unique dates newest-first (index 0 = most recent)
@@ -545,15 +582,20 @@ export default function FeedbackPage() {
             <p className="mt-1 text-sm text-muted-foreground">Images submitted by participants will appear here.</p>
           </div>
         ) : (
-          <div className="space-y-4">
-            <FeedbackParticipantCombobox
+          <div className="grid gap-4 lg:grid-cols-[19rem_minmax(0,1fr)]">
+            <FeedbackParticipantRail
               participants={sortedParticipants}
               selectedId={selectedId}
               onSelect={(id) => { setSelectedId(id); setStatusFilter("all"); }}
+              showCohortSwitch={isAdmin}
+              cohortFilter={cohortFilter}
+              onCohortChange={setCohortFilter}
+              actualCount={actualParticipants.length}
+              testCount={testParticipants.length}
             />
 
             {/* Table panel */}
-            <div className="space-y-3">
+            <div className="min-w-0 space-y-3">
               {selected && (
                 <>
                   {/* Participant heading + controls */}
@@ -566,7 +608,7 @@ export default function FeedbackPage() {
                     {counts.pending > 0 && statusFilter !== "approved" && statusFilter !== "rejected" && (
                       <button
                         onClick={jumpToFirstPending}
-                        className="text-xs px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors dark:bg-amber-900/20 dark:border-amber-700 dark:text-amber-400 shrink-0"
+                        className="shrink-0 rounded-lg border bg-accent px-3 py-1.5 text-xs text-accent-foreground transition-colors hover:bg-accent/80"
                       >
                         Jump to first pending
                       </button>
@@ -678,7 +720,7 @@ export default function FeedbackPage() {
                                   <div className="flex items-center gap-1.5">
                                     <StatusBadge status={status} />
                                     {hasAI && (
-                                      <span title="AI analysis done" className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0" />
+                                      <span title="AI analysis done" className="w-1.5 h-1.5 rounded-full bg-[#5BB9A6] shrink-0" />
                                     )}
                                   </div>
                                 </td>
@@ -707,7 +749,7 @@ export default function FeedbackPage() {
                                         <img src={g.pre.pre_image_id} alt="pre" className="w-10 h-10 object-cover rounded-md border" />
                                       ) : (
                                         <div className="w-10 h-10 rounded-md border border-dashed flex items-center justify-center" title="No pre-meal image">
-                                          <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                                          <AlertTriangle className="h-3.5 w-3.5 text-primary" />
                                         </div>
                                       )}
                                     </div>
@@ -718,7 +760,7 @@ export default function FeedbackPage() {
                                         <img src={g.post.post_image_id} alt="post" className="w-10 h-10 object-cover rounded-md border" />
                                       ) : (
                                         <div className="w-10 h-10 rounded-md border border-dashed flex items-center justify-center" title="No post-meal image">
-                                          <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                                          <AlertTriangle className="h-3.5 w-3.5 text-primary" />
                                         </div>
                                       )}
                                     </div>

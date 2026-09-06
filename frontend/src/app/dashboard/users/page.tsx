@@ -4,7 +4,14 @@ import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
-import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle, Copy, Check, X } from "lucide-react";
+import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle, Copy, Check, X, Plus, MoreHorizontal } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { formatIST } from "@/lib/utils";
 import { QrCode } from "@/components/qr-code";
 
@@ -28,14 +35,23 @@ type Participant = {
 type CreatedUser = { participant_id: string; display_name: string; user_id: string; password?: string };
 
 const IN_PROGRESS = new Set(["generating", "optimizing", "saving"]);
+type CohortFilter = "actual" | "test";
+
+function isTestUser(participant: Participant) {
+  return participant.participant_id?.toUpperCase().startsWith("P");
+}
+
+function isActualUser(participant: Participant) {
+  return !isTestUser(participant);
+}
 
 function StatusBadge({ status }: { status: string | null }) {
-  if (!status) return <span className="text-xs text-muted-foreground">No plan</span>;
+  if (!status) return <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/35 dark:text-amber-300">No plan</span>;
   if (status.startsWith("ok:"))
-    return <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400 px-2.5 py-0.5 text-xs font-medium">Ready</span>;
+    return <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 px-2.5 py-0.5 text-xs font-medium">Ready</span>;
   if (IN_PROGRESS.has(status))
     return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium">
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300 px-2.5 py-0.5 text-xs font-medium">
         <span className="h-1.5 w-1.5 rounded-full border border-current border-t-transparent animate-spin" />
         Generating
       </span>
@@ -45,17 +61,37 @@ function StatusBadge({ status }: { status: string | null }) {
   return <span className="text-xs text-muted-foreground">{status}</span>;
 }
 
-function StatCard({ icon, label, value, accent = "text-foreground" }: {
-  icon: React.ReactNode; label: string; value: number; accent?: string;
+function StatCard({ icon, label, value, accent = "text-foreground", tone = "bg-muted" }: {
+  icon: React.ReactNode; label: string; value: number; accent?: string; tone?: string;
 }) {
   return (
-    <div className="rounded-xl border bg-card p-4 flex items-center gap-3">
-      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted shrink-0">{icon}</div>
+    <div className="flex items-center gap-3 rounded-2xl border bg-card/90 px-4 py-3 shadow-sm shadow-black/[0.03]">
+      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${tone}`}>{icon}</div>
       <div>
-        <p className="text-xs text-muted-foreground">{label}</p>
-        <p className={`text-xl font-bold ${accent}`}>{value}</p>
+        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        <p className={`text-xl font-semibold tracking-tight ${accent}`}>{value}</p>
       </div>
     </div>
+  );
+}
+
+function WhatsAppStatus({ participant }: { participant: Participant }) {
+  if (!participant.whatsapp_phone) {
+    return <span className="text-xs text-muted-foreground">Not linked</span>;
+  }
+
+  return (
+    <span
+      title={participant.whatsapp_activated ? "Activated" : `Linked, awaiting "${ACTIVATION_KEYWORD}"`}
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+        participant.whatsapp_activated
+          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+          : "bg-muted text-muted-foreground"
+      }`}
+    >
+      <MessageCircle className="h-3.5 w-3.5" />
+      {participant.whatsapp_activated ? "Active" : "Linked"}
+    </span>
   );
 }
 
@@ -70,6 +106,7 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [cohortFilter, setCohortFilter] = useState<CohortFilter>("actual");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "generating" | "none" | "failed">("all");
   const [showModal, setShowModal] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -181,6 +218,11 @@ export default function UsersPage() {
     setWaJustLinked(false);
   }
 
+  function openAddModal() {
+    setGroup(isAdmin && cohortFilter === "test" ? "test" : "participant");
+    setShowModal(true);
+  }
+
   function closeModal() {
     setShowModal(false);
     setDisplayName("");
@@ -189,12 +231,16 @@ export default function UsersPage() {
     setCreated(null);
   }
 
-  const total = participants.length;
-  const ready = participants.filter((p) => p.plan_status?.startsWith("ok:")).length;
-  const generating = participants.filter((p) => p.plan_status && IN_PROGRESS.has(p.plan_status)).length;
-  const noPlan = participants.filter((p) => !p.plan_status).length;
+  const actualUsers = participants.filter(isActualUser);
+  const testUsers = participants.filter(isTestUser);
+  const showCohortSwitch = isAdmin;
+  const cohortParticipants = showCohortSwitch && cohortFilter === "test" ? testUsers : actualUsers;
+  const total = cohortParticipants.length;
+  const ready = cohortParticipants.filter((p) => p.plan_status?.startsWith("ok:")).length;
+  const generating = cohortParticipants.filter((p) => p.plan_status && IN_PROGRESS.has(p.plan_status)).length;
+  const noPlan = cohortParticipants.filter((p) => !p.plan_status).length;
 
-  const filtered = participants.filter((p) => {
+  const filtered = cohortParticipants.filter((p) => {
     const q = search.trim().toLowerCase();
     if (q && !p.participant_id.toLowerCase().includes(q) && !(p.display_name ?? "").toLowerCase().includes(q)) return false;
     if (statusFilter === "ready" && !p.plan_status?.startsWith("ok:")) return false;
@@ -205,96 +251,159 @@ export default function UsersPage() {
   });
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="mx-auto max-w-7xl space-y-5">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Participants</h1>
-          <p className="text-muted-foreground">Manage recruited participants and their meal plans.</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Participants</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Track onboarding, plan readiness, and follow-up signals.</p>
         </div>
         <button
-          onClick={() => setShowModal(true)}
-          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+          onClick={openAddModal}
+          className="inline-flex items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground shadow-sm shadow-primary/20 transition-colors hover:bg-primary/90"
         >
-          + Add Participant
+          <Plus className="h-4 w-4" />
+          Add Participant
         </button>
       </div>
 
       {/* Stat cards — shown once data is loaded */}
       {!loading && !error && total > 0 && (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <StatCard icon={<Users className="h-5 w-5 text-muted-foreground" />} label="Total" value={total} />
-          <StatCard icon={<CheckCircle className="h-5 w-5 text-emerald-600" />} label="Ready" value={ready} accent="text-emerald-600" />
-          <StatCard icon={<Clock className="h-5 w-5 text-blue-600" />} label="Generating" value={generating} accent="text-blue-600" />
-          <StatCard icon={<AlertCircle className="h-5 w-5 text-muted-foreground" />} label="No plan" value={noPlan} />
-        </div>
-      )}
-
-      {/* Search + filter */}
-      {!loading && !error && participants.length > 0 && (
-        <div className="flex flex-col sm:flex-row gap-3">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by ID or name…"
-              className="w-full rounded-lg border bg-background pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-            />
-          </div>
-          <div className="flex gap-1.5 flex-wrap">
-            {(["all", "ready", "generating", "none", "failed"] as const).map((f) => (
-              <button
-                key={f}
-                onClick={() => setStatusFilter(f)}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                  statusFilter === f
-                    ? "bg-primary text-primary-foreground border-primary"
-                    : "bg-background text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {f === "all" ? "All" : f === "ready" ? "Ready" : f === "generating" ? "Generating" : f === "none" ? "No plan" : "Failed"}
-              </button>
-            ))}
-          </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <StatCard
+            icon={<Users className="h-5 w-5 text-[#2F5D57] dark:text-[#D9F5EF]" />}
+            label="Total"
+            value={total}
+            tone="bg-[#F7FFFD] dark:bg-white/10"
+          />
+          <StatCard
+            icon={<CheckCircle className="h-5 w-5 text-emerald-700 dark:text-emerald-300" />}
+            label="Ready"
+            value={ready}
+            accent="text-emerald-700 dark:text-emerald-300"
+            tone="bg-[#e9f2df] dark:bg-emerald-950/40"
+          />
+          <StatCard
+            icon={<Clock className="h-5 w-5 text-[#2F5D57] dark:text-[#A7E3D4]" />}
+            label="Generating"
+            value={generating}
+            accent="text-[#2F5D57] dark:text-[#A7E3D4]"
+            tone="bg-[#D9F5EF] dark:bg-[#21433d]"
+          />
+          <StatCard
+            icon={<AlertCircle className="h-5 w-5 text-amber-700 dark:text-amber-300" />}
+            label="No plan"
+            value={noPlan}
+            accent="text-amber-700 dark:text-amber-300"
+            tone="bg-amber-50 dark:bg-amber-950/40"
+          />
         </div>
       )}
 
       {/* Table */}
       {loading ? (
-        <div className="rounded-xl border overflow-hidden">
+        <div className="overflow-hidden rounded-3xl border bg-card/75">
           <div className="h-10 bg-muted/50 border-b" />
           {[1, 2, 3].map((i) => <div key={i} className="h-14 border-b bg-muted/20 animate-pulse" />)}
         </div>
       ) : error ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">{error}</div>
       ) : participants.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-24 text-center">
+        <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed bg-card/70 py-24 text-center">
           <p className="text-base font-medium">No participants yet</p>
           <p className="mt-1 text-sm text-muted-foreground">Add your first participant to get started.</p>
           <button
-            onClick={() => setShowModal(true)}
-            className="mt-4 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            onClick={openAddModal}
+            className="mt-4 rounded-2xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
           >
             Add Participant
           </button>
         </div>
+      ) : cohortParticipants.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-3xl border border-dashed bg-card/70 py-24 text-center">
+          <p className="text-base font-medium">
+            No {cohortFilter === "test" ? "test users" : "actual users"} yet
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {cohortFilter === "test"
+              ? "Create a test user from Add Participant to keep trial runs separate."
+              : "Create an actual participant to begin onboarding."}
+          </p>
+          <button
+            onClick={openAddModal}
+            className="mt-4 rounded-2xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Add {cohortFilter === "test" ? "Test User" : "Participant"}
+          </button>
+        </div>
       ) : (
-        <div className="rounded-xl border overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-muted/50 border-b">
-              <tr className="text-xs text-muted-foreground">
-                <th className="px-4 py-3 text-left font-medium">Participant</th>
-                <th className="px-4 py-3 text-left font-medium">Name</th>
-                <th className="px-4 py-3 text-left font-medium">Plan Status</th>
-                <th className="px-4 py-3 text-left font-medium">Last Updated</th>
-                <th className="px-4 py-3 text-left font-medium">Recruited</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody className="divide-y">
+        <div className="overflow-hidden rounded-2xl border bg-card/90 shadow-sm shadow-sky-950/[0.04]">
+          <div className="flex flex-col gap-3 border-b p-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              {showCohortSwitch && (
+                <div className="inline-flex w-fit rounded-xl border bg-background/60 p-1">
+                  {[
+                    { key: "actual" as const, label: "Actual", count: actualUsers.length },
+                    { key: "test" as const, label: "Test", count: testUsers.length },
+                  ].map((item) => (
+                    <button
+                      key={item.key}
+                      type="button"
+                      onClick={() => setCohortFilter(item.key)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                        cohortFilter === item.key
+                          ? "bg-primary text-primary-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {item.label}
+                      <span className="ml-2 opacity-75">{item.count}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="relative min-w-64 flex-1 sm:w-72">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search participants"
+                  className="h-9 w-full rounded-xl border bg-background/70 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {(["all", "ready", "generating", "none", "failed"] as const).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setStatusFilter(f)}
+                  className={`h-9 rounded-xl border px-3 text-xs font-medium transition-colors ${
+                    statusFilter === f
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "bg-background/60 text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {f === "all" ? "All" : f === "ready" ? "Ready" : f === "generating" ? "Generating" : f === "none" ? "No plan" : "Failed"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="min-w-[920px] w-full text-sm">
+              <thead className="border-b bg-muted/50">
+                <tr className="text-xs text-muted-foreground">
+                  <th className="px-4 py-3 text-left font-medium">Participant</th>
+                  <th className="px-4 py-3 text-left font-medium">Name</th>
+                  <th className="px-4 py-3 text-left font-medium">Plan Status</th>
+                  <th className="px-4 py-3 text-left font-medium">WhatsApp</th>
+                  <th className="px-4 py-3 text-left font-medium">Last Updated</th>
+                  <th className="px-4 py-3 text-left font-medium">Recruited</th>
+                  <th className="px-4 py-3" />
+                </tr>
+              </thead>
+              <tbody className="divide-y">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-4 py-10 text-center text-sm text-muted-foreground">
+                  <td colSpan={7} className="px-4 py-10 text-center text-sm text-muted-foreground">
                     No participants match your search.
                   </td>
                 </tr>
@@ -304,84 +413,92 @@ export default function UsersPage() {
                 const hasReady = p.plan_status?.startsWith("ok:");
                 const hasFailed = p.plan_status?.startsWith("error") || p.plan_status?.includes("No solution");
                 return (
-                  <tr key={p.user_id} className="hover:bg-muted/30 transition-colors">
-                    <td className="px-4 py-3.5 font-mono text-xs font-semibold">{p.participant_id}</td>
+                  <tr key={p.user_id} className="transition-colors hover:bg-accent/25">
+                    <td className="px-4 py-3.5 font-mono text-xs font-semibold text-primary">{p.participant_id}</td>
                     <td className="px-4 py-3.5 text-sm">{p.display_name ?? "—"}</td>
                     <td className="px-4 py-3.5"><StatusBadge status={p.plan_status} /></td>
+                    <td className="px-4 py-3.5"><WhatsAppStatus participant={p} /></td>
                     <td className="px-4 py-3.5 text-xs text-muted-foreground">{fmtDate(p.last_plan_at)}</td>
                     <td className="px-4 py-3.5 text-xs text-muted-foreground">{fmtDate(p.created_at)}</td>
                     <td className="px-4 py-3.5 text-right">
-                      <div className="flex items-center justify-end gap-3">
-                        {p.whatsapp_phone ? (
-                          <div className="inline-flex items-center gap-1.5">
-                            <span
-                              title={p.whatsapp_activated ? "Activated" : `Linked, awaiting "${ACTIVATION_KEYWORD}"`}
-                              className={`inline-flex items-center gap-1 text-xs ${
-                                p.whatsapp_activated ? "text-emerald-600" : "text-muted-foreground"
-                              }`}
-                            >
-                              <MessageCircle className="h-3.5 w-3.5" />
-                              {p.whatsapp_phone}
-                            </span>
-                            {!p.whatsapp_activated && ACTIVATION_LINK && (
-                              <button
-                                onClick={() => copyActivationLink(p.user_id)}
-                                title="Copy activation link to send this participant"
-                                className="text-muted-foreground hover:text-foreground transition-colors"
-                              >
-                                {copiedFor === p.user_id ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleUnlinkWhatsapp(p.user_id, p.whatsapp_phone!)}
-                              title="Unlink this WhatsApp number"
-                              className="text-muted-foreground hover:text-destructive transition-colors"
-                            >
-                              <X className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setLinkingUser(p)}
-                            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                          >
-                            <MessageCircle className="h-3.5 w-3.5" />
-                            Link WhatsApp
-                          </button>
-                        )}
-                        {(hasReady || inProgress) && (
-                          <Link
-                            href={`/dashboard/preferences?user=${encodeURIComponent(p.user_id)}`}
-                            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
-                          >
-                            Preferences
-                          </Link>
-                        )}
-                        {hasReady && (
+                      <div className="flex items-center justify-end gap-2">
+                        {hasReady ? (
                           <Link
                             href={`/dashboard/recommendations?user=${encodeURIComponent(p.user_id)}`}
-                            className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+                            className="rounded-xl bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
                           >
                             View Plan
                           </Link>
-                        )}
-                        {(!p.plan_status || hasFailed) && (
+                        ) : hasFailed || !p.plan_status ? (
                           <Link
                             href={`/onboarding?participant_id=${encodeURIComponent(p.user_id)}`}
-                            className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors"
+                            className="rounded-xl border bg-background/70 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
                           >
                             {hasFailed ? "Retry" : "Onboard"}
                           </Link>
-                        )}
+                        ) : inProgress ? (
+                          <span className="rounded-xl bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground">
+                            In progress
+                          </span>
+                        ) : null}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              type="button"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-xl border bg-background/70 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                              aria-label={`More actions for ${p.display_name ?? p.participant_id}`}
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-44">
+                            {(hasReady || inProgress) && (
+                              <DropdownMenuItem asChild>
+                                <Link href={`/dashboard/preferences?user=${encodeURIComponent(p.user_id)}`}>
+                                  Preferences
+                                </Link>
+                              </DropdownMenuItem>
+                            )}
+                            {!p.whatsapp_phone && (
+                              <DropdownMenuItem onSelect={() => setLinkingUser(p)}>
+                                <MessageCircle className="h-4 w-4" />
+                                Link WhatsApp
+                              </DropdownMenuItem>
+                            )}
+                            {p.whatsapp_phone && !p.whatsapp_activated && ACTIVATION_LINK && (
+                              <DropdownMenuItem onSelect={() => copyActivationLink(p.user_id)}>
+                                {copiedFor === p.user_id ? (
+                                  <Check className="h-4 w-4" />
+                                ) : (
+                                  <Copy className="h-4 w-4" />
+                                )}
+                                {copiedFor === p.user_id ? "Copied" : "Copy activation"}
+                              </DropdownMenuItem>
+                            )}
+                            {p.whatsapp_phone && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onSelect={() => handleUnlinkWhatsapp(p.user_id, p.whatsapp_phone!)}
+                                >
+                                  <X className="h-4 w-4" />
+                                  Unlink WhatsApp
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </td>
                   </tr>
                 );
               })}
-            </tbody>
-          </table>
+              </tbody>
+            </table>
+          </div>
           <div className="px-4 py-2.5 border-t bg-muted/30 text-xs text-muted-foreground">
-            {filtered.length !== total ? `${filtered.length} of ${total}` : total} participant{total !== 1 ? "s" : ""}
+            {filtered.length !== total ? `${filtered.length} of ${total}` : total} {cohortFilter === "test" ? "test user" : "actual user"}{total !== 1 ? "s" : ""}
           </div>
         </div>
       )}
