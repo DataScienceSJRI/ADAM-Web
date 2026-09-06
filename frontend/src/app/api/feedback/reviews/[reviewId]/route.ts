@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? process.env.BACKEND_URL ?? "https://datatools.sjri.res.in/ADAM";
+import { BACKEND_URL, getBackendAccessToken } from "@/lib/backend";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   const { reviewId } = await params;
-  const auth = req.headers.get("authorization");
+  const token = await getBackendAccessToken();
+  const auth = req.headers.get("authorization") ?? (token ? `Bearer ${token}` : null);
   try {
-    const res = await fetch(`${BACKEND}/api/v1/feedback/reviews/${reviewId}`, {
+    const res = await fetch(`${BACKEND_URL}/api/v1/feedback/reviews/${reviewId}`, {
       headers: { ...(auth ? { Authorization: auth } : {}) },
     });
     const text = await res.text();
@@ -26,9 +26,10 @@ export async function PATCH(
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   const { reviewId } = await params;
-  const auth = req.headers.get("authorization");
+  const token = await getBackendAccessToken();
+  const auth = req.headers.get("authorization") ?? (token ? `Bearer ${token}` : null);
   try {
-    const res = await fetch(`${BACKEND}/api/v1/feedback/reviews/${reviewId}`, {
+    const res = await fetch(`${BACKEND_URL}/api/v1/feedback/reviews/${reviewId}`, {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
@@ -50,9 +51,10 @@ export async function DELETE(
   { params }: { params: Promise<{ reviewId: string }> }
 ) {
   const { reviewId } = await params;
-  const auth = req.headers.get("authorization");
+  const token = await getBackendAccessToken();
+  const auth = req.headers.get("authorization") ?? (token ? `Bearer ${token}` : null);
   try {
-    const res = await fetch(`${BACKEND}/api/v1/feedback/reviews/${reviewId}`, {
+    const res = await fetch(`${BACKEND_URL}/api/v1/feedback/reviews/${reviewId}`, {
       method: "DELETE",
       headers: { ...(auth ? { Authorization: auth } : {}) },
     });

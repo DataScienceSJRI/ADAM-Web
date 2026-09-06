@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? process.env.BACKEND_URL ?? "https://datatools.sjri.res.in/ADAM";
+import { BACKEND_URL, getBackendAccessToken } from "@/lib/backend";
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ code: string }> }
 ) {
   const { code } = await params;
-  const auth = req.headers.get("authorization");
+  const token = await getBackendAccessToken();
+  const auth = req.headers.get("authorization") ?? (token ? `Bearer ${token}` : null);
   try {
-    const res = await fetch(`${BACKEND}/api/v1/recipes/${encodeURIComponent(code)}`, {
+    const res = await fetch(`${BACKEND_URL}/api/v1/recipes/${encodeURIComponent(code)}`, {
       headers: { ...(auth ? { Authorization: auth } : {}) },
     });
     const text = await res.text();
