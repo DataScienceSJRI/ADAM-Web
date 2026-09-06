@@ -2,6 +2,7 @@ import logging
 
 from core.supabase import get_supabase
 from services.whatsapp_gateway import get_gateway
+from services.wh_messages import log_pending, mark_error, mark_sent
 
 logger = logging.getLogger("backend.services.whatsapp_notify")
 
@@ -28,10 +29,14 @@ def send_whatsapp(user_id: str, title: str, body: str) -> bool:
     if not phone:
         return False
 
+    text = f"*{title}*\n{body}"
+    message_id = log_pending(user_id, text)
     try:
-        get_gateway().send_text(phone, f"*{title}*\n{body}")
+        get_gateway().send_text(phone, text)
         logger.info("WhatsApp sent to user_id=%s: %s", user_id, title)
+        mark_sent(message_id)
         return True
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to send WhatsApp message to user_id=%s", user_id)
+        mark_error(message_id, str(exc))
         return False

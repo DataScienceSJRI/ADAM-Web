@@ -10,6 +10,7 @@ from core.auth import get_current_user
 from core.roles import require_coordinator
 from core.supabase import get_supabase
 from models.schemas import LinkPhoneRequest
+from services.wh_messages import log_pending, mark_error, mark_sent
 from services.whatsapp_gateway import IncomingMessage, get_gateway
 
 logger = logging.getLogger("backend.routers.whatsapp")
@@ -41,6 +42,15 @@ def handle_message(msg: IncomingMessage) -> None:
     link = link_resp.data[0]
     user_id = link["user_id"]
 
+    def reply(text: str) -> None:
+        message_id = log_pending(user_id, text)
+        try:
+            gateway.send_text(msg.phone, text)
+            mark_sent(message_id)
+        except Exception as exc:
+            mark_error(message_id, str(exc))
+            raise
+
     sb.table("WH_Users").update(
         {"last_message_at": datetime.now(timezone.utc).isoformat()}
     ).eq("phone", msg.phone).execute()
@@ -53,11 +63,11 @@ def handle_message(msg: IncomingMessage) -> None:
             sb.table("WH_Users").update(
                 {"activated_at": datetime.now(timezone.utc).isoformat()}
             ).eq("phone", msg.phone).execute()
-        gateway.send_text(msg.phone, _WELCOME_REPLY)
+        reply(_WELCOME_REPLY)
         return
 
     if not link.get("activated_at"):
-        gateway.send_text(msg.phone, _NOT_ACTIVATED_REPLY)
+        reply(_NOT_ACTIVATED_REPLY)
         return
 
     if text_upper == "#NEXTPLAN" or "next plan" in text.lower():
@@ -71,12 +81,12 @@ def handle_message(msg: IncomingMessage) -> None:
         )
         next_plan_at = session_resp.data[0].get("next_plan_at") if session_resp.data else None
         if next_plan_at:
-            gateway.send_text(msg.phone, f"Your next plan is scheduled for {next_plan_at}.")
+            reply(f"Your next plan is scheduled for {next_plan_at}.")
         else:
-            gateway.send_text(msg.phone, "No plan is currently scheduled.")
+            reply("No plan is currently scheduled.")
         return
 
-    gateway.send_text(msg.phone, _FALLBACK_REPLY)
+    reply(_FALLBACK_REPLY)
 
 
 @router.post("/webhook")
