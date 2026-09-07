@@ -937,7 +937,6 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
     if not messages:
         return []
 
-    phone = _get_activated_phone(sb, user_id)
     inserted_ids = []
     for m in messages:
         row = {
@@ -948,19 +947,54 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
             "response_status": m["response_status"], "energy_kcal": m["energy_kcal"],
             "carbs_g": m["carbs_g"], "fibre_g": m["fibre_g"], "scheduled_at": m["sent_at"],
         }
-        resp = sb.table("WH_Messages").insert(row).execute()
-        if not resp.data:
-            continue
-        msg_id = resp.data[0]["id"]
-        inserted_ids.append(msg_id)
-        if not phone:
-            continue  # no linked+activated WhatsApp number yet — row stays 'pending'
-        try:
-            get_gateway().send_text(phone, m["message"])
-            mark_sent(msg_id)
-        except Exception as exc:
-            mark_error(msg_id, str(exc))
+        msg_id = _insert_and_send(sb, user_id, row)
+        if msg_id is not None:
+            inserted_ids.append(msg_id)
     return inserted_ids
+
+
+def _insert_and_send(sb, user_id: str, row: dict) -> int | None:
+    """Insert one row into WH_Messages, then immediately attempt to send it
+    if the user has a linked+activated WhatsApp number — shared by
+    handle_diet_recall_entry and send_image_received_ack so there's exactly
+    one place that does this insert-then-send sequence."""
+    resp = sb.table("WH_Messages").insert(row).execute()
+    if not resp.data:
+        return None
+    msg_id = resp.data[0]["id"]
+    phone = _get_activated_phone(sb, user_id)
+    if not phone:
+        return msg_id  # no linked+activated WhatsApp number yet — row stays 'pending'
+    try:
+        get_gateway().send_text(phone, row["message"])
+        mark_sent(msg_id)
+    except Exception as exc:
+        mark_error(msg_id, str(exc))
+    return msg_id
+
+
+def send_image_received_ack(user_id: str, meal_slot: str, occasion_date: str) -> int | None:
+    """Call this right after services/recall.py's log_recall_image() creates
+    the Pending placeholder row for a NEW photo upload — sets the
+    expectation that real feedback (GL, nutrition, dish-level detail) comes
+    later, once a coordinator approves it and handle_diet_recall_entry fires
+    (via approve_review_diet_recall). Not called for a post-only upload that
+    patches an already-acknowledged occasion — no need to say it twice.
+
+    Returns the WH_Messages row id, or None if the insert itself failed."""
+    sb = get_supabase()
+    message = (
+        f"📸 Got your {meal_slot} photo — thanks for logging it! We'll send you feedback "
+        f"once it's reviewed and approved."
+    )
+    row = {
+        "user_id": user_id, "message": message, "status": "pending",
+        "meal_date": occasion_date, "meal_slot": meal_slot, "message_type": "image_received_ack",
+        "meal_source": None, "dishes": None, "actual_gl": None, "planned_gl": None,
+        "response_status": "Neutral", "energy_kcal": None, "carbs_g": None, "fibre_g": None,
+        "scheduled_at": _fmt_ist(datetime.now(IST)),
+    }
+    return _insert_and_send(sb, user_id, row)
 
 
 def build_backtest(days: int) -> pd.DataFrame:

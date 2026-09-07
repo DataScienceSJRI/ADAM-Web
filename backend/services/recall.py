@@ -677,6 +677,12 @@ def log_recall_image(
     if image_url_post:
         _enqueue_post_identification(sb, review_id, image_url_post)
 
+    try:
+        from whatsapp_feedback_backtest import send_image_received_ack
+        send_image_received_ack(user_id, meal_slot.value, today)
+    except Exception:
+        logger.exception("Failed to send image-received ack for user_id=%s review_id=%s", user_id, review_id)
+
     return recall_id, review_id
 
 
