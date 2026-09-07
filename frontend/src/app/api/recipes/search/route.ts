@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? process.env.BACKEND_URL ?? "https://datatools.sjri.res.in/ADAM";
+import { BACKEND_URL, getBackendAccessToken } from "@/lib/backend";
 
 export async function GET(req: NextRequest) {
-  const auth = req.headers.get("authorization");
+  const token = await getBackendAccessToken();
+  const auth = req.headers.get("authorization") ?? (token ? `Bearer ${token}` : null);
   const q = req.nextUrl.searchParams.get("q") ?? "";
   const pageSize = req.nextUrl.searchParams.get("page_size") ?? "10";
   try {
     const res = await fetch(
-      `${BACKEND}/api/v1/recipes/search?q=${encodeURIComponent(q)}&page_size=${pageSize}`,
+      `${BACKEND_URL}/api/v1/recipes/search?q=${encodeURIComponent(q)}&page_size=${pageSize}`,
       { headers: { ...(auth ? { Authorization: auth } : {}) } }
     );
     const text = await res.text();

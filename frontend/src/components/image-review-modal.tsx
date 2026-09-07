@@ -109,6 +109,10 @@ function newEntry(partial: Partial<PickerEntry> = {}): PickerEntry {
   };
 }
 
+function authHeaders(token?: string) {
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
+}
+
 function initPickers(foods: FoodItem[]): PickerEntry[] {
   if (foods.length === 0) return [newEntry()];
   return foods.map((f) => {
@@ -222,7 +226,7 @@ function RecipeSearchPicker({
   onChange,
   onRemove,
 }: {
-  token: string;
+  token?: string;
   entry: PickerEntry;
   label: string;
   disabled: boolean;
@@ -240,7 +244,7 @@ function RecipeSearchPicker({
   async function loadUnit(code: string, pending: PendingConversion) {
     try {
       const res = await fetch(`/api/recipes/${encodeURIComponent(code)}`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: authHeaders(token),
       });
       if (!res.ok) { onChange({ unitLoading: false }); return; }
       const data = await res.json() as {
@@ -280,7 +284,7 @@ function RecipeSearchPicker({
     debounceRef.current = setTimeout(async () => {
       try {
         const res = await fetch(`/api/recipes/search?q=${encodeURIComponent(q)}&page_size=10`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authHeaders(token),
         });
         if (res.ok) {
           const data = await res.json() as { recipes?: { Recipe_Code: string; Recipe_Name: string; Recipe_Category: string }[] };
@@ -608,7 +612,7 @@ export function ImageReviewModal({
   slotLabel: string;
   dateLabel: string;
   participantId: string;
-  token: string;
+  token?: string;
   onClose: () => void;
   onUpdated: (review: MealImageReview) => void;
 }) {
@@ -630,7 +634,7 @@ export function ImageReviewModal({
       setPlannedError(null);
       try {
         const res = await fetch(`/api/logs/food/${participantId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authHeaders(token),
         });
         if (!res.ok) throw new Error("Failed to load planned meals");
         const data = (await res.json()) as { plan?: PlannedItem[] };
@@ -692,7 +696,7 @@ export function ImageReviewModal({
     const t = setInterval(async () => {
       try {
         const res = await fetch(`/api/feedback/reviews/${review.id}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authHeaders(token),
         });
         if (!res.ok) return;
         const u = (await res.json()) as MealImageReview;
@@ -707,7 +711,7 @@ export function ImageReviewModal({
     const t = setInterval(async () => {
       try {
         const res = await fetch(`/api/feedback/reviews/${review.id}`, {
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authHeaders(token),
         });
         if (!res.ok) return;
         const u = (await res.json()) as MealImageReview;
@@ -722,7 +726,7 @@ export function ImageReviewModal({
     try {
       const res = await fetch(`/api/feedback/reviews/${review.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json", ...authHeaders(token) },
         body: JSON.stringify({ action: act, ...extra }),
       });
       const data = (await res.json()) as MealImageReview & { detail?: string };
