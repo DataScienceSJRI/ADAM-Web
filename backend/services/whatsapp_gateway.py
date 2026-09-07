@@ -73,8 +73,11 @@ class WAHAGateway(WhatsAppGateway):
 
     def send_text(self, phone: str, text: str) -> None:
         if not self._base_url:
-            logger.warning("WAHA_BASE_URL not configured — skipping WhatsApp send to %s", phone)
-            return
+            # Must raise, not silently return — callers (send_whatsapp,
+            # handle_diet_recall_entry) wrap this in try/except and call
+            # mark_sent() right after a clean return, so a silent no-op here
+            # would get logged as a successful send that never actually went out.
+            raise RuntimeError("WAHA_BASE_URL not configured — cannot send WhatsApp message")
         resp = httpx.post(
             f"{self._base_url}/api/sendText",
             json={"session": self._session, "chatId": f"{phone}@c.us", "text": text},

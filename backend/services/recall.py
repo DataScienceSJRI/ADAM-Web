@@ -265,6 +265,20 @@ def log_recall(
             sb.table("DietRecall").insert(row).execute()
             recall_ids.append(recall_id)
 
+        # Score this occasion for personalized WhatsApp feedback (GL,
+        # nutrition variance, streaks) and queue it in WH_Messages — deferred
+        # import to avoid a circular import (whatsapp_feedback_backtest.py
+        # imports from this module). Best-effort: a scoring failure must
+        # never fail the actual recall log, which already succeeded above.
+        try:
+            from whatsapp_feedback_backtest import handle_diet_recall_entry
+            handle_diet_recall_entry(user_id, meal_slot.value, target_date)
+        except Exception:
+            logger.exception(
+                "WhatsApp feedback scoring failed for user_id=%s meal_slot=%s date=%s",
+                user_id, meal_slot.value, target_date,
+            )
+
     return recall_ids
 
 
@@ -529,6 +543,17 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
         }).execute()
 
     sb.table("DietRecallBuffer").delete().eq("ID", diet_recall_id).execute()
+
+    if base_row.get("user_id") and base_row.get("meal_slot") and base_row.get("Date"):
+        try:
+            from whatsapp_feedback_backtest import handle_diet_recall_entry
+            handle_diet_recall_entry(base_row["user_id"], base_row["meal_slot"], base_row["Date"][:10])
+        except Exception:
+            logger.exception(
+                "WhatsApp feedback scoring failed for diet_recall_id=%s (coordinator-approved photo)",
+                diet_recall_id,
+            )
+
     return True
 
 
