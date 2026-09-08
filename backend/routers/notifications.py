@@ -99,6 +99,29 @@ def send_meal_reminders(
     return {"status": "ok", "recipients": results}
 
 
+@router.post("/send-missed-slot")
+def send_missed_slot_messages(
+    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret"),
+):
+    """Find WhatsApp-linked users' occasions whose escalation time just
+    passed with nothing logged for that meal slot, and send a missed-slot
+    message for each one that hasn't already gotten one.
+
+    Call this every 15 minutes from a cron job, same cadence and secret as
+    /send-reminders. Escalation times: snacks gets a reminder at its own due
+    time; breakfast/lunch/dinner instead get a later "did you have X"
+    question at 12:30pm / 3:30pm / 8:30am the next day respectively
+    (see whatsapp_feedback_backtest._MISSED_QUESTION_TIME). Idempotent —
+    safe to call repeatedly, never sends the same occasion's message twice.
+    """
+    if not _CRON_SECRET or x_cron_secret != _CRON_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid or missing cron secret")
+
+    from whatsapp_feedback_backtest import check_missed_slots
+    counts = check_missed_slots()
+    return {"status": "ok", "messages_sent": counts}
+
+
 @router.post("/send-weekly-digest")
 def send_weekly_digest(
     x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret"),

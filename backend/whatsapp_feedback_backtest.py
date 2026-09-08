@@ -998,6 +998,142 @@ def send_image_received_ack(user_id: str, meal_slot: str, occasion_date: str) ->
 
 
 # ---------------------------------------------------------------------------
+# Missed-slot messages — the TIME-BASED counterpart to
+# handle_diet_recall_entry above. Call check_missed_slots() from a cron job
+# (same 15-minute cadence as routers/notifications.py's /send-reminders) to
+# find occasions whose escalation time just passed with nothing logged, and
+# send them. Unlike handle_diet_recall_entry there is no write to react to —
+# this has to go looking for the absence of one instead.
+# ---------------------------------------------------------------------------
+
+_MISSED_SLOT_LOOKBACK_DAYS = 1  # dinner's question fires 8:30am the NEXT day
+
+
+def check_missed_slots(now: datetime | None = None) -> dict[str, int]:
+    """Scores every (user, slot, date) in the last day that had a plan but
+    nothing logged, using the exact same score_missed_occasion() the
+    backtest uses, and inserts+sends any whose escalation time
+    (_missed_reminder_dt for snacks, _MISSED_QUESTION_TIME for breakfast/
+    lunch/dinner) has now passed — same insert-then-send path as
+    handle_diet_recall_entry, via _insert_and_send.
+
+    Idempotent: skips any (user, slot, date, message_type) that already has
+    a WH_Messages row, so calling this again inside the same escalation
+    window (or a late/duplicate cron fire) never double-sends. Returns
+    {message_type: count_sent}.
+    """
+    sb = get_supabase()
+    now = now or datetime.now(IST)
+    candidate_dates = [now.date() - timedelta(days=d) for d in range(_MISSED_SLOT_LOOKBACK_DAYS + 1)]
+    date_strs = [str(d) for d in candidate_dates]
+
+    users_resp = sb.table("WH_Users").select("user_id").not_.is_("activated_at", "null").execute()
+    user_ids = list({r["user_id"] for r in (users_resp.data or []) if r.get("user_id")})
+    if not user_ids:
+        return {}
+
+    prefs_rows = (
+        sb.table("BE_Preference_onboarding_details")
+        .select("user_id, breakfast_time, lunch_time, dinner_time")
+        .in_("user_id", user_ids).execute().data
+    ) or []
+    prefs_by_user = {r["user_id"]: r for r in prefs_rows}
+
+    planned_rows = (
+        sb.table("RecommendationsBackup")
+        .select("user_id, Date, Timings, Food_Name_desc, Food_Qty")
+        .in_("user_id", user_ids).in_("Date", date_strs)
+        .execute().data
+    ) or []
+    planned_items_by_occasion: dict[tuple, list[dict]] = defaultdict(list)
+    for r in planned_rows:
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(str(r.get("Timings") or "").strip())
+        d, code = r.get("Date"), r.get("Food_Name_desc")
+        if not slot or not d or not code:
+            continue
+        key = (r["user_id"], slot, _norm_date(d))
+        planned_items_by_occasion[key].append({"code": str(code).strip(), "qty": r.get("Food_Qty")})
+    if not planned_items_by_occasion:
+        return {}
+
+    recall_rows = (
+        sb.table("DietRecall")
+        .select("user_id, Date, meal_slot")
+        .in_("user_id", user_ids).in_("Date", date_strs)
+        .execute().data
+    ) or []
+    logged_occasions = {
+        (r["user_id"], str(r.get("meal_slot") or "").strip().lower(), _norm_date(r["Date"]))
+        for r in recall_rows if r.get("Date")
+    }
+
+    planned_codes = list({str(r["Food_Name_desc"]).strip() for r in planned_rows if r.get("Food_Name_desc")})
+    base_gl_map = fetch_base_gl_map(sb, planned_codes)
+    portion_map = fetch_portion_map(sb, planned_codes)
+    tag_rows = (
+        sb.table("RecipeTagging").select("Recipe_Code, Description").in_("Recipe_Code", planned_codes).execute().data
+        if planned_codes else []
+    ) or []
+    unit_map = {str(t["Recipe_Code"]).strip(): t.get("Description") for t in tag_rows if t.get("Recipe_Code")}
+    recipe_rows = (
+        sb.table("Recipe").select("Recipe_Code, Recipe_Category, Recipe_Name").in_("Recipe_Code", planned_codes).execute().data
+        if planned_codes else []
+    ) or []
+    recipe_info = {str(r["Recipe_Code"]).strip(): r for r in recipe_rows}
+    recipe_category = {code: info.get("Recipe_Category") for code, info in recipe_info.items()}
+    mapping_rows = sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+
+    existing_rows = (
+        sb.table("WH_Messages")
+        .select("user_id, meal_date, meal_slot, message_type")
+        .in_("user_id", user_ids).in_("meal_date", date_strs)
+        .in_("message_type", ["missed_slot_reminder", "missed_slot_question"])
+        .execute().data
+    ) or []
+    already_sent = {(r["user_id"], r["meal_date"], r["meal_slot"], r["message_type"]) for r in existing_rows}
+
+    counts: dict[str, int] = {}
+    for (uid, slot, d_str), items in planned_items_by_occasion.items():
+        if (uid, slot, d_str) in logged_occasions:
+            continue  # something was logged for this occasion -- not missed
+
+        planned_gl = 0.0
+        has_gl = False
+        for it in items:
+            gl = gl_for_quantity(base_gl_map.get(it["code"]), portion_map.get(it["code"]), it["qty"])
+            if gl is not None:
+                planned_gl += gl
+                has_gl = True
+
+        d = datetime.strptime(d_str, "%Y-%m-%d").date()
+        base_row = {"user_id": uid, "date": d_str, "meal_slot": slot}
+        message = score_missed_occasion(
+            base_row, slot, d, prefs_by_user.get(uid, {}), items,
+            planned_gl if has_gl else None, recipe_category, mapping_rows, recipe_info, now=now,
+        )
+        if message is None:
+            continue  # this slot's escalation time hasn't arrived yet
+
+        key = (uid, message["date"], message["meal_slot"], message["message_type"])
+        if key in already_sent:
+            continue  # already sent this exact missed-slot message once
+
+        row = {
+            "user_id": uid, "message": message["message"], "status": "pending",
+            "meal_date": message["date"], "meal_slot": message["meal_slot"],
+            "message_type": message["message_type"], "meal_source": message["meal_source"],
+            "dishes": message["dishes"], "actual_gl": message["actual_gl"], "planned_gl": message["planned_gl"],
+            "response_status": message["response_status"], "energy_kcal": message["energy_kcal"],
+            "carbs_g": message["carbs_g"], "fibre_g": message["fibre_g"], "scheduled_at": message["sent_at"],
+        }
+        msg_id = _insert_and_send(sb, uid, row)
+        if msg_id is not None:
+            counts[message["message_type"]] = counts.get(message["message_type"], 0) + 1
+
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # Weekly digest — a ONE-WAY summary, no reply needed (deliberately not a
 # poll: the user only wants aggregate stats reinforced, not another channel
 # to monitor for responses). Call send_weekly_digests() from a weekly cron,
@@ -1005,6 +1141,42 @@ def send_image_received_ack(user_id: str, meal_slot: str, occasion_date: str) ->
 # ---------------------------------------------------------------------------
 
 _WEEKLY_DIGEST_WINDOW_DAYS = 7
+
+# Headline nutrients for the weekly digest, by the label build_daily_nutrient_summary
+# (routers/kpi.py) already returns them under.
+_WEEKLY_NUTRIENT_SHORT = {
+    "Energy (kcal)": "Energy", "Protein (g)": "Protein",
+    "Carbohydrate (g)": "Carbs", "Dietary Fibre (g)": "Fibre",
+}
+
+
+def _weekly_nutrient_pct_met(user_id: str, week_start: date, week_end: date) -> dict[str, int]:
+    """% of the FULL week's requirement met — deliberately NOT normalized by
+    how many days were actually logged. An unlogged day still counts against
+    the denominator on purpose: a low number here is meant to read as "log
+    more" as much as "eat more," reinforcing the same logging-compliance
+    push as the rest of this file. Capped at 100 per nutrient — exceeding
+    target isn't something to chase further, so it's not shown as e.g. 280%.
+    Skips a nutrient entirely if there's no requirement data for this user's
+    profile (rather than showing a misleading 0%)."""
+    from routers.kpi import build_daily_nutrient_summary
+
+    totals = {name: {"req": 0.0, "intake": 0.0} for name in _WEEKLY_NUTRIENT_SHORT}
+    d = week_start
+    while d <= week_end:
+        for row in build_daily_nutrient_summary(user_id, str(d)):
+            t = totals.get(row["Nutrient"])
+            if t is None:
+                continue
+            if row["Requirement"] is not None:
+                t["req"] += row["Requirement"]
+            t["intake"] += row["Intake"] or 0
+        d += timedelta(days=1)
+
+    return {
+        _WEEKLY_NUTRIENT_SHORT[name]: min(100, round(v["intake"] / v["req"] * 100))
+        for name, v in totals.items() if v["req"] > 0
+    }
 
 
 def build_weekly_digest(user_id: str, week_end: date) -> dict | None:
@@ -1078,9 +1250,15 @@ def build_weekly_digest(user_id: str, week_end: date) -> dict | None:
     else:
         opener = "This week"
 
+    nutrient_pct = _weekly_nutrient_pct_met(user_id, week_start, week_end)
+    nutrient_line = ""
+    if nutrient_pct:
+        parts = ", ".join(f"{k} {v}%" for k, v in nutrient_pct.items())
+        nutrient_line = f" Nutrient targets met this week: {parts} — logging every meal helps this go up."
+
     message = (
-        f"{opener} — {total_logged}/{total_planned} meals logged, {gl_compliant} on GL target. "
-        f"Here's to next week!"
+        f"{opener} — {total_logged}/{total_planned} meals logged, {gl_compliant} on GL target."
+        f"{nutrient_line} Here's to next week!"
     )
     return {
         "user_id": user_id, "message": message, "status": "pending",
