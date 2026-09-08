@@ -267,11 +267,11 @@ def log_recall(
 
         # Score this occasion for personalized WhatsApp feedback (GL,
         # nutrition variance, streaks) and queue it in WH_Messages — deferred
-        # import to avoid a circular import (whatsapp_feedback_backtest.py
+        # import to avoid a circular import (services.whatsapp_feedback
         # imports from this module). Best-effort: a scoring failure must
         # never fail the actual recall log, which already succeeded above.
         try:
-            from whatsapp_feedback_backtest import handle_diet_recall_entry
+            from services.whatsapp_feedback import handle_diet_recall_entry
             handle_diet_recall_entry(user_id, meal_slot.value, target_date)
         except Exception:
             logger.exception(
@@ -546,7 +546,7 @@ def approve_review_diet_recall(diet_recall_id: str, confirmed_foods: List[dict])
 
     if base_row.get("user_id") and base_row.get("meal_slot") and base_row.get("Date"):
         try:
-            from whatsapp_feedback_backtest import handle_diet_recall_entry
+            from services.whatsapp_feedback import handle_diet_recall_entry
             handle_diet_recall_entry(base_row["user_id"], base_row["meal_slot"], base_row["Date"][:10])
         except Exception:
             logger.exception(
@@ -678,7 +678,7 @@ def log_recall_image(
         _enqueue_post_identification(sb, review_id, image_url_post)
 
     try:
-        from whatsapp_feedback_backtest import send_image_received_ack
+        from services.whatsapp_feedback import send_image_received_ack
         send_image_received_ack(user_id, meal_slot.value, today)
     except Exception:
         logger.exception("Failed to send image-received ack for user_id=%s review_id=%s", user_id, review_id)

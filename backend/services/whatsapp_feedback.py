@@ -27,7 +27,7 @@ Every message carries:
   slot's actual macro/sodium intake (Protein/Carbs/Fat/Fibre/Sodium) diverged
   from what was planned for that slot by >=30% (and above a noise floor).
 
-Usage: python whatsapp_feedback_backtest.py [--days 20] [--output PATH]
+Usage: python -m services.whatsapp_feedback [--days 20] [--output PATH]
 """
 import argparse
 from collections import defaultdict

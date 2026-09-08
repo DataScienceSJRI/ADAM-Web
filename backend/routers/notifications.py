@@ -111,13 +111,13 @@ def send_missed_slot_messages(
     /send-reminders. Escalation times: snacks gets a reminder at its own due
     time; breakfast/lunch/dinner instead get a later "did you have X"
     question at 12:30pm / 3:30pm / 8:30am the next day respectively
-    (see whatsapp_feedback_backtest._MISSED_QUESTION_TIME). Idempotent —
+    (see services.whatsapp_feedback._MISSED_QUESTION_TIME). Idempotent —
     safe to call repeatedly, never sends the same occasion's message twice.
     """
     if not _CRON_SECRET or x_cron_secret != _CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid or missing cron secret")
 
-    from whatsapp_feedback_backtest import check_missed_slots
+    from services.whatsapp_feedback import check_missed_slots
     counts = check_missed_slots()
     return {"status": "ok", "messages_sent": counts}
 
@@ -134,6 +134,6 @@ def send_weekly_digest(
     if not _CRON_SECRET or x_cron_secret != _CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid or missing cron secret")
 
-    from whatsapp_feedback_backtest import send_weekly_digests
+    from services.whatsapp_feedback import send_weekly_digests
     inserted_ids = send_weekly_digests()
     return {"status": "ok", "messages_sent": len(inserted_ids)}
