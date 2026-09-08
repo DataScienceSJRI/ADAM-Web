@@ -997,6 +997,125 @@ def send_image_received_ack(user_id: str, meal_slot: str, occasion_date: str) ->
     return _insert_and_send(sb, user_id, row)
 
 
+# ---------------------------------------------------------------------------
+# Weekly digest — a ONE-WAY summary, no reply needed (deliberately not a
+# poll: the user only wants aggregate stats reinforced, not another channel
+# to monitor for responses). Call send_weekly_digests() from a weekly cron,
+# mirroring routers/notifications.py's /send-reminders pattern.
+# ---------------------------------------------------------------------------
+
+_WEEKLY_DIGEST_WINDOW_DAYS = 7
+
+
+def build_weekly_digest(user_id: str, week_end: date) -> dict | None:
+    """One user's digest for the 7 days ending `week_end` (typically
+    yesterday — the day it's sent hasn't fully happened yet). Returns a
+    WH_Messages-shaped row dict, or None if there's nothing to report (no
+    plan existed at all in the window)."""
+    sb = get_supabase()
+    week_start = week_end - timedelta(days=_WEEKLY_DIGEST_WINDOW_DAYS - 1)
+    start_str, end_str = str(week_start), str(week_end)
+
+    planned_rows = (
+        sb.table("RecommendationsBackup")
+        .select("Date, Timings, Food_Name_desc, Food_Qty")
+        .eq("user_id", user_id).gte("Date", start_str).lte("Date", end_str)
+        .execute().data
+    ) or []
+    if not planned_rows:
+        return None
+
+    planned_codes = list({str(r["Food_Name_desc"]).strip() for r in planned_rows if r.get("Food_Name_desc")})
+    base_gl_map = fetch_base_gl_map(sb, planned_codes)
+    portion_map = fetch_portion_map(sb, planned_codes)
+
+    planned_occasions: set[tuple[str, str]] = set()  # (date, slot)
+    planned_gl_by_occasion: dict[tuple[str, str], float] = defaultdict(float)
+    for r in planned_rows:
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(str(r.get("Timings") or "").strip())
+        d_str = _norm_date(r["Date"])
+        if not slot:
+            continue
+        planned_occasions.add((d_str, slot))
+        gl = gl_for_quantity(base_gl_map.get(str(r.get("Food_Name_desc") or "").strip()), portion_map.get(str(r.get("Food_Name_desc") or "").strip()), r.get("Food_Qty"))
+        if gl is not None:
+            planned_gl_by_occasion[(d_str, slot)] += gl
+
+    recall_rows = (
+        sb.table("DietRecall")
+        .select("Date, meal_slot, GL")
+        .eq("user_id", user_id).gte("Date", start_str).lte("Date", end_str)
+        .execute().data
+    ) or []
+    logged_occasions: set[tuple[str, str]] = set()
+    actual_gl_by_occasion: dict[tuple[str, str], float] = defaultdict(float)
+    for r in recall_rows:
+        slot = str(r.get("meal_slot") or "").strip().lower()
+        if slot not in MEAL_SLOTS:
+            continue
+        d_str = _norm_date(r["Date"])
+        logged_occasions.add((d_str, slot))
+        if r.get("GL") is not None:
+            actual_gl_by_occasion[(d_str, slot)] += float(r["GL"])
+
+    total_planned = len(planned_occasions)
+    total_logged = len(planned_occasions & logged_occasions)
+
+    gl_compliant = 0
+    for occ in planned_occasions & logged_occasions:
+        planned_gl = planned_gl_by_occasion.get(occ)
+        actual_gl = actual_gl_by_occasion.get(occ)
+        if planned_gl is None or actual_gl is None:
+            continue
+        tolerance = max(_GL_TOLERANCE_FLOOR, planned_gl * _GL_TOLERANCE_PCT)
+        if actual_gl - planned_gl <= tolerance:
+            gl_compliant += 1
+
+    if total_logged == total_planned and total_planned > 0:
+        opener = "🎉 Perfect week"
+    elif total_logged >= total_planned * 0.7:
+        opener = "👍 Solid week"
+    else:
+        opener = "This week"
+
+    message = (
+        f"{opener} — {total_logged}/{total_planned} meals logged, {gl_compliant} on GL target. "
+        f"Here's to next week!"
+    )
+    return {
+        "user_id": user_id, "message": message, "status": "pending",
+        "meal_date": end_str, "meal_slot": "weekly_summary", "message_type": "weekly_digest",
+        "meal_source": None, "dishes": None, "actual_gl": None, "planned_gl": None,
+        "response_status": "Positive" if total_planned and total_logged / total_planned >= 0.7 else "Negative",
+        "energy_kcal": None, "carbs_g": None, "fibre_g": None,
+        "scheduled_at": _fmt_ist(datetime.now(IST)),
+    }
+
+
+def send_weekly_digests(week_end: date | None = None) -> list[int]:
+    """Builds and sends the weekly digest for every real study participant.
+    Call this once a week (e.g. Sunday evening) from a cron job — see
+    routers/notifications.py's send_weekly_digest endpoint."""
+    sb = get_supabase()
+    week_end = week_end or (date.today() - timedelta(days=1))
+
+    participants = sb.table("UserRoles").select("user_id, participant_id").execute().data or []
+    user_ids = [
+        p["user_id"] for p in participants
+        if str(p.get("participant_id") or "").strip().upper().startswith("A")
+    ]
+
+    inserted_ids = []
+    for user_id in user_ids:
+        row = build_weekly_digest(user_id, week_end)
+        if row is None:
+            continue
+        msg_id = _insert_and_send(sb, user_id, row)
+        if msg_id is not None:
+            inserted_ids.append(msg_id)
+    return inserted_ids
+
+
 def build_backtest(days: int) -> pd.DataFrame:
     sb = get_supabase()
     end_date = date.today()

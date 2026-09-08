@@ -97,3 +97,20 @@ def send_meal_reminders(
 
     results = _send_meal_reminders(window_minutes=window_minutes)
     return {"status": "ok", "recipients": results}
+
+
+@router.post("/send-weekly-digest")
+def send_weekly_digest(
+    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret"),
+):
+    """Send each real study participant a one-way WhatsApp summary of the
+    past 7 days (meals logged, GL-target hits) — no reply expected, deliberately
+    not a poll. Call this once a week (e.g. Sunday evening) from a cron job.
+    Protected by X-Cron-Secret, same as /send-reminders.
+    """
+    if not _CRON_SECRET or x_cron_secret != _CRON_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid or missing cron secret")
+
+    from whatsapp_feedback_backtest import send_weekly_digests
+    inserted_ids = send_weekly_digests()
+    return {"status": "ok", "messages_sent": len(inserted_ids)}
