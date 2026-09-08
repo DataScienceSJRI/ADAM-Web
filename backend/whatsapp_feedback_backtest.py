@@ -1007,19 +1007,36 @@ def send_image_received_ack(user_id: str, meal_slot: str, occasion_date: str) ->
 # ---------------------------------------------------------------------------
 
 _MISSED_SLOT_LOOKBACK_DAYS = 1  # dinner's question fires 8:30am the NEXT day
+# How overdue an escalation is allowed to be and still get sent. Keeps this
+# strictly forward-looking from whenever it's first turned on: an occasion
+# whose escalation time is further in the past than this (e.g. everything
+# that was already overdue before the feature existed) is skipped forever,
+# never backfilled -- only occasions that become due AFTER this has started
+# running (within one cron cycle's slack) ever get a message. Wider than the
+# 15-minute cron cadence to tolerate a delayed/missed cron tick.
+_MISSED_SLOT_WINDOW_MINUTES = 20
 
 
-def check_missed_slots(now: datetime | None = None) -> dict[str, int]:
+def check_missed_slots(
+    now: datetime | None = None,
+    window_minutes: int = _MISSED_SLOT_WINDOW_MINUTES,
+    user_ids: list[str] | None = None,
+) -> dict[str, int]:
     """Scores every (user, slot, date) in the last day that had a plan but
     nothing logged, using the exact same score_missed_occasion() the
     backtest uses, and inserts+sends any whose escalation time
     (_missed_reminder_dt for snacks, _MISSED_QUESTION_TIME for breakfast/
-    lunch/dinner) has now passed — same insert-then-send path as
-    handle_diet_recall_entry, via _insert_and_send.
+    lunch/dinner) fell within the last `window_minutes` -- i.e. just became
+    due, not any time further in the past. This is what keeps the feature
+    forward-only: turning it on today never dredges up and messages users
+    about days-old misses from before it existed.
 
     Idempotent: skips any (user, slot, date, message_type) that already has
     a WH_Messages row, so calling this again inside the same escalation
-    window (or a late/duplicate cron fire) never double-sends. Returns
+    window (or a late/duplicate cron fire) never double-sends.
+
+    `user_ids`, if given, restricts scoring to exactly those users (e.g. for
+    a scoped manual test) instead of every WhatsApp-activated user. Returns
     {message_type: count_sent}.
     """
     sb = get_supabase()
@@ -1027,8 +1044,9 @@ def check_missed_slots(now: datetime | None = None) -> dict[str, int]:
     candidate_dates = [now.date() - timedelta(days=d) for d in range(_MISSED_SLOT_LOOKBACK_DAYS + 1)]
     date_strs = [str(d) for d in candidate_dates]
 
-    users_resp = sb.table("WH_Users").select("user_id").not_.is_("activated_at", "null").execute()
-    user_ids = list({r["user_id"] for r in (users_resp.data or []) if r.get("user_id")})
+    if user_ids is None:
+        users_resp = sb.table("WH_Users").select("user_id").not_.is_("activated_at", "null").execute()
+        user_ids = list({r["user_id"] for r in (users_resp.data or []) if r.get("user_id")})
     if not user_ids:
         return {}
 
@@ -1106,13 +1124,20 @@ def check_missed_slots(now: datetime | None = None) -> dict[str, int]:
                 has_gl = True
 
         d = datetime.strptime(d_str, "%Y-%m-%d").date()
+        prefs = prefs_by_user.get(uid, {})
+        send_dt = _missed_reminder_dt(d, prefs, slot) if slot == "snacks" else _missed_question_dt(d, slot)
+        if send_dt > now:
+            continue  # this slot's escalation time hasn't arrived yet
+        if (now - send_dt) > timedelta(minutes=window_minutes):
+            continue  # escalation was already overdue before this window -- forward-only, never backfilled
+
         base_row = {"user_id": uid, "date": d_str, "meal_slot": slot}
         message = score_missed_occasion(
-            base_row, slot, d, prefs_by_user.get(uid, {}), items,
+            base_row, slot, d, prefs, items,
             planned_gl if has_gl else None, recipe_category, mapping_rows, recipe_info, now=now,
         )
         if message is None:
-            continue  # this slot's escalation time hasn't arrived yet
+            continue  # defensive: score_missed_occasion agrees this isn't due yet
 
         key = (uid, message["date"], message["meal_slot"], message["message_type"])
         if key in already_sent:
