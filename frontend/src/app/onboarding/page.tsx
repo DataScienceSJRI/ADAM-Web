@@ -6,10 +6,11 @@ import { createClient } from "@/lib/supabase/client";
 import { BasicDetailsForm, type BasicDetails } from "@/components/basic-details-form";
 import { HealthDetailsForm, type HealthDetails, HEALTH_DETAILS_DEFAULT } from "@/components/health-details-form";
 import { MealPreferencesForm, type MealSelection } from "@/components/meal-preferences-form";
+import { PortionSizeForm, type PortionSizeAnswers, PORTION_SIZE_DEFAULT } from "@/components/portion-size-form";
 import { ReviewStep } from "@/components/review-step";
 import { WhatsAppLinkStep } from "@/components/whatsapp-link-step";
 
-const STEPS = ["Basic Details", "Health Details", "Meal Preferences", "Review & Confirm", "Link WhatsApp"];
+const STEPS = ["Basic Details", "Health Details", "Meal Preferences", "Portion Sizes", "Review & Confirm", "Link WhatsApp"];
 
 export default function OnboardingPage() {
   return (
@@ -27,6 +28,7 @@ function OnboardingFlow() {
   const [basicDetails, setBasicDetails] = useState<BasicDetails | null>(null);
   const [healthDetails, setHealthDetails] = useState<HealthDetails>(HEALTH_DETAILS_DEFAULT);
   const [selections, setSelections] = useState<MealSelection[]>([]);
+  const [portionSize, setPortionSize] = useState<PortionSizeAnswers>(PORTION_SIZE_DEFAULT);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingRedirect, setPendingRedirect] = useState<string | null>(null);
@@ -40,6 +42,11 @@ function OnboardingFlow() {
   function handleHealthDetailsNext(data: HealthDetails) {
     setHealthDetails(data);
     setStep(2);
+  }
+
+  function handlePortionSizeNext(data: PortionSizeAnswers) {
+    setPortionSize(data);
+    setStep(4);
   }
 
   async function handleSubmit() {
@@ -119,6 +126,52 @@ function OnboardingFlow() {
       console.warn("Could not save preference details:", pdError.message);
     }
 
+    const toInt = (s: string) => {
+      const n = parseInt(s, 10);
+      return Number.isFinite(n) ? n : null;
+    };
+    const { error: portionError } = await supabase
+      .from("Usual_Portion_Size_Answers")
+      .insert({
+        user_id: targetUserId,
+        dosa: toInt(portionSize.dosa),
+        idli: toInt(portionSize.idli),
+        chapati: toInt(portionSize.chapati),
+        roti: toInt(portionSize.roti),
+        rice_cups: portionSize.rice_cups || null,
+        millet_rice_cups: portionSize.millet_rice_cups || null,
+        khichdi_cups: portionSize.khichdi_cups || null,
+        pongal_cups: portionSize.pongal_cups || null,
+        upma_cups: portionSize.upma_cups || null,
+        dal_sambar_curry_cups: portionSize.dal_sambar_curry_cups || null,
+        vegetable_side_dish_cups: portionSize.vegetable_side_dish_cups || null,
+        tea_cups_day: toInt(portionSize.tea_cups_day),
+        coffee_cups_day: toInt(portionSize.coffee_cups_day),
+        milk_glasses_day: toInt(portionSize.milk_glasses_day),
+        buttermilk_glasses_day: toInt(portionSize.buttermilk_glasses_day),
+        usual_serving_size: portionSize.usual_serving_size || null,
+        eggs_count: toInt(portionSize.eggs_count),
+        paneer_cubes: toInt(portionSize.paneer_cubes),
+        chicken_pieces: toInt(portionSize.chicken_pieces),
+        fish_pieces: toInt(portionSize.fish_pieces),
+        meat_pieces: toInt(portionSize.meat_pieces),
+        fruits_servings_day: portionSize.fruits_servings_day || null,
+        repeats_meal_same_similar_gt1x_day: portionSize.repeats_meal_same_similar_gt1x_day || null,
+        repeated_meals:
+          portionSize.repeats_meal_same_similar_gt1x_day === "Yes" && portionSize.repeated_meals.length > 0
+            ? portionSize.repeated_meals.join(", ")
+            : null,
+        repeats_same_main_food_gt1x_day: portionSize.repeats_same_main_food_gt1x_day || null,
+        repeated_food_name:
+          portionSize.repeats_same_main_food_gt1x_day === "Yes" && portionSize.repeated_food_name.trim()
+            ? portionSize.repeated_food_name.trim()
+            : null,
+        repeats_same_curry_dal_side_gt1x_day: portionSize.repeats_same_curry_dal_side_gt1x_day || null,
+      });
+    if (portionError) {
+      console.warn("Could not save portion size answers:", portionError.message);
+    }
+
     if (selections.length > 0) {
       const { error: prefError } = await supabase
         .from("BE_Preference_onboarding")
@@ -152,7 +205,7 @@ function OnboardingFlow() {
 
     setPendingRedirect(redirectUrl);
     setLinkTargetUserId(targetUserId);
-    setStep(4);
+    setStep(5);
 
     void fetch("/api/plan", {
       method: "POST",
@@ -248,11 +301,19 @@ function OnboardingFlow() {
       )}
 
       {step === 3 && (
+        <PortionSizeForm
+          defaultValues={portionSize}
+          onBack={() => setStep(2)}
+          onNext={handlePortionSizeNext}
+        />
+      )}
+
+      {step === 4 && (
         <ReviewStep
           basicDetails={basicDetails!}
           healthDetails={healthDetails}
           selections={selections}
-          onBack={() => setStep(2)}
+          onBack={() => setStep(3)}
           onEditBasicDetails={() => setStep(0)}
           onEditHealthDetails={() => setStep(1)}
           onSubmit={handleSubmit}
@@ -261,7 +322,7 @@ function OnboardingFlow() {
         />
       )}
 
-      {step === 4 && linkTargetUserId && (
+      {step === 5 && linkTargetUserId && (
         <WhatsAppLinkStep
           userId={linkTargetUserId}
           displayName={participantUserId ?? undefined}
