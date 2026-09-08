@@ -42,11 +42,16 @@ function LoginForm() {
     const supabase = createClient();
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
       if (event === "PASSWORD_RECOVERY") {
-        router.push("/reset-password");
+        // Hard navigation, not router.push — the browser client just wrote
+        // the new session to cookies, and a soft client-side transition can
+        // hit middleware.ts before that write is visible to the next
+        // request, bouncing back to /login as if unauthenticated. A full
+        // page load guarantees the fresh cookies are sent.
+        window.location.href = "/reset-password";
       }
     });
     return () => subscription.unsubscribe();
-  }, [router]);
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
