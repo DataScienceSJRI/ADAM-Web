@@ -78,7 +78,7 @@ def run_lp(
 
     required_cols = [
         "Recipe_Code","Recipe_Name","Recipe_Category", "Code_cooccurence", "Preferred_SubCategory_code", "Preference_Row_ID", "Meal_Time", "Dish_Type",
-        "Vegetarian",
+        "Vegetarian", "Ovo-vegetarian",
         "GL", "Avg_TimeAbove160_pct", "Avg_Delta_Glucose", "Energy_ENERC_Kcal", "Energy_ENERC_KJ",
         "Protein_PROTCNT_g", "TotalFat_FATCE_g", "TotalDietaryFibre_FIBTG_g", "CalciumCa_CA_mg", "ZincZn_ZN_mg",
         "IronFe_FE_mg", "MagnesiumMg_MG_mg", "VA_RAE_mcg", "TotalFolatesB9_FOLSUM_mcg", "VB12_mcg",
@@ -118,6 +118,23 @@ def run_lp(
     for col in nutrient_cols:
         if col in candidates.columns:
             candidates[col] = pd.to_numeric(candidates[col], errors="coerce").fillna(0)
+
+    # Sanity-clip Sodium_mg: a subset of the source Recipe nutrient data has
+    # physically implausible sodium values (up to 35,580mg/serving, for a
+    # plain dosa) — confirmed data/unit errors affecting a batch of entries
+    # across unrelated dish types (a coconut-water chutney and a smoothie
+    # both show 10,000+mg), not a real food property. Cholesterol was
+    # checked too and found clean (its high values are all legitimately
+    # egg/organ-meat dishes) — this clip is sodium-only. Values above the
+    # ceiling are replaced with the column median rather than dropped, so
+    # the LP's sodium constraints and downstream reporting aren't driven by
+    # corrupted numbers without having to hand-identify every bad row.
+    if "Sodium_mg" in candidates.columns:
+        _sodium_ceiling = 3000.0
+        _sodium_median = float(candidates["Sodium_mg"].median())
+        _sodium_outliers = candidates["Sodium_mg"] > _sodium_ceiling
+        if _sodium_outliers.any():
+            candidates.loc[_sodium_outliers, "Sodium_mg"] = _sodium_median
 
     energy_kj_raw = candidates["Energy_ENERC_KJ"] if "Energy_ENERC_KJ" in candidates.columns else pd.Series(np.nan, index=candidates.index)
     energy_kcal_raw = candidates["Energy_ENERC_Kcal"] if "Energy_ENERC_Kcal" in candidates.columns else pd.Series(np.nan, index=candidates.index)
@@ -195,31 +212,52 @@ def run_lp(
     weekly_min_100 = weekly_min.copy()
     
     eff_daily = None
-    upper_mult = 1.2  
-    
+    upper_mult = 1.2
+
+    # Weeks 1-2 taper: routers/plan.py sets profile["_bmi_age_reduction_strength"]
+    # to dampen how much of the BMI/age downward scaling below actually
+    # applies — 0.0 skips it entirely (week 1: target stays the full,
+    # unreduced TDEE-based number), 0.5 applies half of each normal cut
+    # (week 2), 1.0 (the default when unset, i.e. week 3+) is the full,
+    # untouched system behavior. Blending is per reduction step, so e.g. the
+    # BMI≥25 rule's normal 30%-cut (×0.7) becomes a 15%-cut (×0.85) at 0.5.
+    reduction_strength = float((profile or {}).get("_bmi_age_reduction_strength", 1.0))
+
+    def _dampened_mult(normal_mult: float) -> float:
+        return 1.0 - reduction_strength * (1.0 - normal_mult)
+
     if daily_energy_kcal is not None:
         eff_daily = float(daily_energy_kcal)
-        if profile is not None:
+        if profile is not None and reduction_strength > 0:
             _bmi = profile.get("bmi")
             if _bmi is not None:
                 _bmi_val = float(_bmi)
+                # Both BMI brackets now cut by the same 10% (x0.9) at full
+                # strength -- previously 20%/30% (x0.8/x0.7) depending on how
+                # far over the threshold. Still phased in by reduction_strength
+                # same as before (0%/50%/100% across week1/2/3), just a
+                # smaller ceiling on the cut itself.
                 if _bmi_val >= 23.0 and _bmi_val < 25.0:
-                    eff_daily = eff_daily * 0.8 
-                    weekly_min = {k: v * 0.8 for k, v in weekly_min.items()}
+                    m = _dampened_mult(0.9)
+                    eff_daily = eff_daily * m
+                    weekly_min = {k: v * m for k, v in weekly_min.items()}
                 if _bmi_val >= 25.0:
-                    eff_daily = eff_daily * 0.7 
-                    weekly_min = {k: v * 0.7 for k, v in weekly_min.items()}
+                    m = _dampened_mult(0.9)
+                    eff_daily = eff_daily * m
+                    weekly_min = {k: v * m for k, v in weekly_min.items()}
 
-        if profile is not None:
+        if profile is not None and reduction_strength > 0:
             _age = profile.get("age")
             if _age is not None:
                 _age_val = float(_age)
                 if _age_val > 60:
-                    eff_daily = eff_daily * 0.9 
-                    weekly_min = {k: v * 0.9 for k, v in weekly_min.items()}
+                    m = _dampened_mult(0.9)
+                    eff_daily = eff_daily * m
+                    weekly_min = {k: v * m for k, v in weekly_min.items()}
                 elif _age_val > 50:
-                    eff_daily = eff_daily * 0.95 
-                    weekly_min = {k: v * 0.95 for k, v in weekly_min.items()}
+                    m = _dampened_mult(0.95)
+                    eff_daily = eff_daily * m
+                    weekly_min = {k: v * m for k, v in weekly_min.items()}
 
     slot_to_ids: Dict[Tuple[str, str], List[int]] = {}
 
@@ -422,65 +460,204 @@ def run_lp(
                     })
         _write_debug_csv(pd.DataFrame(pairing_debug_rows), "pairing_constraints_debug.csv")
 
+    # First-weeks portion taper: routers/plan.py stashes (lb, ub) overrides
+    # for a plan's early weeks, raising the *minimum* serving so the LP is
+    # forced toward larger real-world portions (matching what users already
+    # tend to eat) instead of just permitting them — a higher upper bound
+    # alone wouldn't change anything, since the GL-minimizing objective would
+    # still settle on the smallest feasible serving. Three independent
+    # profile keys since Main, Main2/Main3, and Snacks can each need a
+    # different range: _main_taper_bounds (Dish_Type=="Main" only),
+    # _other_taper_bounds (Main2/Main3), _snack_taper_bounds (Snacks). Falls
+    # back to the flat _portion_taper_bounds (both Main and Main2/Main3
+    # together) when the per-dish-type keys aren't set, then to the normal
+    # system default once routers/plan.py stops setting any override.
+    main_taper_bounds = (profile or {}).get("_main_taper_bounds")
+    other_taper_bounds = (profile or {}).get("_other_taper_bounds")
+    taper_bounds = (profile or {}).get("_portion_taper_bounds")
+    snack_taper_bounds = (profile or {}).get("_snack_taper_bounds")
+
     for d in days:
         for idx, row in candidates.iterrows():
             i = int(idx)
             meal_time = str(row.get("Meal_Time", ""))
-            lb, ub = snack_serving_bounds if meal_time == "Snacks" else non_snack_serving_bounds
+            dish_type = str(row.get("Dish_Type", "")).strip()
+            if meal_time == "Snacks":
+                lb, ub = snack_taper_bounds if snack_taper_bounds else snack_serving_bounds
+            elif dish_type in ("Optional", "Beverage"):
+                # Fixed regardless of week/taper — a beverage/side attached
+                # to a main meal (e.g. Black Coffee alongside Breakfast) was
+                # otherwise inheriting the wide Main2/Main3 taper range,
+                # letting it scale up to "2 glasses of coffee" in week 1.
+                lb, ub = snack_serving_bounds
+            elif dish_type == "Main" and main_taper_bounds:
+                lb, ub = main_taper_bounds
+            elif dish_type != "Main" and other_taper_bounds:
+                lb, ub = other_taper_bounds
+            elif taper_bounds:
+                lb, ub = taper_bounds
+            else:
+                lb, ub = non_snack_serving_bounds
             model += x[(d, i)] <= float(ub) * y[(d, i)]
             model += x[(d, i)] >= float(lb) * y[(d, i)]
 
-    if per_meal_gl_cap is not None:
-        pmeal = float(per_meal_gl_cap)
-        for d in days:
-            for _, slot_row in required_slots.iterrows():
-                slot = (str(slot_row["Meal_Time"]), str(slot_row["Dish_Type"]))
-                ids = slot_to_ids.get(slot, [])
-                if not ids:
-                    continue
+    # Early-week GL cap/floor relaxation: routers/plan.py overrides these via
+    # profile so weeks 1-2 can carry the bigger mandated portions above
+    # without the caps/floors contradicting the serving bounds set above.
+    # _per_meal_gl_cap_by_slot lets a week tighten specific meal times (e.g.
+    # Breakfast) independently of the flat fallback, since a single uniform
+    # cap wasn't enough to keep every slot's realized GL tapering down
+    # cleanly week over week — some slots settle well under a loose flat cap
+    # regardless, while others need a tighter one to actually move.
+    # _per_meal_gl_cap_override / _per_day_gl_cap_override (below) are part of
+    # TAPER_OVERRIDE_KEYS in routers/plan.py and get popped by the
+    # retry-without-taper fallback if the first solve fails — fine for a
+    # taper-week override, wrong for a permanent per-user override (which
+    # should survive that retry). _user_per_meal_gl_cap_override /
+    # _user_per_day_gl_cap_override are the same mechanism under distinct
+    # names outside TAPER_OVERRIDE_KEYS, so a per-user override (e.g. A002's
+    # hard-mandate accommodation) isn't silently stripped mid-retry.
+    effective_per_meal_gl_cap = (
+        (profile or {}).get("_user_per_meal_gl_cap_override")
+        or (profile or {}).get("_per_meal_gl_cap_override", per_meal_gl_cap)
+    )
+    per_meal_gl_cap_by_slot = (profile or {}).get("_per_meal_gl_cap_by_slot") or {}
+    for d in days:
+        for _, slot_row in required_slots.iterrows():
+            meal_time = str(slot_row["Meal_Time"])
+            slot = (meal_time, str(slot_row["Dish_Type"]))
+            ids = slot_to_ids.get(slot, [])
+            if not ids:
+                continue
+            pmeal = per_meal_gl_cap_by_slot.get(meal_time, effective_per_meal_gl_cap)
+            if pmeal is not None:
                 model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in ids) <= float(pmeal)
 
-    if per_day_gl_cap is not None:
-        pday = float(per_day_gl_cap)
+    effective_per_day_gl_cap = (
+        (profile or {}).get("_user_per_day_gl_cap_override")
+        or (profile or {}).get("_per_day_gl_cap_override", per_day_gl_cap)
+    )
+    if effective_per_day_gl_cap is not None:
+        pday = float(effective_per_day_gl_cap)
         for d in days:
             model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in candidates.index) <= float(pday)
 
-    # Breakfast minimum GL: each day's breakfast must contribute at least 15 GL units
+    # Per-meal minimum GL — normally Breakfast/Dinner only, floor 15; weeks 1
+    # can raise the floor and extend it to Lunch too via profile overrides.
+    # _meal_gl_floor_by_slot allows a per-slot floor (e.g. keeping week 2's
+    # Dinner floor high enough that it doesn't dip below week 3's typical
+    # value), independent of the flat _meal_gl_floor_override fallback.
+    meal_gl_floor = float((profile or {}).get("_meal_gl_floor_override", 15.0))
+    meal_gl_floor_by_slot = (profile or {}).get("_meal_gl_floor_by_slot") or {}
+    include_lunch_gl_floor = bool((profile or {}).get("_meal_gl_floor_include_lunch"))
+
     bf_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "breakfast"]
     if bf_ids:
+        bf_floor = float(meal_gl_floor_by_slot.get("Breakfast", meal_gl_floor))
         for d in days:
-            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in bf_ids) >= 15.0
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in bf_ids) >= bf_floor
 
-    # Dinner minimum GL: each day's dinner must contribute at least 15 GL units
     d_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "dinner"]
     if d_ids:
+        dn_floor = float(meal_gl_floor_by_slot.get("Dinner", meal_gl_floor))
         for d in days:
-            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in d_ids) >= 15.0
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in d_ids) >= dn_floor
 
-    # Dinner minimum GL: each day's dinner must contribute at least 15 GL units
+    ln_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "lunch"]
+    if include_lunch_gl_floor and ln_ids:
+        for d in days:
+            model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in ln_ids) >= meal_gl_floor
+
+    # Snacks maximum GL: each day's snacks must not exceed 20 GL units
     s_ids = [i for i in candidates.index if str(candidates.loc[i, "Meal_Time"]).strip().lower() == "snacks"]
     if s_ids:
         for d in days:
             model += lpSum(float(candidates.loc[i, "GL"]) * x[(d, int(i))] for i in s_ids) <= 20.0
+
+    # Meal-to-meal energy balance: without this, a day's total energy can
+    # concentrate heavily in one meal (e.g. Lunch far outweighing Breakfast)
+    # even when the day's aggregate energy target is met — part of why
+    # per-meal-slot averages don't taper cleanly week over week even though
+    # day-level totals do. Bounds are a % of that day's own realized total
+    # (not a fixed kcal number), so they scale correctly across users/weeks
+    # without per-week tuning. With snacks: each of Breakfast/Lunch/Dinner
+    # gets 18-38%, Snacks gets 4-17%. Without snacks: each of the three
+    # mains gets 22-42%. Soft (penalized slack), not hard — a hard version
+    # of this made even the plain baseline case infeasible (timed out at
+    # 600s with no usable menu) once stacked on top of the GL caps/floors
+    # and every other existing constraint. Bands/penalty weight (35) tuned
+    # as a middle ground between an earlier tight version (50 weight, 20-35%/
+    # 25-40% bands) that reliably balanced meals but took 600s+, and a looser
+    # one (20 weight, 15-40%/20-45% bands) that solved in ~110s but allowed
+    # large violations (up to 55%) — the solver is
+    # nudged toward balance but can still produce a valid plan quickly.
+    meal_balance_penalty_terms = []
+    if "Energy_ENERC_Kcal" in candidates.columns:
+        has_snacks_slot = bool(s_ids) or any(
+            str(mt).strip().lower() == "snacks" for mt in required_slots["Meal_Time"].unique()
+        )
+        if has_snacks_slot:
+            main_lo, main_hi = 0.18, 0.38
+        else:
+            main_lo, main_hi = 0.22, 0.42
+        meal_balance_penalty_weight = 35.0
+
+        for d in days:
+            daily_total_kcal = lpSum(
+                float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in candidates.index
+            )
+            for slot_name, meal_ids in (("Breakfast", bf_ids), ("Lunch", ln_ids), ("Dinner", d_ids)):
+                if not meal_ids:
+                    continue
+                meal_kcal = lpSum(float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in meal_ids)
+                safe_slot = slot_name.replace(" ", "_")
+                under = LpVariable(f"meal_balance_under_{safe_slot}_{d}", lowBound=0)
+                over = LpVariable(f"meal_balance_over_{safe_slot}_{d}", lowBound=0)
+                model += meal_kcal + under >= main_lo * daily_total_kcal
+                model += meal_kcal - over <= main_hi * daily_total_kcal
+                meal_balance_penalty_terms.append(meal_balance_penalty_weight * (under + over))
+
+            if has_snacks_slot and s_ids:
+                snack_kcal = lpSum(float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in s_ids)
+                sn_under = LpVariable(f"meal_balance_under_Snacks_{d}", lowBound=0)
+                sn_over = LpVariable(f"meal_balance_over_Snacks_{d}", lowBound=0)
+                model += snack_kcal + sn_under >= 0.04 * daily_total_kcal
+                model += snack_kcal - sn_over <= 0.17 * daily_total_kcal
+                meal_balance_penalty_terms.append(meal_balance_penalty_weight * (sn_under + sn_over))
 
 
 
     # =================================================================
     # OPTIMIZED SOFT PENALTY + MULTI-LAYER DYNAMIC VARIETY CONTROLS
     # =================================================================
-    recipe_penalty_weight = 2000.0   
-    category_penalty_weight = 1000.0 
+    recipe_penalty_weight = 2000.0
+    category_penalty_weight = 1000.0
     variety_penalties = []
 
     # Pre-calculate unique recipe availability per slot for the dynamic guardrails
     slot_recipe_counts = candidates.groupby(["Meal_Time", "Dish_Type"])["Recipe_Code"].nunique().to_dict()
+
+    # Per-user override: profile["_boiled_egg_daily_hard"] (A002-specific) —
+    # exempts "Boiled egg" recipe codes from every repetition ceiling below
+    # (per-slot hard cap, per-slot soft penalty, global per-recipe cap) and
+    # hard-mandates at least one boiled-egg selection every day. Scoped to
+    # this recipe name only so no other user or recipe is affected.
+    boiled_egg_daily_hard = bool((profile or {}).get("_boiled_egg_daily_hard"))
+    boiled_egg_ids: set = set()
+    if boiled_egg_daily_hard and "Recipe_Name" in candidates.columns:
+        boiled_egg_ids = set(
+            int(i) for i in candidates.index
+            if str(candidates.loc[i, "Recipe_Name"]).strip().lower() == "boiled egg"
+        )
 
     # 1) Recipe Repetition: Combined Soft Penalty + Dynamic Hard Ceiling
     for (meal_time, dish_type, recipe_code), group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
         ids = [int(i) for i in group_df.index.tolist()]
         if not ids:
             continue
-            
+        if boiled_egg_ids and set(ids) <= boiled_egg_ids:
+            continue  # boiled egg exempted from repetition ceilings for this user
+
         # --- LAYER A: Dynamic Hard Guardrail ---
         # Look up how many unique recipes are competing for this specific slot
         unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
@@ -514,6 +691,8 @@ def run_lp(
     for recipe_code, recipe_df in candidates.groupby("Recipe_Code", dropna=False):
         non_snack_ids = [int(i) for i in recipe_df.index.tolist()
                          if str(candidates.loc[i, "Dish_Type"]).strip().lower() != "snacks"]
+        if boiled_egg_ids and set(non_snack_ids) <= boiled_egg_ids:
+            continue  # boiled egg exempted from the global cap for this user
         if non_snack_ids:
             model += lpSum(y[(d, i)] for d in days for i in non_snack_ids) <= global_recipe_cap
 
@@ -647,9 +826,47 @@ def run_lp(
         daily_carb_floor = min(130.0, 0.45 * float(eff_daily) / 4.0)
     weekly_min["Carbohydrate_g"] = daily_carb_floor * float(n_days)
 
+    # Protein is no longer floored from the EAR table at all — it's now
+    # regulated directly by body-weight bounds instead (1.0-1.4g/kg/day),
+    # replacing both the EAR-based floor and the old Protein/Energy ratio
+    # band (10-20% of energy, removed above). Popped before the generic
+    # weekly_min soft-penalty loop below so it never re-enters as an EAR
+    # floor; the g/kg bounds are applied as their own hard constraint further
+    # down (candidates["Prot_g"]/PROTEIN_G_PER_KG_MIN/MAX).
+    weekly_min.pop("Protein_PROTCNT_g", None)
+
     nutrient_slacks = {}
     penalty_terms = []
     penalty_weight = 100.0
+
+    # Fiber: three-tier bound, for all users — popped out of the generic
+    # weekly_min soft-penalty loop below, same treatment as protein above.
+    #   - Hard floor at EAR*1.3 (mandated, no slack) — this is the level that
+    #     stays feasible even under week1's taper bounds (EAR*1.5 as a hard
+    #     floor was found to conflict with A004's week1 taper, forcing an
+    #     unwanted retry-to-defaults that silently cancelled the taper).
+    #   - Hard ceiling at EAR*1.7 (mandated, no slack) — prevents fiber
+    #     climbing arbitrarily high once it's no longer the binding floor.
+    #   - Soft target at EAR*1.5 (penalized shortfall, not hard) — still
+    #     pushes the solver toward the higher fiber level whenever the rest
+    #     of the model has room for it, without making 1.5x a hard
+    #     requirement that can conflict with taper bounds.
+    # This is separate from (and in addition to) the existing per-day
+    # 14g/1000kcal and gender-based (25g women / 30g men) fiber floors.
+    fiber_ear_weekly = weekly_min.pop("TotalDietaryFibre_FIBTG_g", None)
+    if fiber_ear_weekly and "TotalDietaryFibre_FIBTG_g" in candidates.columns:
+        fiber_hard_min_g = float(fiber_ear_weekly) * 1.3
+        fiber_hard_max_g = float(fiber_ear_weekly) * 1.7
+        fiber_soft_target_g = float(fiber_ear_weekly) * 1.5
+        weekly_fiber = lpSum(
+            float(candidates.loc[i, "TotalDietaryFibre_FIBTG_g"]) * x[(d, int(i))]
+            for d in days for i in candidates.index
+        )
+        model += weekly_fiber >= fiber_hard_min_g
+        model += weekly_fiber <= fiber_hard_max_g
+        fiber_shortfall = LpVariable("fiber_shortfall_below_1_5x_ear", lowBound=0)
+        model += weekly_fiber + fiber_shortfall >= fiber_soft_target_g
+        penalty_terms.append(penalty_weight * fiber_shortfall)
 
     for col, req in weekly_min.items():
         if col not in candidates.columns or req <= 0:
@@ -700,35 +917,64 @@ def run_lp(
     # every one of them (an eligible day is still fine to end up vegetarian) —
     # absorbed by a heavily-penalized slack, same pattern as the millet
     # requirement above, so this never makes the whole week infeasible.
-    nonveg_penalty_terms = []
+    # "Non-veg" here means true meat/fish/poultry — egg (Ovo-vegetarian=1) is
+    # excluded from nonveg_ids on purpose. Egg recipes have Vegetarian=0, so
+    # without this exclusion they satisfy both the non-veg-day requirement
+    # below AND slip through the vegetarian-only-day exclusion further down —
+    # in practice the GL-minimizing objective leans on egg (near-zero GI) so
+    # heavily that non-veg-eligible days ended up filled almost entirely with
+    # egg instead of actual non-veg, while veg-only days couldn't include egg
+    # at all. Treating egg as its own thing (allowed every day, doesn't count
+    # toward the non-veg quota) fixes both.
+    ovo_col = candidates["Ovo-vegetarian"] if "Ovo-vegetarian" in candidates.columns else pd.Series(0, index=candidates.index)
+    is_egg = pd.to_numeric(ovo_col, errors="coerce") == 1
+
+    # Non-veg-day-count mandate: hard, no penalty, for every non-veg-diet
+    # user (nonveg_eligible_days/nonveg_required_count are only populated in
+    # routers/plan.py when profile["diet_type"] == "non-veg"). More than half
+    # of the user's preferred non-veg days must carry real non-veg — this
+    # used to fall back to a heavily-penalized slack if infeasible; now it's
+    # mandatory. Per-user override: profile["_nonveg_main2_only_hard"]
+    # (A002-specific) further restricts which dish types count toward the
+    # day, to Main/Main2 only instead of any non-veg dish type.
+    nonveg_main2_only_hard = bool((profile or {}).get("_nonveg_main2_only_hard"))
+
     nonveg_eligible_days = [d for d in ((profile or {}).get("_nonveg_eligible_days") or []) if d in days]
     nonveg_required_count = int((profile or {}).get("_nonveg_required_count") or 0)
     if nonveg_eligible_days and nonveg_required_count > 0 and "Vegetarian" in candidates.columns:
         nonveg_ids = [
             int(i) for i in candidates.index
             if pd.to_numeric(candidates.loc[i, "Vegetarian"], errors="coerce") != 1
+            and not is_egg.loc[i]
         ]
+        # nonveg_ids above still drives the vegetarian-only-day exclusion
+        # below (that side stays scoped to ALL non-veg dish types, not just
+        # Main/Main2 — a Main3/Snack non-veg item should never leak onto a
+        # veg-only day either). Only the day-count *requirement* narrows.
+        nonveg_count_ids = nonveg_ids
+        if nonveg_main2_only_hard and "Dish_Type" in candidates.columns:
+            nonveg_count_ids = [
+                i for i in nonveg_ids
+                if str(candidates.loc[i, "Dish_Type"]).strip() in ("Main", "Main 2")
+            ]
         if nonveg_ids:
             day_ok = {}
             for d in nonveg_eligible_days:
                 day_ok[d] = LpVariable(f"nonveg_day_ok_{d}", lowBound=0, upBound=1, cat="Binary")
-                # day_ok[d] can only be 1 if at least one non-veg recipe was
-                # actually selected that day; the aggregate constraint below is
-                # what gives the solver a reason to turn it on.
-                model += day_ok[d] <= lpSum(y[(d, i)] for i in nonveg_ids)
-            nonveg_shortfall = LpVariable("nonveg_days_shortfall", lowBound=0)
-            model += (
-                lpSum(day_ok[d] for d in nonveg_eligible_days) + nonveg_shortfall
-                >= nonveg_required_count
-            )
-            nonveg_penalty_weight = 1_000_000.0
-            nonveg_penalty_terms.append(nonveg_penalty_weight * nonveg_shortfall)
+                # day_ok[d] can only be 1 if at least one qualifying non-veg
+                # recipe was actually selected that day; the aggregate
+                # constraint below is what gives the solver a reason to turn
+                # it on.
+                model += day_ok[d] <= lpSum(y[(d, i)] for i in nonveg_count_ids)
+            model += lpSum(day_ok[d] for d in nonveg_eligible_days) >= nonveg_required_count
 
-            # non_veg_days means non-veg is ONLY allowed on those days — every
-            # other day must be strictly vegetarian, no exceptions. Hard (not
-            # penalized): a vegetarian-only day is always feasible on its own
-            # (the model already runs fine end-to-end for fully-vegetarian
-            # users across all 7 days), so this can't introduce infeasibility.
+            # non_veg_days means true non-veg (meat/fish/poultry) is ONLY
+            # allowed on those days — every other day is vegetarian-or-egg,
+            # not strictly vegetarian (egg isn't in nonveg_ids, so it's never
+            # excluded here). Hard (not penalized): a vegetarian-or-egg day is
+            # always feasible on its own (the model already runs fine
+            # end-to-end for fully-vegetarian users across all 7 days), so
+            # this can't introduce infeasibility.
             for d in days:
                 if d not in nonveg_eligible_days:
                     model += lpSum(y[(d, i)] for i in nonveg_ids) == 0
@@ -772,6 +1018,44 @@ def run_lp(
                 )
                 nonveg_type_penalty_terms.append(type_penalty_weight * v_type)
 
+    # Egg-inclusion minimum: hard only for A002 (every day, no penalty, per
+    # explicit override). Everyone else who listed "Egg" among their
+    # preferred non-veg food types gets the original soft version back: at
+    # least 2 days across the whole week (any day — egg is allowed
+    # everywhere, not just non-veg-eligible days) should include >=1 egg
+    # recipe, absorbed by a heavily-penalized shortfall slack rather than a
+    # hard requirement — this was one of 4 mandates found (via isolation
+    # testing) to jointly make A001 week1/2's taper genuinely Infeasible, and
+    # disabling any one of the 4 alone was enough to restore feasibility.
+    # Per-user override: profile["_egg_every_day_hard"] (A002-specific)
+    # raises the requirement to every single day, hard.
+    egg_every_day_hard = bool((profile or {}).get("_egg_every_day_hard"))
+
+    egg_penalty_terms = []
+    if "egg" in selected_types and is_egg.any():
+        egg_ids = [int(i) for i in candidates.index if is_egg.loc[i]]
+        if egg_ids:
+            if egg_every_day_hard:
+                for d in days:
+                    model += lpSum(y[(d, i)] for i in egg_ids) >= 1
+            else:
+                egg_day_ok = {}
+                for d in days:
+                    egg_day_ok[d] = LpVariable(f"egg_day_ok_{d}", lowBound=0, upBound=1, cat="Binary")
+                    model += egg_day_ok[d] <= lpSum(y[(d, i)] for i in egg_ids)
+                egg_shortfall = LpVariable("egg_days_shortfall", lowBound=0)
+                egg_min_days = 2
+                model += lpSum(egg_day_ok[d] for d in days) + egg_shortfall >= egg_min_days
+                egg_penalty_weight = 1_000_000.0
+                egg_penalty_terms.append(egg_penalty_weight * egg_shortfall)
+
+    # Boiled-egg-every-day mandate (A002-specific, see boiled_egg_ids above):
+    # stricter than the general egg mandate — requires the "Boiled egg"
+    # recipe specifically, not just any egg dish, on every single day.
+    if boiled_egg_daily_hard and boiled_egg_ids:
+        for d in days:
+            model += lpSum(y[(d, i)] for i in boiled_egg_ids) >= 1
+
     # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
     if variety_penalties:
         model.objective += lpSum(variety_penalties)
@@ -779,33 +1063,60 @@ def run_lp(
         model.objective += lpSum(penalty_terms)
     if millet_penalty_terms:
         model.objective += lpSum(millet_penalty_terms)
-    if nonveg_penalty_terms:
-        model.objective += lpSum(nonveg_penalty_terms)
     if nonveg_type_penalty_terms:
         model.objective += lpSum(nonveg_type_penalty_terms)
+    if egg_penalty_terms:
+        model.objective += lpSum(egg_penalty_terms)
+    if meal_balance_penalty_terms:
+        model.objective += lpSum(meal_balance_penalty_terms)
 
 
 
-    # Energy: per-day constraint with ±10% flexibility
+    # Energy: per-day constraint, normally ±10% around eff_daily. Weeks 1-2
+    # override this via profile to a wider, asymmetric band (80%-130% for
+    # week 1, 80%-120% for week 2) instead of the tight symmetric ±10%, so
+    # the mandated bigger portions above have room to land without being
+    # squeezed back down.
+    energy_band_override = (profile or {}).get("_energy_band_override")
+    band_lo, band_hi = energy_band_override if energy_band_override else (0.9, 1.1)
     if eff_daily is not None and "Energy_ENERC_Kcal" in candidates.columns:
         for d in days:
             daily_kcal = lpSum(float(candidates.loc[i, "Energy_ENERC_Kcal"]) * x[(d, int(i))] for i in candidates.index)
-            model += daily_kcal >= float(eff_daily) * 0.9
-            model += daily_kcal <= float(eff_daily) * 1.1
+            model += daily_kcal >= float(eff_daily) * band_lo
+            model += daily_kcal <= float(eff_daily) * band_hi
 
     candidates["Carb_g"] = pd.to_numeric(candidates.get("Carbohydrate_g", 0), errors="coerce").fillna(0.0)
-    candidates["Prot_g"] = pd.to_numeric(candidates.get("Protein_PROTCNT_g", 0), errors="coerce").fillna(0.0)
     candidates["Fat_g"] = pd.to_numeric(candidates.get("TotalFat_FATCE_g", 0), errors="coerce").fillna(0.0)
     candidates["Energy_kcal"] = pd.to_numeric(candidates.get("Energy_ENERC_Kcal", 0), errors="coerce").fillna(0.0)
     for d in days:
         model += lpSum((4.0 * candidates.loc[i, "Carb_g"] - 0.40 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
-        model += lpSum((4.0 * candidates.loc[i, "Carb_g"] - 0.55 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
+        model += lpSum((4.0 * candidates.loc[i, "Carb_g"] - 0.50 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
 
-        model += lpSum((4.0 * candidates.loc[i, "Prot_g"] - 0.10 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
-        model += lpSum((4.0 * candidates.loc[i, "Prot_g"] - 0.20 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
+        # Protein/Energy ratio band (10-20% of energy from protein) removed —
+        # protein is now regulated directly by body-weight bounds (below)
+        # instead of an energy-ratio band. The ratio itself is still worth
+        # reporting in summaries (see Functions_Base.py), just no longer
+        # enforced as a solver constraint.
 
         model += lpSum((9.0 * candidates.loc[i, "Fat_g"] - 0.25 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) >= 0.0
         model += lpSum((9.0 * candidates.loc[i, "Fat_g"] - 0.35 * candidates.loc[i, "Energy_kcal"]) * x[(d, int(i))] for i in candidates.index) <= 0.0
+
+    # Protein: hard weekly bounds directly on body weight (1.0-1.4g/kg/day)
+    # instead of the EAR table or a Protein/Energy ratio band (both removed
+    # above). Replaces the EAR-based floor entirely — protein is no longer
+    # taken from BaseEar at all. Per-user override: profile["_protein_g_per_kg_min"]
+    # / profile["_protein_g_per_kg_max"] (A002-specific: 1.3-1.7 instead of
+    # the 1.0-1.4 default).
+    PROTEIN_G_PER_KG_MIN = float((profile or {}).get("_protein_g_per_kg_min", 1.0))
+    PROTEIN_G_PER_KG_MAX = float((profile or {}).get("_protein_g_per_kg_max", 1.4))
+    if "Protein_PROTCNT_g" in candidates.columns and profile and profile.get("weight"):
+        candidates["Prot_g"] = pd.to_numeric(candidates.get("Protein_PROTCNT_g", 0), errors="coerce").fillna(0.0)
+        _weight_kg = float(profile["weight"])
+        protein_weekly_min_g = PROTEIN_G_PER_KG_MIN * _weight_kg * float(n_days)
+        protein_weekly_max_g = PROTEIN_G_PER_KG_MAX * _weight_kg * float(n_days)
+        weekly_protein = lpSum(candidates.loc[i, "Prot_g"] * x[(d, int(i))] for d in days for i in candidates.index)
+        model += weekly_protein >= protein_weekly_min_g
+        model += weekly_protein <= protein_weekly_max_g
 
     candidates["Fiber_g"] = pd.to_numeric(candidates.get("TotalDietaryFibre_FIBTG_g", 0), errors="coerce").fillna(0.0)
     _gender_min = None
@@ -825,10 +1136,18 @@ def run_lp(
         if _gender_min is not None:
             model += daily_fiber >= float(_gender_min)
 
+    # weekly_max[col] is a weekly total (TUL-per-day * n_days, see
+    # Functions_Base._get_weekly_requirement_maps) — divide back down and
+    # enforce per day, not as a weekly sum. A weekly-aggregate cap lets one
+    # day spike well over the tolerable upper limit as long as other days
+    # compensate, which defeats the point of a per-day safety ceiling. The
+    # 1.2x slack (unchanged, still undocumented in origin) is kept as-is.
     for col, max_req in weekly_max.items():
         if col not in candidates.columns or max_req <= 0:
             continue
-        model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for d in days for i in candidates.index) <= float(max_req) * 1.2
+        per_day_max = float(max_req) / float(n_days)
+        for d in days:
+            model += lpSum(float(candidates.loc[i, col]) * x[(d, int(i))] for i in candidates.index) <= per_day_max * 1.2
 
     if 'Sugar_per_serving_g' in candidates.columns and 'Energy_ENERC_Kcal' in candidates.columns:
         for d in days:
@@ -836,20 +1155,76 @@ def run_lp(
             daily_energy = lpSum(float(candidates.loc[i, 'Energy_ENERC_Kcal']) * x[(d, int(i))] for i in candidates.index)
             model += sugar_energy <= 0.05 * daily_energy
 
+    # Sodium/salt were previously summed across all 7 days and compared
+    # against limit*n_days — a weekly-aggregate cap, despite the "_per_day"
+    # naming, that let a single day spike well above the intended daily
+    # limit as long as other days compensated. Fixed to match cholesterol's
+    # already-correct per-day enforcement below.
+    #
+    # Sodium specifically is kept as a SOFT per-day cap (penalized slack,
+    # same pattern as the nutrient-floor penalties above) rather than hard:
+    # isolation testing on A002 showed the hard 1500mg/day cap, stacked with
+    # tightened taper bounds, was the dominant cause of slow/infeasible
+    # solves — removing it alone brought a stuck 200s+ solve back down to
+    # ~66s. 1500mg is a dietary target, not a hard medical limit for most
+    # users, so a heavily-penalized overage is preferable to failing to
+    # generate a plan at all.
     sodium_limit_per_day_mg = 1500.0
+    sodium_penalty_weight = 5000.0
+    sodium_penalty_terms = []
     if 'Sodium_mg' in candidates.columns:
-        model += lpSum(float(candidates.loc[i, 'Sodium_mg']) * x[(d, int(i))] for d in days for i in candidates.index) <= float(sodium_limit_per_day_mg) * float(n_days)
+        for d in days:
+            sodium_slack = LpVariable(f"sodium_over_day_{d}", lowBound=0)
+            model += lpSum(float(candidates.loc[i, 'Sodium_mg']) * x[(d, int(i))] for i in candidates.index) <= float(sodium_limit_per_day_mg) + sodium_slack
+            sodium_penalty_terms.append(sodium_penalty_weight * sodium_slack)
+    if sodium_penalty_terms:
+        model.objective += lpSum(sodium_penalty_terms)
 
+    # Cholesterol and salt, like sodium above, are kept as SOFT per-day caps
+    # (penalized slack) rather than hard: isolation testing on A002 week3
+    # showed TUL+cholesterol+salt together leave only a razor-thin feasible
+    # region for some users (proven Infeasible in one run, then feasible on
+    # an identical retry — a knife-edge case sensitive to minor candidate-pool
+    # variation), with no single constraint uniquely responsible. Softening
+    # cholesterol/salt adds slack to that margin so the plan still generates
+    # reliably. TUL is left hard — it wasn't included in this softening.
     cholesterol_limit_per_day_mg = 300.0
+    cholesterol_penalty_weight = 5000.0
+    cholesterol_penalty_terms = []
     if 'Cholesterol_mg' in candidates.columns:
         for d in days:
-            model += lpSum(float(candidates.loc[i, 'Cholesterol_mg']) * x[(d, int(i))] for i in candidates.index) <= float(cholesterol_limit_per_day_mg)
+            cholesterol_slack = LpVariable(f"cholesterol_over_day_{d}", lowBound=0)
+            model += lpSum(float(candidates.loc[i, 'Cholesterol_mg']) * x[(d, int(i))] for i in candidates.index) <= float(cholesterol_limit_per_day_mg) + cholesterol_slack
+            cholesterol_penalty_terms.append(cholesterol_penalty_weight * cholesterol_slack)
+    if cholesterol_penalty_terms:
+        model.objective += lpSum(cholesterol_penalty_terms)
 
+    # Salt is measured in grams (cap=5g/day) vs sodium/cholesterol's
+    # milligrams (cap=1500/300mg/day) — using the same 5000 weight here would
+    # barely penalize salt overage (a 1g overage costing only 5000, vs. a
+    # 1mg sodium overage costing the same). Scaled up by the cap ratio
+    # (1500mg/5g = 300x) so a given fraction of overage is penalized
+    # comparably to sodium's.
     salt_limit_per_day_g = 5
+    salt_penalty_weight = 5000.0 * 300.0
+    salt_penalty_terms = []
     if 'Salt_per_serving_g' in candidates.columns:
-        model += lpSum(float(candidates.loc[i, 'Salt_per_serving_g']) * x[(d, int(i))] for d in days for i in candidates.index) <= float(salt_limit_per_day_g) * float(n_days)
+        for d in days:
+            salt_slack = LpVariable(f"salt_over_day_{d}", lowBound=0)
+            model += lpSum(float(candidates.loc[i, 'Salt_per_serving_g']) * x[(d, int(i))] for i in candidates.index) <= float(salt_limit_per_day_g) + salt_slack
+            salt_penalty_terms.append(salt_penalty_weight * salt_slack)
+    if salt_penalty_terms:
+        model.objective += lpSum(salt_penalty_terms)
 
-    solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec), gapRel=0.3, threads=6)
+    # gapRel widens on each successive taper-relaxation retry (see
+    # routers/plan.py's graduated fallback), since a retry has already
+    # accepted a degraded taper in exchange for a usable result — letting
+    # CBC accept a looser (still feasible) solution there trades a small
+    # amount of solution quality for a real reduction in wall-clock time on
+    # exactly the hardest, already-failing-once cases, without touching the
+    # primary/first-attempt solve's quality at all.
+    gap_rel = float((profile or {}).get("_solver_gap_rel_override", 0.3))
+    solver = PULP_CBC_CMD(timeLimit=int(time_limit_sec), gapRel=gap_rel, threads=6)
     t_lp = time.time()
     _ = model.solve(solver)
     status = str(LpStatus.get(model.status, model.status))
@@ -894,26 +1269,25 @@ def run_lp(
                 })
         _write_debug_csv(pd.DataFrame(vars_rows), "final_y_x_values_postsolve.csv")
 
+    # No naive fallback menu on a failed/unusable solve — a "first available
+    # candidate at Serving=1.0" menu ignores GL, nutrition, variety, and
+    # non-veg placement entirely, and looks like a real plan to any caller
+    # that doesn't check `status`. Callers must treat an empty weekly_menu
+    # (paired with a non-"Optimal" status and this `message`) as a failed
+    # solve, not a usable-but-suboptimal one.
     weekly_menu = pd.DataFrame(selected_rows)
     if not weekly_menu.empty:
         weekly_menu = weekly_menu.sort_values(["Day", "Meal_Time", "Dish_Type"]).reset_index(drop=True)
+        message = None
     else:
-        fallback_rows = []
-        for d in days:
-            for _, slot_row in required_slots.iterrows():
-                slot = (str(slot_row["Meal_Time"]), str(slot_row["Dish_Type"]))
-                ids = slot_to_ids.get(slot, [])
-                if ids:
-                    i = ids[0]
-                    row = candidates.loc[i].to_dict()
-                    row.pop("__candidate_id__", None)
-                    row["Day"] = d
-                    row["Serving"] = 1.0
-                    fallback_rows.append(row)
-        weekly_menu = pd.DataFrame(fallback_rows)
+        message = (
+            f"No feasible weekly menu found (solver status: {status}). "
+            "Returning an empty menu instead of a naive placeholder."
+        )
 
     summary = {
         "status": status,
+        "message": message,
         "objective": float(value(model.objective)) if model.objective is not None else np.nan,
         "objective_metric": objective_metric_col,
         "objective_formula": "0.5*z(GL) + 0.3*z(Avg_TimeAbove160_pct) + 0.2*z(Avg_Delta_Glucose) - liked_recipe_bonus",
@@ -921,5 +1295,12 @@ def run_lp(
         "rows": int(len(weekly_menu)),
         "days": int(n_days),
         "required_slots": int(len(required_slots)),
+        # Exposed so routers/plan.py's post-rounding quantity correction can
+        # re-check the same per-day energy floor this LP already enforced on
+        # the continuous Serving values — item-level quantity rounding
+        # happens after this function returns and isn't re-validated here.
+        "eff_daily": float(eff_daily) if eff_daily is not None else None,
+        "energy_band_lo": float(band_lo),
+        "energy_band_hi": float(band_hi),
     }
     return weekly_menu, summary, weekly_min_100
