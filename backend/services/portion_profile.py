@@ -154,6 +154,14 @@ def _bucket_to_value(raw: Any) -> float:
         return DAL_BUCKET_VALUE[raw]
     if raw in VEG_BUCKET_VALUE:
         return VEG_BUCKET_VALUE[raw]
+    # Catch-all for "doesn't eat this" phrasing: the live onboarding form's
+    # exact copy has already been observed to differ from the literal
+    # "Do not eat" bucket key above (e.g. "Do not usually eat" on the
+    # Millet-Based/Pulse table questions) -- match on substance rather than
+    # hard-coding every phrasing variant one at a time.
+    normalized = str(raw).strip().lower()
+    if "not" in normalized and "eat" in normalized:
+        return 0.0
     raise ValueError(f"Unrecognized portion-question answer: {raw!r}")
 
 

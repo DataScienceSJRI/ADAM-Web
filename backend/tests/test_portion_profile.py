@@ -36,6 +36,21 @@ def test_get_user_portion_class_unknown_user_defaults_to_portion_1():
     assert get_user_portion_class("NOT_A_REAL_USER") == "Portion 1"
 
 
+def test_bucket_to_value_accepts_live_form_not_eaten_phrasing():
+    # Regression test for the 2026-09-09 A006_RAJENDRA incident: the live
+    # onboarding form's actual copy is "Do not usually eat", not the
+    # "Do not eat" bucket key this module originally guessed from the docx
+    # -- classify_portion_class must not raise on it.
+    answers = {
+        "Dosa (number)": 2, "Idli (number)": 4, "Chapati (number)": 3, "Roti (number)": 3,
+        "Rice (cups)": "1 1/2 cups", "Millet rice (cups)": "1 cup",
+        "Khichdi (cups)": "1 1/2 cups", "Pongal (cups)": "Do not usually eat",
+        "Upma (cups)": "1 1/2 cups", "Dal/Sambar/Curry (cups)": "1 1/2 cups",
+        "Vegetable side dish (cups)": "1/2 cup",
+    }
+    assert classify_portion_class(answers) == "Portion 2"
+
+
 def test_classify_portion_class_all_target_amounts_is_portion_3():
     answers = {
         "Dosa (number)": 2, "Idli (number)": 2, "Chapati (number)": 2, "Roti (number)": 2,
