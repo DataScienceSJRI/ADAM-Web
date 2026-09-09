@@ -577,7 +577,24 @@ def _run_plan_background(
     # week1/week2 config, just re-keyed by portion class instead of week
     # number). Each key here is read by services/lp_optimizer.run_lp via
     # the matching profile["_..."] entry.
-    portion_class = get_user_portion_class(user_id)
+    # Defensive: this runs before _write_plan_status(..., "generating") below
+    # and before the try/except that wraps the actual solve, so an unguarded
+    # exception here crashes the RQ job outright with zero status update --
+    # confirmed in production for A006_RAJENDRA (2026-09-09): an unrecognized
+    # questionnaire-answer string crashed here, left plan_status stuck on
+    # whatever generate_plan() had already written, and no RecommendationsBackup
+    # rows were ever created. Falls back to the same "Portion 1" default
+    # get_user_portion_class already uses for a user with no answers on file,
+    # so a bad/unexpected answer degrades to the safe original behavior
+    # instead of silently stranding the user.
+    try:
+        portion_class = get_user_portion_class(user_id)
+    except Exception:
+        logger.exception(
+            "user_id=%s week_no=%d portion classification failed -- falling back to Portion 1",
+            user_id, body.week_no,
+        )
+        portion_class = "Portion 1"
     week_taper_overrides = get_taper_overrides_for_week(portion_class, body.week_no)
     if week_taper_overrides:
         profile.update(week_taper_overrides)
