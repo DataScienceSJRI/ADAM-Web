@@ -4,7 +4,6 @@ import os
 import time
 import tempfile
 import json
-import math
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -18,13 +17,13 @@ from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
 from services.data_loader import _fetch, _fetch_cached, load_data_from_supabase
 from services.profile_builder import build_profile
+from services.portion_profile import get_user_portion_class, get_taper_overrides_for_week
 from services.recommendation_writer import (
     write_recommendations,
     write_final_summary,
     write_final_nutrient_summary,
     get_plan_status,
 )
-from services.replacement import VALID_QUANTITIES
 import logging
 
 # Times stored in DB are IST (UTC+5:30); the day-6 auto-generation trigger fires at 9pm IST.
@@ -187,16 +186,171 @@ def _round_quantity_for_unit(value: float, unit) -> float:
       - Teaspoon / Tablespoon (incl. "Tsp"/"Tbsp" spellings in RecipeTagging.
         Description): nearest whole number, unbounded (e.g. 4.6 -> 5) — half/
         quarter spoons aren't a natural real-world serving.
-      - Everything else (Cup, Number, etc.): nearest of VALID_QUANTITIES
-        (0.5 / 1.0 / 1.5 / 2.0 — the same fixed set the replacement/swap flow
-        uses, see services/replacement.py).
+      - Everything else (Cup, Number, etc.): nearest 0.5 step, unbounded
+        (e.g. 3.3 -> 3.5), floored at 0.5 so a selected dish is never rounded
+        down to zero.
+
+    Previously this snapped to the nearest of a fixed [0.5, 1.0, 1.5, 2.0]
+    list (VALID_QUANTITIES) regardless of the recipe's own reference
+    Portion. That's the right approach where VALID_QUANTITIES is used as a
+    *proportion* multiplier of a recipe's own serving (see
+    services/replacement.py's swap/replacement flow) — but here `value` is
+    already an *absolute* quantity (Portion * Serving), so a fixed absolute
+    ceiling of 2.0 silently capped any recipe whose reference Portion is
+    itself >= 2 (e.g. most roti/dosa recipes are "2 Number" or "3 Number" =
+    1 serving) at a single reference serving or less, no matter how high
+    the LP's continuous Serving wanted to scale it (e.g. week 1 taper's up
+    to 2.5x Main bound was completely wasted on those recipes). Rounding to
+    the nearest unbounded 0.5 step instead lets quantities scale properly
+    with the recipe's own portion size.
     """
     if str(unit or "").strip().lower() in _WHOLE_NUMBER_UNITS:
         return float(round(value))
-    return min(VALID_QUANTITIES, key=lambda q: abs(q - value))
+    return max(0.5, round(value / 0.5) * 0.5)
 
 
-def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
+def _correct_energy_floor_after_rounding(
+    weekly_menu: pd.DataFrame,
+    raw_quantity: pd.Series,
+    rounded_quantity: pd.Series,
+    selectable: pd.Series,
+    eff_daily: float,
+    band_lo: float,
+) -> pd.DataFrame:
+    """
+    _round_quantity_for_unit's snapping is per-item and per-recipe — it has
+    no visibility into the day a row belongs to. Several items on the same
+    day can each independently round down, and the losses compound into a
+    day whose total energy falls well under the eff_daily*band_lo floor the
+    LP already enforced on the continuous Serving values (observed as low
+    as ~50% of the floor in testing, on days where multiple low-portion
+    items rounded down together).
+
+    Best-effort, day-by-day fixup, in two passes:
+
+    Pass 1 (preferred): bump the Main dish(es) — Dish_Type=="Main" — whose
+    raw (pre-rounding) quantity was closest to the next 0.5/whole-number
+    step, one step at a time. Every Main bump is paired with
+    trimming one "Main 2"/"Main 3" dish on the same day down a step (never
+    below the lowest real-world step, so it's never fully removed from the
+    day) — this is a deliberate compositional choice (bigger Main, smaller
+    sides) rather than just piling energy on top, so it can occasionally
+    need more than one Main bump to clear the deficit if the paired trim
+    eats into the gain.
+
+    Pass 2 (fallback): if Main can't close the remaining deficit (no Main
+    that day, or no more room to step up), fall back to bumping whichever
+    remaining item's raw quantity was closest to its next step, same as
+    Pass 1 but across all dish types — this still guarantees the floor
+    gets cleared whenever any item anywhere has room to move.
+
+    Days already at/above the floor are left untouched. This does not
+    re-check GL or macro bounds after bumping/trimming — by design each
+    move is a single small step, so the risk of pushing those out of range
+    is low, but it isn't re-verified here.
+    """
+    floor = float(eff_daily) * float(band_lo)
+    energy = pd.to_numeric(weekly_menu["Energy_ENERC_Kcal"], errors="coerce").fillna(0.0)
+    portion = weekly_menu["_tagging_portion"]
+    unit = weekly_menu["_tagging_unit"]
+    dish_type = weekly_menu.get("Dish_Type", pd.Series("", index=weekly_menu.index)).astype(str).str.strip()
+
+    # Mutable running quantity per row — bumps/trims below must read and
+    # update this (never the original `rounded_quantity`), since an item
+    # can be moved more than once (e.g. Main stepping 0.5 -> 1.0 -> 1.5) and
+    # each subsequent move has to react to where it actually landed, not
+    # its pre-correction snapshot.
+    current_qty = rounded_quantity.copy()
+
+    def _next_up(i) -> Optional[float]:
+        cur = current_qty.loc[i]
+        if str(unit.loc[i] or "").strip().lower() in _WHOLE_NUMBER_UNITS:
+            return cur + 1.0
+        return cur + 0.5
+
+    def _next_down(i) -> Optional[float]:
+        cur = current_qty.loc[i]
+        if str(unit.loc[i] or "").strip().lower() in _WHOLE_NUMBER_UNITS:
+            return cur - 1.0 if cur > 1.0 else None
+        return cur - 0.5 if cur > 0.5 else None
+
+    def _apply(i, target_step: float) -> float:
+        delta_kcal = (target_step - current_qty.loc[i]) * (energy.loc[i] / portion.loc[i])
+        current_qty.loc[i] = target_step
+        weekly_menu.loc[i, "Serving"] = target_step / portion.loc[i]
+        return delta_kcal
+
+    MAX_STEPS_PER_DAY = 20  # safety guard against pathological loops
+
+    for day in weekly_menu["Day"].dropna().unique():
+        day_idx = list(weekly_menu.index[(weekly_menu["Day"] == day) & selectable])
+        if not day_idx:
+            continue
+        day_total = float((energy.loc[day_idx] * weekly_menu.loc[day_idx, "Serving"]).sum())
+        deficit = floor - day_total
+        if deficit <= 0:
+            continue
+
+        main_idx = [i for i in day_idx if dish_type.loc[i] == "Main"]
+        main2_3_idx = [i for i in day_idx if dish_type.loc[i] in ("Main 2", "Main 3")]
+
+        # --- Pass 1: Main-first, each bump paired with a Main2/Main3 trim ---
+        trimmed = set()
+        steps = 0
+        while deficit > 0 and steps < MAX_STEPS_PER_DAY:
+            steps += 1
+            candidates = []
+            for i in main_idx:
+                next_step = _next_up(i)
+                if next_step is None:
+                    continue
+                candidates.append((next_step - raw_quantity.loc[i], i, next_step))
+            if not candidates:
+                break
+            candidates.sort(key=lambda t: t[0])
+            _gap, i, next_step = candidates[0]
+            net_gain = _apply(i, next_step)
+
+            trim_pool = sorted(
+                (j for j in main2_3_idx if j not in trimmed),
+                key=lambda j: -current_qty.loc[j],
+            )
+            for j in trim_pool:
+                down_step = _next_down(j)
+                if down_step is None:
+                    continue
+                net_gain += _apply(j, down_step)  # negative: reduces the net gain
+                trimmed.add(j)
+                break
+
+            deficit -= net_gain
+
+        # --- Pass 2: fallback across remaining items if still short ---
+        steps = 0
+        while deficit > 0 and steps < MAX_STEPS_PER_DAY:
+            steps += 1
+            candidates = []
+            for i in day_idx:
+                if i in trimmed:
+                    continue  # just trimmed down; don't also bump it this round
+                next_step = _next_up(i)
+                if next_step is None:
+                    continue
+                candidates.append((next_step - raw_quantity.loc[i], i, next_step))
+            if not candidates:
+                break
+            candidates.sort(key=lambda t: t[0])
+            _gap, i, next_step = candidates[0]
+            deficit -= _apply(i, next_step)
+
+    return weekly_menu
+
+
+def _apply_rounded_quantity(
+    weekly_menu: pd.DataFrame,
+    eff_daily: Optional[float] = None,
+    band_lo: Optional[float] = None,
+) -> pd.DataFrame:
     """
     Correct the LP's raw `Serving` proportion so every downstream nutrient
     calculation (Energy, Carbs, Fibre, GL) matches a user-friendly recipe
@@ -211,8 +365,8 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
     Instead:
       1. actual_quantity = Portion * Serving        (e.g. 1.2 * 0.8 = 0.96)
       2. rounded_quantity = _round_quantity_for_unit(actual_quantity, unit)
-         — nearest of VALID_QUANTITIES normally, or nearest whole number for
-         Teaspoon/Tablespoon recipes (see _round_quantity_for_unit)
+         — nearest 0.5 step (unbounded) normally, or nearest whole number
+         for Teaspoon/Tablespoon recipes (see _round_quantity_for_unit)
       3. corrected_proportion = rounded_quantity / Portion (e.g. 1.0 / 1.2 = 0.833)
 
     `Serving` is overwritten with the corrected_proportion so every place
@@ -220,6 +374,12 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
     scaling below, and write_recommendations' Food_Qty) stays consistent with
     the same rounded, human-friendly quantity. Rows the LP didn't select
     (Serving <= 0) are left untouched.
+
+    If `eff_daily`/`band_lo` are provided (from lp_optimizer.run_lp's
+    summary), a second pass then re-checks each day's rounded total against
+    the same energy floor the LP solved for and nudges specific items back
+    up where independent per-item rounding compounded into a day falling
+    under it — see _correct_energy_floor_after_rounding.
     """
     if weekly_menu is None or weekly_menu.empty or "Recipe_Code" not in weekly_menu.columns:
         return weekly_menu
@@ -257,6 +417,16 @@ def _apply_rounded_quantity(weekly_menu: pd.DataFrame) -> pd.DataFrame:
             "_apply_rounded_quantity: %d selected rows had no RecipeTagging.Portion match; "
             "left their Serving proportion uncorrected",
             unmatched,
+        )
+
+    if (
+        eff_daily is not None
+        and band_lo is not None
+        and "Day" in weekly_menu.columns
+        and "Energy_ENERC_Kcal" in weekly_menu.columns
+    ):
+        weekly_menu = _correct_energy_floor_after_rounding(
+            weekly_menu, raw_quantity, rounded_quantity, selectable, eff_daily, band_lo,
         )
 
     return weekly_menu.drop(columns=["_tagging_portion", "_tagging_unit"])
@@ -302,9 +472,16 @@ def _apply_weekend_nonveg_swap(
 
     tag_df = _fetch_cached("RecipeTagging")
     veg_map = dict(zip(tag_df["Recipe_Code"], tag_df.get("Vegetarian")))
+    ovo_map = dict(zip(tag_df["Recipe_Code"], tag_df.get("Ovo-vegetarian")))
 
     def _is_nonveg(code) -> bool:
-        return str(veg_map.get(code)) not in ("1", "1.0")
+        # Egg (Ovo-vegetarian) is its own diet category, not "non-veg" — see
+        # lp_optimizer.py's nonveg_ids / is_egg split. A day that only has an
+        # egg dish shouldn't be treated as already satisfying a weekend
+        # non-veg target.
+        if str(veg_map.get(code)) in ("1", "1.0"):
+            return False
+        return str(ovo_map.get(code)) not in ("1", "1.0")
 
     def _day_has_nonveg(day_num: int) -> bool:
         day_rows = weekly_menu[(weekly_menu["Day"] == day_num) & (weekly_menu["Serving"] > 0)]
@@ -373,11 +550,79 @@ def _run_plan_background(
                 if (effective_start_date + timedelta(days=d - 1)).strftime("%a") in non_veg_days
             ]
             profile["_nonveg_eligible_days"] = nonveg_eligible_days
-            profile["_nonveg_required_count"] = math.ceil(len(nonveg_eligible_days) / 2)
+            # Strictly more than half of the eligible days must get real
+            # non-veg (egg doesn't count — see lp_optimizer.py's nonveg_ids,
+            # which excludes Ovo-vegetarian recipes). floor(n/2)+1 is ">n/2"
+            # for both even and odd n (ceil(n/2) only achieves that for odd n;
+            # for even n it lands on exactly half, not more than half).
+            profile["_nonveg_required_count"] = len(nonveg_eligible_days) // 2 + 1
             logger.info(
                 "user_id=%s non_veg_days=%s -> eligible Day numbers=%s, required_count=%d",
                 user_id, sorted(non_veg_days), nonveg_eligible_days, profile["_nonveg_required_count"],
             )
+
+    # Portion-classification-driven taper: relax portion/GL/energy
+    # constraints so users start near the larger, real-world portions
+    # they're already used to, then step back toward the normal
+    # clinically-tuned defaults — eases the app-adoption/compliance habit
+    # rather than shocking users with unfamiliar small portions from day
+    # one. Which weeks get relaxed, and by how much, now depends on the
+    # user's own Usual Portion Size Questions answers (services/
+    # portion_profile.py) rather than being identical for every user by
+    # calendar week: a user whose usual portions are already close to the
+    # model's target (Portion 3) gets no taper at all, instead of being
+    # force-tapered down from an inflated week1/week2 starting point they
+    # never needed. See services/portion_profile.py for the classification
+    # and the Portion 1/2/3 bounds (same values/tuning history as the old
+    # week1/week2 config, just re-keyed by portion class instead of week
+    # number). Each key here is read by services/lp_optimizer.run_lp via
+    # the matching profile["_..."] entry.
+    portion_class = get_user_portion_class(user_id)
+    week_taper_overrides = get_taper_overrides_for_week(portion_class, body.week_no)
+    if week_taper_overrides:
+        profile.update(week_taper_overrides)
+        logger.info(
+            "user_id=%s week_no=%d portion_class=%s -> taper overrides=%s",
+            user_id, body.week_no, portion_class, week_taper_overrides,
+        )
+    else:
+        logger.info(
+            "user_id=%s week_no=%d portion_class=%s -> no taper override (system defaults)",
+            user_id, body.week_no, portion_class,
+        )
+
+    # Per-user mandates: A002 specifically requires egg every day and real
+    # non-veg (Main/Main2 only) on more than half his preferred days, both as
+    # genuine hard constraints. (His protein target used to be a third,
+    # A002-specific override here too, but protein is now a global hard
+    # 1.0-1.4g/kg body-weight bound in lp_optimizer.py for every user — see
+    # PROTEIN_G_PER_KG_MIN/MAX there — so it no longer needs a per-user
+    # override at all.) GL caps raised alongside (50/meal, 150/day vs the
+    # 30/90 default) to give the solver room for the two hard mandates.
+    # Applied after the week-taper overrides above so it wins if a taper week
+    # also set a GL cap.
+    USER_OVERRIDES = {
+        "A002_NASIR": {
+            "_egg_every_day_hard": True,
+            "_boiled_egg_daily_hard": True,
+            "_nonveg_main2_only_hard": True,
+            "_protein_g_per_kg_min": 1.3,
+            "_protein_g_per_kg_max": 1.7,
+            # _user_*, not _per_meal_gl_cap_override/_per_day_gl_cap_override
+            # -- those are in TAPER_OVERRIDE_KEYS below and get popped by the
+            # retry-without-taper fallback, which would silently strip this
+            # accommodation back to the 30/90 defaults on retry while leaving
+            # the hard mandates above still fully active (confirmed: this is
+            # exactly what happened on the first test -- both the initial
+            # solve AND the retry came back Infeasible, 1247s).
+            "_user_per_meal_gl_cap_override": 50,
+            "_user_per_day_gl_cap_override": 150,
+        },
+    }
+    user_overrides = USER_OVERRIDES.get(user_id)
+    if user_overrides:
+        profile.update(user_overrides)
+        logger.info("user_id=%s -> per-user hard mandate overrides=%s", user_id, user_overrides)
 
     _write_plan_status(body.onboarding_id, "generating")
 
@@ -387,11 +632,10 @@ def _run_plan_background(
     weekly_menu = None
     weekly_min = None
 
-    try:
+    def _solve_once() -> dict:
         with tempfile.TemporaryDirectory() as tmpdir:
             model = ModelOptimiser(user_id=user_id, workspace=tmpdir, onboarding_id=body.onboarding_id)
-            _write_plan_status(body.onboarding_id, "optimizing")
-            output_paths = model.run(
+            return model.run(
                 uid=user_id,
                 top_n=20,
                 ear_group_col=profile["age_group_col"],
@@ -399,36 +643,163 @@ def _run_plan_background(
                 user_preference="yes",
                 profile=profile,
             )
-            logger.info("model.run completed for user_id=%s [%.1fs]", user_id, time.time() - t0)
 
-            weekly_menu = output_paths.get("weekly_menu")
-            weekly_menu = _apply_rounded_quantity(weekly_menu)
-            weekly_menu = _apply_weekend_nonveg_swap(weekly_menu, profile, effective_start_date)
-            recipe_name_changed = _fetch_cached("USER_Recipes_name_changed")
+    def _is_usable(paths: dict) -> bool:
+        # Mirrors services/lp_optimizer.run_lp's own usable_status check: a
+        # "Not Solved" (solver hit the time limit before proving optimality)
+        # result can still carry a real, constraint-satisfying incumbent
+        # worth keeping — but non-empty alone isn't enough. CBC can time out
+        # with an incumbent that never assigned a candidate to some days at
+        # all, which is a genuinely broken/incomplete week, not just a
+        # suboptimal one — so every day must at least have its three core
+        # meals (Breakfast/Lunch/Dinner) before we call it usable.
+        summary = paths.get("weekly_optimization_summary") or {}
+        s = summary.get("status")
+        menu = paths.get("weekly_menu")
+        if s not in ("Optimal", "Not Solved") or menu is None or menu.empty:
+            return False
+        if "Day" not in menu.columns or "Meal_Time" not in menu.columns:
+            return False
+        n_days = summary.get("days") or int(menu["Day"].max())
+        core_slots = {"Breakfast", "Lunch", "Dinner"}
+        for d in range(1, int(n_days) + 1):
+            day_slots = set(menu.loc[menu["Day"] == d, "Meal_Time"].astype(str))
+            if not core_slots.issubset(day_slots):
+                return False
+        return True
 
-            name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
-            weekly_menu.loc[
-                weekly_menu['Recipe_Code'].isin(name_map.keys()),
-                'Recipe_Name'
-            ] = weekly_menu['Recipe_Code'].map(name_map)
+    try:
+        _write_plan_status(body.onboarding_id, "optimizing")
+        output_paths = _solve_once()
+        summary = output_paths.get("weekly_optimization_summary") or {}
 
-            weekly_min = output_paths.get("weekly_min")
-            summary = output_paths.get("weekly_optimization_summary")
-            if summary.get("status") == "Optimal":
-                if len(weekly_menu) > 0:
-                    finall_summary = Recomendation_formatting(weekly_menu)
-                    final_nut_summary = build_weekly_nutrient_summary(weekly_menu, weekly_min)
+        # Graduated taper-relaxation fallback: the portion-class taper's
+        # relaxed bounds/caps/floors can make some users' candidate pool genuinely
+        # infeasible to solve — especially once a new hard nutrient
+        # constraint (fiber, protein, ...) stacks on top of an existing
+        # taper. This used to strip every taper override at once on the
+        # first failure, which worked but silently collapsed the ENTIRE
+        # taper even when only one piece was the actual conflict — e.g.
+        # A004 week1's fiber floor only conflicted with the energy
+        # band/BMI-reduction strength, not the portion bounds, yet the old
+        # all-or-nothing strip made week1 an exact duplicate of week3's
+        # un-tapered menu (confirmed by comparing realized recipe selections
+        # day-by-day — identical on all 7 days). Escalating through ordered
+        # stages instead, stopping at the first one that solves, preserves
+        # as much of the taper as the constraints actually allow.
+        TAPER_STAGES = [
+            # Stage 1: energy band width + BMI/age reduction strength don't
+            # change what's on the plate, just the calorie window — drop
+            # these first since they're the least "felt" by the user.
+            ["_energy_band_override", "_bmi_age_reduction_strength"],
+            # Stage 2: portion bounds are the taper's main visible feature
+            # (bigger, familiar servings) — only drop these if stage 1
+            # wasn't enough on its own.
+            ["_main_taper_bounds", "_other_taper_bounds", "_portion_taper_bounds", "_snack_taper_bounds"],
+            # Stage 3: GL caps/floors — last resort, full parity with the
+            # old single-step all-or-nothing behavior.
+            ["_per_meal_gl_cap_override", "_per_day_gl_cap_override", "_per_meal_gl_cap_by_slot",
+             "_meal_gl_floor_by_slot", "_meal_gl_floor_override", "_meal_gl_floor_include_lunch"],
+        ]
+        had_any_taper_override = any(
+            profile.get(k) is not None for stage in TAPER_STAGES for k in stage
+        )
+        taper_stage_used = 0  # 0 = full taper, no relaxation needed
+        if not _is_usable(output_paths) and had_any_taper_override:
+            for stage_idx, stage_keys in enumerate(TAPER_STAGES, start=1):
+                popped = [profile.pop(k, None) for k in stage_keys]
+                if not any(v is not None for v in popped):
+                    continue  # nothing set at this stage — skip straight to the next
+                logger.warning(
+                    "user_id=%s week_no=%d taper stage %d relaxation (dropping %s) "
+                    "— retrying (status=%s)",
+                    user_id, body.week_no, stage_idx, stage_keys, summary.get("status"),
+                )
+                _write_plan_status(body.onboarding_id, f"optimizing (taper relaxation stage {stage_idx})")
+                # Widen the solver's acceptance gap a bit on each successive
+                # retry (0.3 -> 0.4 -> 0.5 -> 0.6) — a retry has already
+                # accepted a degraded taper for a usable result, so trading a
+                # little more solution quality for materially less wall-clock
+                # time on exactly the cases already proven hardest is a good
+                # trade. Never touches the first/primary solve.
+                profile["_solver_gap_rel_override"] = 0.3 + 0.1 * stage_idx
+                output_paths = _solve_once()
+                summary = output_paths.get("weekly_optimization_summary") or {}
+                taper_stage_used = stage_idx
+                if _is_usable(output_paths):
+                    break
 
-                os_path = output_paths.get("weekly_optimization_summary")
-                opt_summary: dict = {}
-                if isinstance(os_path, str) and Path(os_path).exists():
-                    with open(os_path) as f:
-                        opt_summary = json.load(f)
-                elif isinstance(os_path, dict):
-                    opt_summary = os_path
-            else:
-                _write_plan_status(body.onboarding_id, "No solution please try again")
-                return
+        # Final backup: one more retry with a widened gap only, no keys
+        # popped. This is a backup only — it never runs when the solve
+        # above already succeeded, and it fires whether or not there was
+        # any taper override to relax in the first place (weeks with no
+        # taper config, like week 3+, previously had zero fallback at all
+        # here). Confirmed via 3 repeated real runs of A001 week3 —
+        # identical code and data every time — that this exact class of
+        # case is genuinely borderline, not hard-infeasible: 2 runs failed
+        # ("Not Solved", no usable incumbent within the time budget) and 1
+        # succeeded, purely from CBC's own run-to-run branch-and-bound
+        # search variance. Costs at most one extra ~600s solve attempt, and
+        # only for a case that was already about to be reported as failed.
+        if not _is_usable(output_paths):
+            gap_stage = len(TAPER_STAGES) + 1
+            logger.warning(
+                "user_id=%s week_no=%d still unusable after taper relaxation "
+                "(status=%s) — final backup retry with widened gap only",
+                user_id, body.week_no, summary.get("status"),
+            )
+            _write_plan_status(body.onboarding_id, "optimizing (final backup retry, widened gap)")
+            # Always strictly wider than whatever gap was last attempted
+            # (0.3 if no taper stage ran at all, e.g. week3+; up to 0.6 if
+            # every taper stage already ran) — never a step backward.
+            last_gap = float(profile.get("_solver_gap_rel_override", 0.3))
+            profile["_solver_gap_rel_override"] = min(last_gap + 0.1, 0.7)
+            output_paths = _solve_once()
+            summary = output_paths.get("weekly_optimization_summary") or {}
+            taper_stage_used = gap_stage
+
+        # Record whether/how much the taper was relaxed so downstream
+        # consumers (reports, monitoring) don't have to scrape status
+        # strings to find out — previously this was only inferable by
+        # matching "retry" in the sequence of _write_plan_status calls.
+        summary["taper_dropped"] = taper_stage_used > 0
+        summary["taper_stage_used"] = taper_stage_used
+        output_paths["weekly_optimization_summary"] = summary
+
+        logger.info("model.run completed for user_id=%s [%.1fs]", user_id, time.time() - t0)
+
+        if not _is_usable(output_paths):
+            message = summary.get("message") or f"No solution please try again (status: {summary.get('status', 'unknown')})"
+            _write_plan_status(body.onboarding_id, message)
+            return
+
+        weekly_menu = output_paths.get("weekly_menu")
+        weekly_menu = _apply_rounded_quantity(
+            weekly_menu,
+            eff_daily=summary.get("eff_daily"),
+            band_lo=summary.get("energy_band_lo"),
+        )
+        weekly_menu = _apply_weekend_nonveg_swap(weekly_menu, profile, effective_start_date)
+        recipe_name_changed = _fetch_cached("USER_Recipes_name_changed")
+
+        name_map = dict(zip(recipe_name_changed['Recipe_Code'], recipe_name_changed['Recipe_Name']))
+        weekly_menu.loc[
+            weekly_menu['Recipe_Code'].isin(name_map.keys()),
+            'Recipe_Name'
+        ] = weekly_menu['Recipe_Code'].map(name_map)
+
+        weekly_min = output_paths.get("weekly_min")
+        if len(weekly_menu) > 0:
+            finall_summary = Recomendation_formatting(weekly_menu)
+            final_nut_summary = build_weekly_nutrient_summary(weekly_menu, weekly_min)
+
+        os_path = output_paths.get("weekly_optimization_summary")
+        opt_summary: dict = {}
+        if isinstance(os_path, str) and Path(os_path).exists():
+            with open(os_path) as f:
+                opt_summary = json.load(f)
+        elif isinstance(os_path, dict):
+            opt_summary = os_path
 
     except Exception as e:
         traceback.print_exc()
@@ -672,47 +1043,33 @@ def Recomendation_formatting(weekly_menu_df):
                         # non-fatal: proceed without subcategory name
                         pass
 
-            # Enrich final_df with nutrition from Recipes and compute GL at optimal serving
+            # Realized Energy/Carb/Fiber/GL: reuse weekly_menu_df's own values
+            # (already computed once upstream by the LP, still unscaled at
+            # this point in _run_plan_background — this runs before the
+            # Energy_ENERC_Kcal*=Serving step) rather than re-deriving them
+            # from a fresh Recipe-table merge. This used to be a second,
+            # independently-maintained calculation of the same numbers —
+            # confirmed via direct row-by-row comparison (both paths matched
+            # to float precision across a full week's menu) that it was pure
+            # duplication, not an intentionally different figure, so it's
+            # consolidated onto the one source weekly_menu_df already has.
             try:
-                rec_df = _fetch_cached("Recipe")
-                if len(rec_df)>0:
-                    # find recipe code column in recipes
-                    code_col = None
-                    for c in ["Recipe code", "Recipe_Code", "Recipe Code", "Code"]:
-                        if c in rec_df.columns:
-                            code_col = c
-                            break
-                    if code_col is not None:
-                        rec_sel = rec_df[[code_col] + [col for col in ["Energy_ENERC_KJ","Carbohydrate_g", "TotalDietaryFibre_FIBTG_g"] if col in rec_df.columns]].copy()
-                        rec_sel = rec_sel.rename(columns={code_col: "Recipe_Code"})
-                        final_df = final_df.merge(rec_sel, on="Recipe_Code", how="left")
-                    
-                    final_df["Energy_ENERC_Kcal"] = final_df["Energy_ENERC_KJ"] / 4.184
-                    # STEP 1: Create _opt_prop FIRST
-                    final_df["_opt_prop"] = pd.to_numeric(final_df.get("Optimal proportion"), errors="coerce").fillna(0.0)
+                src_cols = [c for c in ("Recipe_Code", "Day", "Meal_Time", "Dish_Type",
+                                         "Energy_ENERC_Kcal", "Carbohydrate_g",
+                                         "TotalDietaryFibre_FIBTG_g", "GL")
+                            if c in weekly_menu_df.columns]
+                merge_keys = [c for c in ("Recipe_Code", "Day", "Meal_Time", "Dish_Type") if c in src_cols]
+                src = weekly_menu_df[src_cols].drop_duplicates(subset=merge_keys)
+                final_df = final_df.merge(src, on=merge_keys, how="left")
 
-                    #Convert ALL relevant columns to numeric
-                    num_cols = ["Energy_ENERC_Kcal", "Carbohydrate_g", "TotalDietaryFibre_FIBTG_g", "GI_Avg"]
-                    for col in num_cols:
-                        if col in final_df.columns:
-                            final_df[col] = pd.to_numeric(final_df[col], errors="coerce")
+                final_df["_opt_prop"] = pd.to_numeric(final_df.get("Optimal proportion"), errors="coerce").fillna(0.0)
+                for col in ("Energy_ENERC_Kcal", "Carbohydrate_g", "TotalDietaryFibre_FIBTG_g", "GL"):
+                    if col in final_df.columns:
+                        final_df[col] = pd.to_numeric(final_df[col], errors="coerce").fillna(0.0) * final_df["_opt_prop"]
 
-                    #Multiply by optimal proportion
-                    final_df["Energy_ENERC_Kcal"] = final_df["Energy_ENERC_Kcal"] * final_df["_opt_prop"]
-                    final_df["Carbohydrate_g"] = final_df["Carbohydrate_g"] * final_df["_opt_prop"]
-                    final_df["TotalDietaryFibre_FIBTG_g"] = final_df["TotalDietaryFibre_FIBTG_g"] * final_df["_opt_prop"]
-
-                    # ensure numeric carbs, GI and optimal proportion
-                    final_df["_carb_g"] = pd.to_numeric(final_df.get("Carbohydrate_g"), errors="coerce")
-                    final_df["_gi"] = pd.to_numeric(final_df.get("GI_Avg"), errors="coerce")
-                    final_df["_fiber_for_gl"] = pd.to_numeric(final_df["TotalDietaryFibre_FIBTG_g"], errors="coerce").fillna(0.0)
-
-                    # compute GL at optimal serving: GI * Carbs / 100 (fiber intentionally not subtracted)
-                    final_df["GL"] = (final_df["_gi"].fillna(np.nan) * final_df["_carb_g"].fillna(0.0)) / 100.0
-                    # if GI or carbs missing, leave GL as NaN
-                else:
-                    # recipes file missing — set GL to NaN
-                    final_df["GL"] = np.nan
+                final_df["_carb_g"] = pd.to_numeric(final_df.get("Carbohydrate_g"), errors="coerce")
+                final_df["_gi"] = pd.to_numeric(final_df.get("GI_Avg"), errors="coerce")
+                final_df["_fiber_for_gl"] = pd.to_numeric(final_df.get("TotalDietaryFibre_FIBTG_g"), errors="coerce").fillna(0.0)
             except Exception:
                 # non-fatal; leave GL unset
                 final_df["GL"] = final_df.get("GL", np.nan)
