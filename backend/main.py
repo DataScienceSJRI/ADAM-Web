@@ -56,7 +56,9 @@ _tags_metadata = [
         "name": "notifications",
         "description": "Register/remove device tokens and send push notifications. "
                        "`POST /send-reminders` is cron-protected (X-Cron-Secret header) and sends meal-logging reminders "
-                       "to users whose preferred meal time falls within the configured window.",
+                       "to users whose preferred meal time falls within the configured window. "
+                       "`POST /send-missed-slot` (same protection, same cadence) sends WhatsApp missed-slot "
+                       "messages for occasions still unlogged past their escalation time.",
     },
     {
         "name": "whatsapp",
