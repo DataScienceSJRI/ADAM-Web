@@ -23,7 +23,10 @@ type Participant = {
   user_id: string;
   participant_id: string;
   display_name: string | null;
+  onboarding_id: string | null;
   plan_status: string | null;
+  plan_id: string | null;
+  has_plan_rows: boolean;
   last_plan_at: string | null;
   created_at: string | null;
   whatsapp_phone: string | null;
@@ -35,6 +38,19 @@ type CreatedUser = { participant_id: string; display_name: string; user_id: stri
 const IN_PROGRESS = new Set(["generating", "optimizing", "saving"]);
 type CohortFilter = "actual" | "test";
 
+function isInProgressStatus(status: string | null): boolean {
+  if (!status) return false;
+  return IN_PROGRESS.has(status) || status.startsWith("optimizing ");
+}
+
+function isFailedStatus(status: string | null): boolean {
+  return Boolean(status?.startsWith("error") || status?.includes("No solution"));
+}
+
+function hasUsablePlan(participant: Participant): boolean {
+  return Boolean(participant.plan_status?.startsWith("ok:") || participant.has_plan_rows);
+}
+
 function isTestUser(participant: Participant) {
   return participant.participant_id?.toUpperCase().startsWith("P");
 }
@@ -43,18 +59,21 @@ function isActualUser(participant: Participant) {
   return !isTestUser(participant);
 }
 
-function StatusBadge({ status }: { status: string | null }) {
+function StatusBadge({ participant }: { participant: Participant }) {
+  const status = participant.plan_status;
+  if (participant.has_plan_rows && isFailedStatus(status))
+    return <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 px-2.5 py-0.5 text-xs font-medium">Ready</span>;
   if (!status) return <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/35 dark:text-amber-300">No plan</span>;
   if (status.startsWith("ok:"))
     return <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 px-2.5 py-0.5 text-xs font-medium">Ready</span>;
-  if (IN_PROGRESS.has(status))
+  if (isInProgressStatus(status))
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300 px-2.5 py-0.5 text-xs font-medium">
         <span className="h-1.5 w-1.5 rounded-full border border-current border-t-transparent animate-spin" />
         Generating
       </span>
     );
-  if (status.startsWith("error") || status.includes("No solution"))
+  if (isFailedStatus(status))
     return <span className="inline-flex items-center rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 px-2.5 py-0.5 text-xs font-medium">Failed</span>;
   return <span className="text-xs text-muted-foreground">{status}</span>;
 }
@@ -128,6 +147,7 @@ export function UsersClient({
   const [waError, setWaError] = useState<string | null>(null);
   const [waJustLinked, setWaJustLinked] = useState(false);
   const [copiedFor, setCopiedFor] = useState<string | null>(null);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   function copyActivationLink(key: string) {
     if (!ACTIVATION_LINK) return;
@@ -147,7 +167,7 @@ export function UsersClient({
 
   // Poll while any plan is generating
   useEffect(() => {
-    const hasInProgress = participants.some((p) => p.plan_status && IN_PROGRESS.has(p.plan_status));
+    const hasInProgress = participants.some((p) => isInProgressStatus(p.plan_status));
     if (!hasInProgress) return;
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
@@ -197,6 +217,34 @@ export function UsersClient({
     load();
   }
 
+  async function retryPlan(participant: Participant) {
+    if (!participant.onboarding_id) {
+      setError("Cannot retry: missing onboarding session for participant");
+      return;
+    }
+    setRetryingId(participant.user_id);
+    setError(null);
+    try {
+      const res = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          onboarding_id: participant.onboarding_id,
+          target_user_id: participant.user_id,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail ?? "Failed to queue retry");
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to queue retry");
+    } finally {
+      setRetryingId(null);
+    }
+  }
+
   function closeWaModal() {
     setLinkingUser(null);
     setWaPhone("");
@@ -222,17 +270,17 @@ export function UsersClient({
   const showCohortSwitch = isAdmin;
   const cohortParticipants = showCohortSwitch && cohortFilter === "test" ? testUsers : actualUsers;
   const total = cohortParticipants.length;
-  const ready = cohortParticipants.filter((p) => p.plan_status?.startsWith("ok:")).length;
-  const generating = cohortParticipants.filter((p) => p.plan_status && IN_PROGRESS.has(p.plan_status)).length;
-  const noPlan = cohortParticipants.filter((p) => !p.plan_status).length;
+  const ready = cohortParticipants.filter(hasUsablePlan).length;
+  const generating = cohortParticipants.filter((p) => isInProgressStatus(p.plan_status)).length;
+  const noPlan = cohortParticipants.filter((p) => !p.plan_status && !p.has_plan_rows).length;
 
   const filtered = cohortParticipants.filter((p) => {
     const q = search.trim().toLowerCase();
     if (q && !p.participant_id.toLowerCase().includes(q) && !(p.display_name ?? "").toLowerCase().includes(q)) return false;
-    if (statusFilter === "ready" && !p.plan_status?.startsWith("ok:")) return false;
-    if (statusFilter === "generating" && !(p.plan_status && IN_PROGRESS.has(p.plan_status))) return false;
-    if (statusFilter === "none" && p.plan_status) return false;
-    if (statusFilter === "failed" && !(p.plan_status?.startsWith("error") || p.plan_status?.includes("No solution"))) return false;
+    if (statusFilter === "ready" && !hasUsablePlan(p)) return false;
+    if (statusFilter === "generating" && !isInProgressStatus(p.plan_status)) return false;
+    if (statusFilter === "none" && (p.plan_status || p.has_plan_rows)) return false;
+    if (statusFilter === "failed" && !isFailedStatus(p.plan_status)) return false;
     return true;
   });
 
@@ -395,14 +443,14 @@ export function UsersClient({
                 </tr>
               ) : null}
               {filtered.map((p) => {
-                const inProgress = p.plan_status ? IN_PROGRESS.has(p.plan_status) : false;
-                const hasReady = p.plan_status?.startsWith("ok:");
-                const hasFailed = p.plan_status?.startsWith("error") || p.plan_status?.includes("No solution");
+                const inProgress = isInProgressStatus(p.plan_status);
+                const hasReady = hasUsablePlan(p);
+                const hasFailed = isFailedStatus(p.plan_status);
                 return (
                   <tr key={p.user_id} className="transition-colors hover:bg-accent/25">
                     <td className="px-4 py-3.5 font-mono text-xs font-semibold text-primary">{p.participant_id}</td>
                     <td className="px-4 py-3.5 text-sm">{p.display_name ?? "—"}</td>
-                    <td className="px-4 py-3.5"><StatusBadge status={p.plan_status} /></td>
+                    <td className="px-4 py-3.5"><StatusBadge participant={p} /></td>
                     <td className="px-4 py-3.5"><WhatsAppStatus participant={p} /></td>
                     <td className="px-4 py-3.5 text-xs text-muted-foreground">{fmtDate(p.last_plan_at)}</td>
                     <td className="px-4 py-3.5 text-xs text-muted-foreground">{fmtDate(p.created_at)}</td>
@@ -415,12 +463,23 @@ export function UsersClient({
                           >
                             View Plan
                           </Link>
-                        ) : hasFailed || !p.plan_status ? (
+                        ) : null}
+                        {hasFailed ? (
+                          <button
+                            type="button"
+                            onClick={() => retryPlan(p)}
+                            disabled={retryingId === p.user_id}
+                            className="rounded-xl border bg-background/70 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
+                            title={hasReady ? "Retry next missing week" : undefined}
+                          >
+                            {retryingId === p.user_id ? "Retrying..." : "Retry"}
+                          </button>
+                        ) : !hasReady && !p.plan_status ? (
                           <Link
                             href={`/onboarding?participant_id=${encodeURIComponent(p.user_id)}`}
                             className="rounded-xl border bg-background/70 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
                           >
-                            {hasFailed ? "Retry" : "Onboard"}
+                            Onboard
                           </Link>
                         ) : inProgress ? (
                           <span className="rounded-xl bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground">

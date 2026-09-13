@@ -27,7 +27,10 @@ class ParticipantResponse(BaseModel):
     participant_id: str
     display_name: str | None
     coordinator_id: str | None
+    onboarding_id: str | None = None
     plan_status: str | None = None
+    plan_id: str | None = None
+    has_plan_rows: bool = False
     last_plan_at: str | None = None
     created_at: str | None = None
     password: str | None = None
@@ -120,7 +123,7 @@ def list_participants(
     p_ids = [p["user_id"] for p in participants]
     sessions = (
         sb.table("BE_Onboarding_Sessions")
-        .select("user_id, plan_status, created_at, plan_id")
+        .select("onboarding_id, user_id, plan_status, created_at, plan_id")
         .in_("user_id", p_ids)
         .order("created_at", desc=True)
         .execute()
@@ -131,6 +134,22 @@ def list_participants(
         uid = s.get("user_id")
         if uid and uid not in session_map:
             session_map[uid] = s
+
+    plan_ids = [s["plan_id"] for s in session_map.values() if s.get("plan_id")]
+    plan_row_counts: dict[str, int] = {}
+    if plan_ids:
+        plan_rows = (
+            sb.table("Recommendation")
+            .select("plan_id")
+            .in_("plan_id", plan_ids)
+            .limit(10000)
+            .execute()
+            .data or []
+        )
+        for row in plan_rows:
+            plan_id = row.get("plan_id")
+            if plan_id:
+                plan_row_counts[plan_id] = plan_row_counts.get(plan_id, 0) + 1
 
     whatsapp_rows = (
         sb.table("WH_Users")
@@ -145,12 +164,16 @@ def list_participants(
     for p in participants:
         s = session_map.get(p["user_id"], {})
         w = whatsapp_map.get(p["user_id"], {})
+        plan_id = s.get("plan_id")
         result.append(ParticipantResponse(
             user_id=p["user_id"],
             participant_id=p.get("participant_id") or "",
             display_name=p.get("display_name"),
             coordinator_id=p.get("coordinator_id"),
+            onboarding_id=s.get("onboarding_id"),
             plan_status=s.get("plan_status"),
+            plan_id=plan_id,
+            has_plan_rows=bool(plan_id and plan_row_counts.get(plan_id, 0) > 0),
             last_plan_at=s.get("created_at"),
             created_at=p.get("created_at"),
             whatsapp_phone=w.get("phone"),

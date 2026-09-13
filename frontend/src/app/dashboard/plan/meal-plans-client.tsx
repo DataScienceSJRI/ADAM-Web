@@ -9,7 +9,10 @@ type Participant = {
   user_id: string;
   participant_id: string;
   display_name: string | null;
+  onboarding_id: string | null;
   plan_status: string | null;
+  plan_id: string | null;
+  has_plan_rows: boolean;
   last_plan_at: string | null;
   created_at: string | null;
 };
@@ -18,11 +21,28 @@ const IN_PROGRESS = new Set(["generating", "optimizing", "saving"]);
 
 export type MealPlanParticipant = Participant;
 
-function statusLabel(status: string | null): { label: string; className: string } {
+function isInProgressStatus(status: string | null): boolean {
+  if (!status) return false;
+  return IN_PROGRESS.has(status) || status.startsWith("optimizing ");
+}
+
+function isFailedStatus(status: string | null): boolean {
+  return Boolean(status?.startsWith("error") || status?.includes("No solution"));
+}
+
+function hasUsablePlan(participant: Participant): boolean {
+  return Boolean(participant.plan_status?.startsWith("ok:") || participant.has_plan_rows);
+}
+
+function statusLabel(participant: Participant): { label: string; className: string } {
+  const status = participant.plan_status;
+  if (participant.has_plan_rows && isFailedStatus(status)) {
+    return { label: "Ready", className: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400" };
+  }
   if (!status) return { label: "No plan", className: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400" };
   if (status.startsWith("ok:")) return { label: "Ready", className: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400" };
-  if (IN_PROGRESS.has(status)) return { label: "Generating", className: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400" };
-  if (status.startsWith("error") || status.includes("No solution")) return { label: "Failed", className: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400" };
+  if (isInProgressStatus(status)) return { label: "Generating", className: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400" };
+  if (isFailedStatus(status)) return { label: "Failed", className: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400" };
   return { label: status, className: "bg-gray-100 text-gray-500" };
 }
 
@@ -43,6 +63,7 @@ export function MealPlansClient({
   const [participants, setParticipants] = useState<Participant[]>(initialParticipants);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(initialError);
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/users");
@@ -52,16 +73,44 @@ export function MealPlansClient({
   }, []);
 
   useEffect(() => {
-    const hasInProgress = participants.some((p) => p.plan_status && IN_PROGRESS.has(p.plan_status));
+    const hasInProgress = participants.some((p) => isInProgressStatus(p.plan_status));
     if (!hasInProgress) return;
     const id = setInterval(load, 8000);
     return () => clearInterval(id);
   }, [participants, load]);
 
   const total = participants.length;
-  const ready = participants.filter((p) => p.plan_status?.startsWith("ok:")).length;
-  const generating = participants.filter((p) => p.plan_status && IN_PROGRESS.has(p.plan_status)).length;
-  const noPlan = participants.filter((p) => !p.plan_status).length;
+  const ready = participants.filter(hasUsablePlan).length;
+  const generating = participants.filter((p) => isInProgressStatus(p.plan_status)).length;
+  const noPlan = participants.filter((p) => !p.plan_status && !p.has_plan_rows).length;
+
+  async function retryPlan(participant: Participant) {
+    if (!participant.onboarding_id) {
+      setError("Cannot retry: missing onboarding session for participant");
+      return;
+    }
+    setRetryingId(participant.user_id);
+    setError(null);
+    try {
+      const res = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          onboarding_id: participant.onboarding_id,
+          target_user_id: participant.user_id,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail ?? "Failed to queue retry");
+      }
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to queue retry");
+    } finally {
+      setRetryingId(null);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -117,9 +166,10 @@ export function MealPlansClient({
             </thead>
             <tbody className="divide-y">
               {participants.map((p) => {
-                const { label, className } = statusLabel(p.plan_status);
-                const inProgress = p.plan_status ? IN_PROGRESS.has(p.plan_status) : false;
-                const hasReady = p.plan_status?.startsWith("ok:");
+                const { label, className } = statusLabel(p);
+                const inProgress = isInProgressStatus(p.plan_status);
+                const hasReady = hasUsablePlan(p);
+                const hasFailed = isFailedStatus(p.plan_status);
                 return (
                   <tr key={p.user_id} className="hover:bg-muted/30 transition-colors">
                     <td className="px-4 py-3.5">
@@ -155,12 +205,23 @@ export function MealPlansClient({
                             View Plan
                           </Link>
                         )}
-                        {!hasReady && !inProgress && (
+                        {hasFailed && (
+                          <button
+                            type="button"
+                            onClick={() => retryPlan(p)}
+                            disabled={retryingId === p.user_id}
+                            className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors"
+                            title={hasReady ? "Retry next missing week" : undefined}
+                          >
+                            {retryingId === p.user_id ? "Retrying..." : "Retry"}
+                          </button>
+                        )}
+                        {!hasReady && !hasFailed && !inProgress && (
                           <Link
                             href={`/onboarding?participant_id=${encodeURIComponent(p.user_id)}`}
                             className="rounded-lg border px-3 py-1.5 text-xs font-medium hover:bg-muted transition-colors"
                           >
-                            {p.plan_status?.startsWith("error") ? "Retry" : "Onboard"}
+                            Onboard
                           </Link>
                         )}
                       </div>
