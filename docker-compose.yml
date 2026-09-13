@@ -25,7 +25,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/1
       PLAN_QUEUE_NAME: meal-plans
-      PLAN_JOB_TIMEOUT_SECONDS: "1200"
+      PLAN_JOB_TIMEOUT_SECONDS: "3600"
       PYTHONUNBUFFERED: "1"
     depends_on:
       - redis
