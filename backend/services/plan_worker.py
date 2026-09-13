@@ -25,7 +25,8 @@ def run_plan_job(user_id: str, body: dict, profile: dict) -> None:
         user_id,
         request.onboarding_id,
     )
-    start_date = date.fromisoformat(request.start_date) if request.start_date else None
+    start_date_iso = body.get("start_date")
+    start_date = date.fromisoformat(start_date_iso) if start_date_iso else None
     _run_plan_background(user_id=user_id, body=request, profile=profile, start_date=start_date)
 
 
