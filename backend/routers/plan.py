@@ -896,6 +896,18 @@ def generate_plan(
         )
     user_id = effective_user_id
 
+    # The dashboard's "Retry" button re-runs the whole onboarding flow, which never sends week_no 
+    if "week_no" not in body.model_fields_set:
+        existing_plan = get_plan_status(user_id)
+        if existing_plan["has_plan"]:
+            max_week = max((p["week_no"] or 0) for p in existing_plan["plans"])
+            body.week_no = max_week + 1
+            logger.info(
+                "user_id=%s: week_no omitted from request, inferred week_no=%d "
+                "from existing plans (max existing week=%d)",
+                user_id, body.week_no, max_week,
+            )
+
     _write_plan_status(body.onboarding_id, "generating")
     try:
         queue = Queue(
