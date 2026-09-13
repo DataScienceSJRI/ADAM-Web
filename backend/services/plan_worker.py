@@ -25,7 +25,8 @@ def run_plan_job(user_id: str, body: dict, profile: dict) -> None:
         user_id,
         request.onboarding_id,
     )
-    _run_plan_background(user_id=user_id, body=request, profile=profile)
+    start_date = date.fromisoformat(request.start_date) if request.start_date else None
+    _run_plan_background(user_id=user_id, body=request, profile=profile, start_date=start_date)
 
 
 def run_auto_next_week_job(user_id: str, onboarding_id: str, week_no: int, start_date_iso: str) -> None:
