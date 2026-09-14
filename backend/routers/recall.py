@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from concurrent.futures import ThreadPoolExecutor
 from core.auth import get_current_user
 from core.roles import require_coordinator
-from core.supabase import get_supabase
+from core.supabase import get_supabase, fetch_all_rows
 from models.schemas import (
     DietRecallImageRequest,
     DietRecallLogRequest,
@@ -72,15 +72,22 @@ def get_recall_history(
     """Return the authenticated user's diet recall history: newest date first,
     and within each date, Breakfast -> Lunch -> Dinner -> Snacks."""
     sb = get_supabase()
-    query = sb.table("DietRecall").select("*", count="exact").eq("user_id", user_id)
-    if date:
-        query = query.eq("Date", date)
-    if meal_slot:
-        query = query.eq("meal_slot", meal_slot.value)
-    # Meal-slot ordering isn't expressible via PostgREST's .order(), so fetch a
-    # bounded set of matching rows sorted by Date and re-sort/paginate client-side.
-    resp = query.order("Date", desc=True).limit(2000).execute()
-    sorted_rows = _sort_recall_rows(resp.data or [])
+
+    def _build_query():
+        q = sb.table("DietRecall").select("*").eq("user_id", user_id)
+        if date:
+            q = q.eq("Date", date)
+        if meal_slot:
+            q = q.eq("meal_slot", meal_slot.value)
+        return q.order("Date", desc=True)
+
+    # Meal-slot ordering isn't expressible via PostgREST's .order(), so fetch
+    # every matching row (paginated via fetch_all_rows -- a long-tenured
+    # participant's full history can exceed Supabase's 1000-row-per-request
+    # cap well before this endpoint's own 2000-row ceiling did anything) and
+    # re-sort/paginate client-side.
+    resp_data = fetch_all_rows(_build_query)
+    sorted_rows = _sort_recall_rows(resp_data)
 
     # A meal-photo upload (POST /recall/image) writes its DietRecall row with
     # Food_Name="Pending" immediately, so it's already visible here — no
@@ -274,25 +281,22 @@ def list_coordinator_participants(
         lookup_ids.append(f"{pid}@adam.participant")
 
     since = str(date_type.today() - timedelta(days=90))
-    recalls = (
+    # fetch_all_rows pages past Supabase's 1000-row-per-request cap -- at full
+    # study scale (60 subjects x 90 days x 4 meals) this cohort-wide window
+    # comfortably exceeds both that cap and the old flat .limit(5000).
+    recalls = fetch_all_rows(lambda: (
         sb.table("DietRecall")
         .select("ID, user_id, Date, meal_slot, Food_Name_desc, notes")
         .in_("user_id", lookup_ids)
         .gte("Date", since)
-        .limit(5000)
-        .execute()
-        .data
-    ) or []
+    ))
 
-    planned = (
+    planned = fetch_all_rows(lambda: (
         sb.table("Recommendation")
         .select("user_id, Date, Timings, Food_Name_desc")
         .in_("user_id", lookup_ids)
         .gte("Date", since)
-        .limit(5000)
-        .execute()
-        .data
-    ) or []
+    ))
 
     def _slot_key(uid: str, date_str: str, slot) -> tuple:
         return (uid.split("@")[0], date_str, str(slot or "").strip().lower())

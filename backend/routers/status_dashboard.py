@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from core.supabase import get_supabase
+from core.supabase import get_supabase, fetch_all_rows
 from models.schemas import ContactParticipantRequest
 from services.push import send_push
 from services.recall import fetch_base_gl_map, fetch_portion_map, gl_for_quantity
@@ -21,6 +21,14 @@ _SNACK_DUE_AFTER_SLOT = "dinner"
 _GL_COMPLIANCE_TOLERANCE = 0.20
 _GL_COMPLIANCE_FLOOR = 1.0
 _GL_COMPLIANCE_WINDOW_DAYS = 14
+
+# See core.supabase.fetch_all_rows -- every _fetch_all(...) call below pages
+# through .range() instead of trusting a single large .limit() call, which
+# Supabase/PostgREST silently caps at 1000 rows server-side regardless of
+# the requested limit (confirmed directly: this exact blind spot left
+# A006_RAJENDRA's dashboard GL figures blank with no error, once
+# RecommendationsBackup crossed 1000 rows across just 6 participants).
+_fetch_all = fetch_all_rows
 
 
 def _format_slot_list(slots: list[str]) -> str:
@@ -73,14 +81,11 @@ def _lookup_ids(user_ids: list[str]) -> list[str]:
 
 
 def _earliest_dates(sb, table: str, lookup_ids: list[str]) -> dict[str, str]:
-    rows = (
+    rows = _fetch_all(lambda: (
         sb.table(table)
         .select("user_id, Date")
         .in_("user_id", lookup_ids)
-        .limit(20000)
-        .execute()
-        .data
-    ) or []
+    ))
     earliest: dict[str, str] = {}
     for r in rows:
         uid = str(r.get("user_id", "")).split("@")[0]
@@ -97,29 +102,23 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
     window_start = str(window_end - timedelta(days=_GL_COMPLIANCE_WINDOW_DAYS - 1))
     window_end_str = str(window_end)
 
-    planned_rows = (
+    planned_rows = _fetch_all(lambda: (
         sb.table("RecommendationsBackup")
         .select("user_id, Date, Timings, Food_Name_desc, Food_Qty")
         .in_("user_id", lookup_ids)
         .gte("Date", window_start)
         .lte("Date", window_end_str)
-        .limit(20000)
-        .execute()
-        .data
-    ) or []
+    ))
     if not planned_rows:
         return {}
 
-    recall_rows = (
+    recall_rows = _fetch_all(lambda: (
         sb.table("DietRecall")
         .select("user_id, Date, meal_slot, GL")
         .in_("user_id", lookup_ids)
         .gte("Date", window_start)
         .lte("Date", window_end_str)
-        .limit(20000)
-        .execute()
-        .data
-    ) or []
+    ))
 
     actual_gl: dict[tuple[str, str, str], float] = {}
     for r in recall_rows:
@@ -229,15 +228,12 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
     global_start = min((w[0] for w in window.values()), default=str(window_floor))
 
-    recalls = (
+    recalls = _fetch_all(lambda: (
         sb.table("DietRecall")
         .select("user_id, Date, meal_slot, GL, Energy_Kcal")
         .in_("user_id", lookup_ids)
         .gte("Date", global_start)
-        .limit(20000)
-        .execute()
-        .data
-    ) or []
+    ))
 
     counts: dict[str, dict[str, dict[str, int]]] = {}
     actual_gl: dict[str, dict[str, dict[str, float]]] = {}
@@ -263,15 +259,12 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
     # averages always agree with the compliance percentage shown alongside
     # them. FinalSummary reflects the *current* plan (post-swap), which can
     # legitimately diverge from RecommendationsBackup after a recipe swap.
-    plan_rows = (
+    plan_rows = _fetch_all(lambda: (
         sb.table("RecommendationsBackup")
         .select("user_id, Date, Timings, Food_Name_desc, Food_Qty, Energy_kcal")
         .in_("user_id", lookup_ids)
         .gte("Date", global_start)
-        .limit(20000)
-        .execute()
-        .data
-    ) or []
+    ))
 
     plan_codes = list({str(r["Food_Name_desc"]).strip() for r in plan_rows if r.get("Food_Name_desc")})
     plan_base_gl_map = fetch_base_gl_map(sb, plan_codes)
@@ -301,26 +294,21 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
     gl_compliant_pct_by_uid = _bulk_gl_compliant_pct(sb, lookup_ids, today)
 
-    all_review_rows = (
+    all_review_rows = _fetch_all(lambda: (
         sb.table("MealImageReview")
         .select("user_id, diet_recall_id, review_status, created_at")
         .in_("user_id", lookup_ids)
         .in_("review_status", ["pending", "approved"])
-        .limit(2000)
-        .execute()
-        .data
-    ) or []
+    ))
     review_recall_ids = list({r["diet_recall_id"] for r in all_review_rows if r.get("diet_recall_id")})
 
     review_recall_map: dict[str, dict] = {}
     if review_recall_ids:
-        dr_rows = (
+        dr_rows = _fetch_all(lambda: (
             sb.table("DietRecall")
             .select("ID, Date, meal_slot")
             .in_("ID", review_recall_ids)
-            .execute()
-            .data
-        ) or []
+        ))
         review_recall_map = {r["ID"]: r for r in dr_rows}
 
     slot_review_statuses: dict[str, dict[str, dict[str, list[str]]]] = {}
@@ -619,14 +607,11 @@ def infeasible_generations(token: str):
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "entries": []}
 
     failed_lookup_ids = _lookup_ids(failed_uids)
-    plan_rows = (
+    plan_rows = _fetch_all(lambda: (
         sb.table("Recommendation")
         .select("user_id, WeekNo, Date, Timings, Food_Name_desc, Food_Qty, Energy_kcal")
         .in_("user_id", failed_lookup_ids)
-        .limit(20000)
-        .execute()
-        .data
-    ) or []
+    ))
 
     # Keep only each participant's highest WeekNo (their current/last plan).
     max_week: dict[str, int] = {}

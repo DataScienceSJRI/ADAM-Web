@@ -3,7 +3,7 @@ from datetime import date as date_type
 from fastapi import APIRouter, Depends, HTTPException
 from core.auth import get_current_user
 from core.roles import require_coordinator
-from core.supabase import get_supabase
+from core.supabase import get_supabase, fetch_all_rows
 from models.schemas import WeightLogRequest, WeightLogUpdateRequest, WeightLogResponse, WeightLogItem
 from services.recommendation_writer import get_plan_status
 
@@ -250,15 +250,17 @@ def coordinator_list_participants(
         return []
 
     participant_ids = [p["user_id"] for p in participants]
-    logs = (
+    # fetch_all_rows pages past Supabase's 1000-row-per-request cap -- a flat
+    # .limit(5000) would otherwise silently return only the newest 1000 rows
+    # across ALL participants combined once the cohort's total logs cross
+    # that threshold, shortchanging less-recently-active participants'
+    # history first.
+    logs = fetch_all_rows(lambda: (
         sb.table("user_weight_log")
         .select("id, user_id, weight_kg, date")
         .in_("user_id", participant_ids)
         .order("date", desc=True)
-        .limit(5000)
-        .execute()
-        .data
-    ) or []
+    ))
 
     logs_by_user: dict = {}
     for log in logs:

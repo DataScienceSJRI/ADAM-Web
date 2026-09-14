@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core.auth import get_current_user
 from core.roles import get_current_role, require_coordinator
-from core.supabase import get_supabase
+from core.supabase import get_supabase, fetch_all_rows
 
 logger = logging.getLogger("backend.routers.users")
 router = APIRouter(prefix="/users", tags=["users"])
@@ -138,14 +138,14 @@ def list_participants(
     plan_ids = [s["plan_id"] for s in session_map.values() if s.get("plan_id")]
     plan_row_counts: dict[str, int] = {}
     if plan_ids:
-        plan_rows = (
+        # Supabase caps a single response at 1000 rows regardless of .limit() --
+        # fetch_all_rows pages through so this doesn't silently under-count
+        # plan_row_counts once total rows across all plans crosses 1000.
+        plan_rows = fetch_all_rows(lambda: (
             sb.table("Recommendation")
             .select("plan_id")
             .in_("plan_id", plan_ids)
-            .limit(10000)
-            .execute()
-            .data or []
-        )
+        ))
         for row in plan_rows:
             plan_id = row.get("plan_id")
             if plan_id:
