@@ -113,7 +113,7 @@ def list_participants(
     ).eq("role", "participant")
     if role == "coordinator":
         query = query.eq("coordinator_id", user_id).ilike("participant_id", "A%")
-    participants = query.order("created_at", desc=True).execute().data or []
+    participants = query.order("participant_id").execute().data or []
 
     if not participants:
         return []

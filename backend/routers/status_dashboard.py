@@ -652,7 +652,7 @@ def infeasible_generations(token: str):
 
     sessions = (
         sb.table("BE_Onboarding_Sessions")
-        .select("onboarding_id, user_id, plan_status, created_at")
+        .select("onboarding_id, user_id, plan_status, next_plan_at, created_at")
         .in_("user_id", lookup_ids)
         .execute()
         .data
@@ -668,9 +668,29 @@ def infeasible_generations(token: str):
         if uid not in latest_session or created_at > (latest_session[uid].get("created_at") or ""):
             latest_session[uid] = s
 
-    failed_uids = [
+    status_looks_failed_uids = [
         uid for uid, s in latest_session.items()
         if s.get("plan_status") and not str(s["plan_status"]).startswith("ok:")
+    ]
+    if not status_looks_failed_uids:
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "entries": []}
+
+    # plan_status alone is unreliable: _write_plan_status only ever overwrites
+    # plan_status on an error -- it never touches next_plan_at, which is only
+    # ever set right after a genuine success (_schedule_next_week_job, called
+    # only from the success path in _run_plan_background). So a stray/
+    # duplicate retry that ran (and failed) AFTER a real successful
+    # completion leaves plan_status looking like "still failing" even though
+    # the participant's latest week genuinely completed and the pipeline is
+    # healthy and already scheduled to continue. next_plan_at sitting in the
+    # future is exactly that signal: a real success happened more recently
+    # than whatever set this stale error. next_plan_at in the past (already
+    # fired, nothing newer succeeded since) or absent means the failure is
+    # current and still unresolved.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    failed_uids = [
+        uid for uid in status_looks_failed_uids
+        if not (latest_session[uid].get("next_plan_at") and str(latest_session[uid]["next_plan_at"]) > now_iso)
     ]
     if not failed_uids:
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "entries": []}
