@@ -27,6 +27,47 @@ class PersonalizationConfig:
 		return self.workspace_dir / self.outputs_dir_name
 
 
+# Some users' liked "Main" subcategories map (via Main1_Main2_Mapping) to a much
+# wider set of companion Main2/Main3 subcategories than others -- e.g. A001's
+# candidate pool ran 26-37% larger than peers across LP rows/columns/elements,
+# causing CBC to blow its 600s time budget without completing even one
+# branch-and-bound pass ("0 iterations and 0 nodes"). Each subset_main2/
+# subset_main3 slice below is already sorted by Personalization_Score
+# descending before being capped, so trimming to the top-N keeps the
+# highest-scoring (most personalization-relevant) recipes and only drops the
+# long tail -- shrinking the LP without changing which recipes are favored.
+MAIN2_CANDIDATE_CAP_PER_SLOT = 30
+MAIN3_CANDIDATE_CAP_PER_SLOT = 30
+
+
+def _cap_top_n_by_blended_relevance(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """Caps a Main2/Main3 candidate slice to its top N rows, ranked by a 50/50
+    blend of Personalization_Score (GL/glucose-response driven) and the
+    curated Recipe_order "Relevance_Order" (lower = more commonly/relevantly
+    used, per Recipe_master's merge of the Recipe_order sheet). Both signals
+    are percentile-ranked within this slice before blending -- they're on
+    unrelated raw scales (a small GL-weighted float vs. a small hand-curated
+    integer) so a straight average of the raw values would just let whichever
+    happens to have the larger magnitude dominate. Most recipes have no
+    curated relevance value (curation is sparse, not exhaustive); those get a
+    neutral 0.5 rather than being punished, so lacking curation doesn't
+    outweigh a recipe's actual GL/glucose merit.
+    """
+    if df.empty or len(df) <= n:
+        return df
+    out = df.copy()
+    perso_rank = out["Personalization_Score"].rank(pct=True, method="average")
+    if "Relevance_Order" in out.columns and out["Relevance_Order"].notna().any():
+        # Lower Relevance_Order = more relevant, so rank ascending then invert
+        # to a 0-1 "goodness" score consistent with perso_rank's direction.
+        rel_rank = out["Relevance_Order"].rank(pct=True, method="average", ascending=True)
+        relevance_goodness = (1 - rel_rank).where(out["Relevance_Order"].notna(), 0.5)
+    else:
+        relevance_goodness = pd.Series(0.5, index=out.index)
+    blend = 0.5 * perso_rank + 0.5 * relevance_goodness
+    return out.assign(_cap_blend_score=blend).sort_values("_cap_blend_score", ascending=False).head(n).drop(columns=["_cap_blend_score"])
+
+
 class ADAMPersonalizationModel:
 
 	def __init__(self, workspace=None):
@@ -398,6 +439,18 @@ class ADAMPersonalizationModel:
 					recipe_master[target] = pd.to_numeric(recipe_master[found], errors="coerce").fillna(0)
 				except Exception:
 					recipe_master[target] = 0.0
+
+		# Curated "how commonly/relevantly used" ranking per recipe (lower = more
+		# relevant), maintained by hand in the Recipe_order sheet -- most recipes
+		# have no entry there, which is normal (sparse curation), not missing data.
+		recipe_order = ds.get("recipe_order", pd.DataFrame())
+		if not recipe_order.empty and "Recipe_Code" in recipe_order.columns and "Relevance order" in recipe_order.columns:
+			ro = recipe_order[["Recipe_Code", "Relevance order"]].copy()
+			ro["Relevance_Order"] = pd.to_numeric(ro["Relevance order"], errors="coerce")
+			ro = ro[["Recipe_Code", "Relevance_Order"]].dropna(subset=["Recipe_Code"]).drop_duplicates(subset=["Recipe_Code"])
+			recipe_master = recipe_master.merge(ro, on="Recipe_Code", how="left")
+		else:
+			recipe_master["Relevance_Order"] = np.nan
 
 		return recipe_master
 
@@ -1766,7 +1819,8 @@ class ADAMPersonalizationModel:
 									subset_main2["Dish_Type"] = "Main 2"
 									subset_main2["Meal_Time"] = meal_time
 									subset_main2["Preference_Row_ID"] = pref_row_id
-									all_rows.append(subset_main2.sort_values("Personalization_Score", ascending=False))
+									subset_main2 = subset_main2.sort_values("Personalization_Score", ascending=False)
+									all_rows.append(_cap_top_n_by_blended_relevance(subset_main2, MAIN2_CANDIDATE_CAP_PER_SLOT))
 						# Main3 (from mapping file, using code_cooc)
 						mapped_main3_keys = set()
 						if subcat_code and subcat_code in main1_to_main3:
@@ -1791,7 +1845,8 @@ class ADAMPersonalizationModel:
 									subset_main3["Dish_Type"] = "Main 3"
 									subset_main3["Meal_Time"] = meal_time
 									subset_main3["Preference_Row_ID"] = pref_row_id
-									all_rows.append(subset_main3.sort_values("Personalization_Score", ascending=False))
+									subset_main3 = subset_main3.sort_values("Personalization_Score", ascending=False)
+									all_rows.append(_cap_top_n_by_blended_relevance(subset_main3, MAIN3_CANDIDATE_CAP_PER_SLOT))
 						# Optional (from mapping file, using code_cooc)
 						# Robust lookup for optional mappings as well (same logic as main2)
 						mapped_opt_keys = set()

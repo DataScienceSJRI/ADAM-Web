@@ -22,7 +22,7 @@ _STATIC_TABLES = {
     "Recipe", "RecipeTagging", "SubCategory", "SubCategory_Onboarding",
     "DataModelling", "BaseEar", "BaseTul", "Main1_Main2_Mapping Subcategory",
     "Rec_ADAM_yes_no", "SubCategory_foods_GI_GL", "Recipes_ingredient",
-    "USER_Recipes_name_changed", "Millet_Recipes",
+    "USER_Recipes_name_changed", "Millet_Recipes", "Recipe_order",
 }
 _cache: dict[str, tuple[pd.DataFrame, float]] = {}
 
@@ -306,6 +306,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["recipe_ingredients"] = static.get("Recipes_ingredient", pd.DataFrame())
     ds["sub_category_gi_gl"] = static.get("SubCategory_foods_GI_GL", pd.DataFrame())
     ds["recipe_name_changed"] = static.get("USER_Recipes_name_changed", pd.DataFrame())
+    ds["recipe_order"] = static.get("Recipe_order", pd.DataFrame())
 
     _pref_filters: dict = {"user_id": user_id}
     if onboarding_id:
