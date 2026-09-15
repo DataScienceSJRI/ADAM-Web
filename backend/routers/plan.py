@@ -403,8 +403,21 @@ def _apply_rounded_quantity(
     selectable = (weekly_menu["Serving"] > 0) & weekly_menu["_tagging_portion"].notna() & (weekly_menu["_tagging_portion"] > 0)
 
     raw_quantity = weekly_menu["_tagging_portion"] * weekly_menu["Serving"]
+    # v can be NaN here even for a row the LP never selected -- this list runs
+    # over every candidate still carried in weekly_menu (Serving<=0 rows
+    # included, per this function's own docstring), not just `selectable`
+    # ones, so a single candidate recipe with a missing RecipeTagging.Portion
+    # (confirmed real: 19 such recipes exist, e.g. "Cabbage beans subzi")
+    # used to crash the entire week's generation the moment it showed up
+    # anywhere in the candidate pool, selected or not. _round_quantity_for_unit
+    # calls round() on its input, which raises ValueError on NaN. Skipping the
+    # call and leaving the value NaN is safe: `selectable` below already
+    # excludes NaN-portion rows from ever being written back to Serving.
     rounded_quantity = pd.Series(
-        [_round_quantity_for_unit(v, u) for v, u in zip(raw_quantity, weekly_menu["_tagging_unit"])],
+        [
+            _round_quantity_for_unit(v, u) if pd.notna(v) else v
+            for v, u in zip(raw_quantity, weekly_menu["_tagging_unit"])
+        ],
         index=weekly_menu.index,
     )
     corrected_proportion = rounded_quantity / weekly_menu["_tagging_portion"]
