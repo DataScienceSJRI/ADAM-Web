@@ -104,7 +104,7 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
 
     planned_rows = _fetch_all(lambda: (
         sb.table("RecommendationsBackup")
-        .select("user_id, Date, Timings, Food_Name_desc, Food_Qty")
+        .select("user_id, Date, Timings, Food_Name_desc, Food_Qty, Energy_kcal")
         .in_("user_id", lookup_ids)
         .gte("Date", window_start)
         .lte("Date", window_end_str)
@@ -114,13 +114,14 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
 
     recall_rows = _fetch_all(lambda: (
         sb.table("DietRecall")
-        .select("user_id, Date, meal_slot, GL")
+        .select("user_id, Date, meal_slot, GL, Energy_Kcal")
         .in_("user_id", lookup_ids)
         .gte("Date", window_start)
         .lte("Date", window_end_str)
     ))
 
     actual_gl: dict[tuple[str, str, str], float] = {}
+    actual_energy: dict[tuple[str, str, str], float] = {}
     for r in recall_rows:
         uid = str(r.get("user_id", "")).split("@")[0]
         d = _normalize_date(r.get("Date") or "")
@@ -130,6 +131,8 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
             continue
         key = (uid, d, slot)
         actual_gl[key] = actual_gl.get(key, 0.0) + float(gl)
+        if r.get("Energy_Kcal") is not None:
+            actual_energy[key] = actual_energy.get(key, 0.0) + float(r["Energy_Kcal"])
 
     codes = list({str(row["Food_Name_desc"]).strip() for row in planned_rows if row.get("Food_Name_desc")})
     base_gl_map = fetch_base_gl_map(sb, codes)
@@ -137,6 +140,7 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
 
     planned_occasions: dict[str, set] = {}
     planned_gl: dict[tuple[str, str, str], float] = {}
+    planned_energy: dict[tuple[str, str, str], float] = {}
     for row in planned_rows:
         uid = str(row.get("user_id", "")).split("@")[0]
         d = _normalize_date(row.get("Date") or "")
@@ -149,35 +153,51 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
         planned_occasions.setdefault(uid, set()).add((d, slot))
         code_norm = str(code).strip()
         gl = gl_for_quantity(base_gl_map.get(code_norm), portion_map.get(code_norm), row.get("Food_Qty"))
+        key = (uid, d, slot)
         if gl is not None:
-            key = (uid, d, slot)
             planned_gl[key] = planned_gl.get(key, 0.0) + gl
+        if row.get("Energy_kcal") is not None:
+            planned_energy[key] = planned_energy.get(key, 0.0) + float(row["Energy_kcal"])
 
-    # Two readings of the same underlying counts:
-    # - pct: compliant / all recommended slots -- a missed log counts against
-    #   the user, same as an over-budget log (accountability-style number).
-    # - known_pct: compliant / only the slots actually logged -- isolates
-    #   real adherence from logging behavior, dropping unlogged slots
-    #   entirely instead of penalizing them.
+    # Energy-weighted, not occasion-counted: a slot's vote is sized by its
+    # calories, so a ~5 kcal snack barely moves the number while a ~600 kcal
+    # breakfast dominates it -- fixes the exact distortion an unweighted
+    # per-occasion count has (a handful of trivially-compliant snacks was
+    # enough to swing "known" from a real ~43% breakfast-adherence picture up
+    # to 58.8% for one participant).
+    # - pct: sum(planned energy of compliant slots) / sum(planned energy of
+    #   ALL recommended slots) -- a missed log contributes its planned energy
+    #   to the denominator with none in the numerator, same accountability
+    #   stance as the unweighted version, just calorie-sized now.
+    # - known_pct: sum(actual energy of compliant slots) / sum(actual energy
+    #   of logged slots) -- weighted by what was really eaten, isolating
+    #   adherence from logging behavior.
     result: dict[str, dict] = {}
     for uid, occasions in planned_occasions.items():
-        compliant = 0
-        logged = 0
+        compliant_planned_energy = 0.0
+        total_planned_energy = 0.0
+        compliant_actual_energy = 0.0
+        total_actual_energy = 0.0
         for d, slot in occasions:
+            p_energy = planned_energy.get((uid, d, slot), 0.0)
+            total_planned_energy += p_energy
             actual = actual_gl.get((uid, d, slot))
             if actual is None:
                 continue
-            logged += 1
+            a_energy = actual_energy.get((uid, d, slot), 0.0)
+            total_actual_energy += a_energy
             planned = planned_gl.get((uid, d, slot), 0.0)
             if actual <= planned:
-                compliant += 1
+                compliant_planned_energy += p_energy
+                compliant_actual_energy += a_energy
                 continue
             tolerance = max(_GL_COMPLIANCE_FLOOR, planned * _GL_COMPLIANCE_TOLERANCE)
             if (actual - planned) <= tolerance:
-                compliant += 1
+                compliant_planned_energy += p_energy
+                compliant_actual_energy += a_energy
         result[uid] = {
-            "pct": round(100 * compliant / len(occasions), 1) if occasions else None,
-            "known_pct": round(100 * compliant / logged, 1) if logged else None,
+            "pct": round(100 * compliant_planned_energy / total_planned_energy, 1) if total_planned_energy else None,
+            "known_pct": round(100 * compliant_actual_energy / total_actual_energy, 1) if total_actual_energy else None,
         }
 
     return result
