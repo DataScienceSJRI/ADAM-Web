@@ -46,11 +46,17 @@ type ParticipantOverview = {
   logged_total: number;
   expected_total: number;
   compliance_pct: number | null;
+  worst_slot_logging: string | null;
+  worst_slot_logging_pct: number | null;
   avg_gl_planned: number | null;
   avg_gl_actual: number | null;
   gl_adherence_pct: number | null;
   gl_compliant_pct: number | null;
   gl_compliant_known_pct: number | null;
+  gl_worst_slot_all: string | null;
+  gl_worst_slot_all_pct: number | null;
+  gl_worst_slot_known: string | null;
+  gl_worst_slot_known_pct: number | null;
   last_logged_date: string | null;
 };
 
@@ -699,7 +705,7 @@ function MealComplianceTable({ participants }: { participants: ParticipantOvervi
             <div key={p.user_id} className="border-r last:border-r-0">
               <div
                 title={p.display_name ?? p.participant_id ?? p.user_id}
-                className="h-12 flex flex-col items-center justify-center border-b bg-muted/10 px-1"
+                className="min-h-12 flex flex-col items-center justify-center gap-0.5 border-b bg-muted/10 px-1 py-1"
               >
                 <span
                   title={p.display_name ?? p.participant_id ?? p.user_id}
@@ -707,9 +713,22 @@ function MealComplianceTable({ participants }: { participants: ParticipantOvervi
                 >
                   {participantNumber(p, pager.pageStart + i)}
                 </span>
-                <span className={`text-[10px] font-semibold ${complianceTone(p.compliance_pct)}`}>
-                  {p.compliance_pct === null ? "—" : `${p.compliance_pct}%`}
+                <span className="text-[10px] font-semibold tabular-nums whitespace-nowrap">
+                  <span className={complianceTone(p.compliance_pct)}>
+                    {p.compliance_pct === null ? "—" : `${p.compliance_pct}%`}
+                  </span>
+                  <span className="text-emerald-600 dark:text-emerald-400 font-normal"> logged</span>
                 </span>
+                {p.worst_slot_logging && (
+                  <span className="text-[10px] font-semibold tabular-nums whitespace-nowrap">
+                    <span className="text-emerald-700 dark:text-emerald-500 font-normal">worst </span>
+                    <span className="text-muted-foreground font-normal capitalize">{p.worst_slot_logging}</span>
+                    <span className="text-muted-foreground font-normal"> </span>
+                    <span className={complianceTone(p.worst_slot_logging_pct)}>
+                      {p.worst_slot_logging_pct === null ? "—" : `${p.worst_slot_logging_pct}%`}
+                    </span>
+                  </span>
+                )}
               </div>
               {MEAL_LOGGING_ROWS.map((row) => (
                 <div key={row.key} className="h-12 flex items-center justify-center border-t">
@@ -795,7 +814,7 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
             <div key={p.user_id} className="border-r last:border-r-0">
               <div
                 title={p.display_name ?? p.participant_id ?? p.user_id}
-                className="h-16 flex flex-col items-center justify-center border-b bg-muted/10 px-1"
+                className="min-h-16 flex flex-col items-center justify-center gap-0.5 border-b bg-muted/10 px-1 py-1.5"
               >
                 <span
                   title={p.display_name ?? p.participant_id ?? p.user_id}
@@ -806,14 +825,37 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
                 <span className="text-[10px] text-muted-foreground tabular-nums">
                   avg {p.avg_gl_planned ?? "—"}/{p.avg_gl_actual ?? "—"}
                 </span>
-                <span className="text-[10px] font-semibold tabular-nums">
+                <span className="text-[10px] font-semibold tabular-nums whitespace-nowrap">
+                  <span className="text-sky-600 dark:text-sky-400 font-normal">All </span>
                   <span className={complianceTone(p.gl_compliant_pct)}>
-                    {p.gl_compliant_pct === null ? "—" : `${p.gl_compliant_pct}% all`}
+                    {p.gl_compliant_pct === null ? "—" : `${p.gl_compliant_pct}%`}
                   </span>
-                  {" · "}
+                  {p.gl_worst_slot_all && (
+                    <>
+                      <span className="text-muted-foreground font-normal"> · </span>
+                      <span className="text-sky-700 dark:text-sky-500 font-normal">Worst </span>
+                      <span className="text-muted-foreground font-normal capitalize">{p.gl_worst_slot_all} </span>
+                      <span className={complianceTone(p.gl_worst_slot_all_pct)}>
+                        {p.gl_worst_slot_all_pct === null ? "—" : `${p.gl_worst_slot_all_pct}%`}
+                      </span>
+                    </>
+                  )}
+                </span>
+                <span className="text-[10px] font-semibold tabular-nums whitespace-nowrap">
+                  <span className="text-violet-600 dark:text-violet-400 font-normal">Known </span>
                   <span className={complianceTone(p.gl_compliant_known_pct)}>
-                    {p.gl_compliant_known_pct === null ? "—" : `${p.gl_compliant_known_pct}% known`}
+                    {p.gl_compliant_known_pct === null ? "—" : `${p.gl_compliant_known_pct}%`}
                   </span>
+                  {p.gl_worst_slot_known && (
+                    <>
+                      <span className="text-muted-foreground font-normal"> · </span>
+                      <span className="text-violet-700 dark:text-violet-500 font-normal">Worst </span>
+                      <span className="text-muted-foreground font-normal capitalize">{p.gl_worst_slot_known} </span>
+                      <span className={complianceTone(p.gl_worst_slot_known_pct)}>
+                        {p.gl_worst_slot_known_pct === null ? "—" : `${p.gl_worst_slot_known_pct}%`}
+                      </span>
+                    </>
+                  )}
                 </span>
               </div>
               {MEAL_ROWS.map((row) => (
