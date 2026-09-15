@@ -97,7 +97,7 @@ def _earliest_dates(sb, table: str, lookup_ids: list[str]) -> dict[str, str]:
     return earliest
 
 
-def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[str, Optional[float]]:
+def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[str, dict]:
     window_end = today - timedelta(days=1)
     window_start = str(window_end - timedelta(days=_GL_COMPLIANCE_WINDOW_DAYS - 1))
     window_end_str = str(window_end)
@@ -153,13 +153,21 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
             key = (uid, d, slot)
             planned_gl[key] = planned_gl.get(key, 0.0) + gl
 
-    pct_by_uid: dict[str, Optional[float]] = {}
+    # Two readings of the same underlying counts:
+    # - pct: compliant / all recommended slots -- a missed log counts against
+    #   the user, same as an over-budget log (accountability-style number).
+    # - known_pct: compliant / only the slots actually logged -- isolates
+    #   real adherence from logging behavior, dropping unlogged slots
+    #   entirely instead of penalizing them.
+    result: dict[str, dict] = {}
     for uid, occasions in planned_occasions.items():
         compliant = 0
+        logged = 0
         for d, slot in occasions:
             actual = actual_gl.get((uid, d, slot))
             if actual is None:
                 continue
+            logged += 1
             planned = planned_gl.get((uid, d, slot), 0.0)
             if actual <= planned:
                 compliant += 1
@@ -167,9 +175,12 @@ def _bulk_gl_compliant_pct(sb, lookup_ids: list[str], today: date_type) -> dict[
             tolerance = max(_GL_COMPLIANCE_FLOOR, planned * _GL_COMPLIANCE_TOLERANCE)
             if (actual - planned) <= tolerance:
                 compliant += 1
-        pct_by_uid[uid] = round(100 * compliant / len(occasions), 1) if occasions else None
+        result[uid] = {
+            "pct": round(100 * compliant / len(occasions), 1) if occasions else None,
+            "known_pct": round(100 * compliant / logged, 1) if logged else None,
+        }
 
-    return pct_by_uid
+    return result
 
 
 def _empty_overview() -> dict:
@@ -455,7 +466,8 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
             "avg_gl_planned": avg_planned,
             "avg_gl_actual": avg_actual,
             "gl_adherence_pct": gl_adherence_pct,
-            "gl_compliant_pct": gl_compliant_pct_by_uid.get(uid),
+            "gl_compliant_pct": gl_compliant_pct_by_uid.get(uid, {}).get("pct"),
+            "gl_compliant_known_pct": gl_compliant_pct_by_uid.get(uid, {}).get("known_pct"),
             "last_logged_date": last_logged_overall,
         })
 

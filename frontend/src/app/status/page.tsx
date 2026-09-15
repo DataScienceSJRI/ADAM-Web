@@ -50,6 +50,7 @@ type ParticipantOverview = {
   avg_gl_actual: number | null;
   gl_adherence_pct: number | null;
   gl_compliant_pct: number | null;
+  gl_compliant_known_pct: number | null;
   last_logged_date: string | null;
 };
 
@@ -805,8 +806,14 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
                 <span className="text-[10px] text-muted-foreground tabular-nums">
                   avg {p.avg_gl_planned ?? "—"}/{p.avg_gl_actual ?? "—"}
                 </span>
-                <span className={`text-[10px] font-semibold tabular-nums ${complianceTone(p.gl_compliant_pct)}`}>
-                  {p.gl_compliant_pct === null ? "—" : `${p.gl_compliant_pct}% compliant`}
+                <span className="text-[10px] font-semibold tabular-nums">
+                  <span className={complianceTone(p.gl_compliant_pct)}>
+                    {p.gl_compliant_pct === null ? "—" : `${p.gl_compliant_pct}% all`}
+                  </span>
+                  {" · "}
+                  <span className={complianceTone(p.gl_compliant_known_pct)}>
+                    {p.gl_compliant_known_pct === null ? "—" : `${p.gl_compliant_known_pct}% known`}
+                  </span>
                 </span>
               </div>
               {MEAL_ROWS.map((row) => (
