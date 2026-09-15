@@ -486,11 +486,13 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
         compliance_pct = round(100 * logged_total / expected_total, 1) if expected_total else None
         # Worst-logged slot -- lowest logged/expected ratio, among slots with
-        # at least one expected occasion (always true once the participant's
-        # window has started).
+        # at least one expected occasion. compliance_pct itself still counts
+        # snacks (unchanged above); snacks is excluded only from this pick,
+        # since it's near-always the least-logged slot and naming it "worst"
+        # every time isn't useful -- surface whichever core meal is worst instead.
         worst_slot_logging, worst_slot_logging_pct = None, None
         for slot in MEAL_SLOTS:
-            if slot_expected[slot] == 0:
+            if slot == "snacks" or slot_expected[slot] == 0:
                 continue
             slot_pct = round(100 * slot_logged[slot] / slot_expected[slot], 1)
             if worst_slot_logging_pct is None or slot_pct < worst_slot_logging_pct:

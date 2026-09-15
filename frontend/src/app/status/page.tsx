@@ -165,6 +165,12 @@ function complianceTone(pct: number | null): string {
   return "text-rose-600 dark:text-rose-400";
 }
 
+const SLOT_ABBR: Record<string, string> = { breakfast: "BF", lunch: "LN", dinner: "DN", snacks: "SN" };
+function slotAbbr(slot: string | null): string {
+  if (!slot) return "";
+  return SLOT_ABBR[slot.toLowerCase()] ?? slot;
+}
+
 // A single day's value for one strip row (a meal slot, "Overall", or a GL series),
 // pre-resolved to a display level and tooltip so MiniStrip/ExpandGrid don't need
 // to know which measure they're rendering. `pending` (meal rows only) means an
@@ -834,7 +840,7 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
                     <>
                       <span className="text-muted-foreground font-normal"> · </span>
                       <span className="text-sky-700 dark:text-sky-500 font-normal">Worst </span>
-                      <span className="text-muted-foreground font-normal capitalize">{p.gl_worst_slot_all} </span>
+                      <span className="text-muted-foreground font-normal">{slotAbbr(p.gl_worst_slot_all)} </span>
                       <span className={complianceTone(p.gl_worst_slot_all_pct)}>
                         {p.gl_worst_slot_all_pct === null ? "—" : `${p.gl_worst_slot_all_pct}%`}
                       </span>
@@ -850,7 +856,7 @@ function GlTable({ participants }: { participants: ParticipantOverview[] }) {
                     <>
                       <span className="text-muted-foreground font-normal"> · </span>
                       <span className="text-violet-700 dark:text-violet-500 font-normal">Worst </span>
-                      <span className="text-muted-foreground font-normal capitalize">{p.gl_worst_slot_known} </span>
+                      <span className="text-muted-foreground font-normal">{slotAbbr(p.gl_worst_slot_known)} </span>
                       <span className={complianceTone(p.gl_worst_slot_known_pct)}>
                         {p.gl_worst_slot_known_pct === null ? "—" : `${p.gl_worst_slot_known_pct}%`}
                       </span>
