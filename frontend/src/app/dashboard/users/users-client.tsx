@@ -27,6 +27,7 @@ type Participant = {
   plan_status: string | null;
   plan_id: string | null;
   has_plan_rows: boolean;
+  plan_status_stale: boolean;
   last_plan_at: string | null;
   created_at: string | null;
   whatsapp_phone: string | null;
@@ -43,7 +44,11 @@ function isInProgressStatus(status: string | null): boolean {
   return IN_PROGRESS.has(status) || status.startsWith("optimizing ");
 }
 
-function isFailedStatus(status: string | null): boolean {
+// plan_status_stale (from the backend) means a real success happened more
+// recently than whatever set this error -- e.g. a stray/duplicate retry that
+// failed AFTER the participant's latest week already completed for real.
+function isFailedStatus(status: string | null, stale?: boolean): boolean {
+  if (stale) return false;
   return Boolean(status?.startsWith("error") || status?.includes("No solution"));
 }
 
@@ -61,7 +66,7 @@ function isActualUser(participant: Participant) {
 
 function StatusBadge({ participant }: { participant: Participant }) {
   const status = participant.plan_status;
-  if (participant.has_plan_rows && isFailedStatus(status))
+  if (participant.has_plan_rows && isFailedStatus(status, participant.plan_status_stale))
     return <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 px-2.5 py-0.5 text-xs font-medium">Ready</span>;
   if (!status) return <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/35 dark:text-amber-300">No plan</span>;
   if (status.startsWith("ok:"))
@@ -73,7 +78,7 @@ function StatusBadge({ participant }: { participant: Participant }) {
         Generating
       </span>
     );
-  if (isFailedStatus(status))
+  if (isFailedStatus(status, participant.plan_status_stale))
     return <span className="inline-flex items-center rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400 px-2.5 py-0.5 text-xs font-medium">Failed</span>;
   return <span className="text-xs text-muted-foreground">{status}</span>;
 }
@@ -280,7 +285,7 @@ export function UsersClient({
     if (statusFilter === "ready" && !hasUsablePlan(p)) return false;
     if (statusFilter === "generating" && !isInProgressStatus(p.plan_status)) return false;
     if (statusFilter === "none" && (p.plan_status || p.has_plan_rows)) return false;
-    if (statusFilter === "failed" && !isFailedStatus(p.plan_status)) return false;
+    if (statusFilter === "failed" && !isFailedStatus(p.plan_status, p.plan_status_stale)) return false;
     return true;
   });
 
@@ -445,7 +450,7 @@ export function UsersClient({
               {filtered.map((p) => {
                 const inProgress = isInProgressStatus(p.plan_status);
                 const hasReady = hasUsablePlan(p);
-                const hasFailed = isFailedStatus(p.plan_status);
+                const hasFailed = isFailedStatus(p.plan_status, p.plan_status_stale);
                 return (
                   <tr key={p.user_id} className="transition-colors hover:bg-accent/25">
                     <td className="px-4 py-3.5 font-mono text-xs font-semibold text-primary">{p.participant_id}</td>
