@@ -13,6 +13,7 @@ type Participant = {
   plan_status: string | null;
   plan_id: string | null;
   has_plan_rows: boolean;
+  plan_status_stale: boolean;
   last_plan_at: string | null;
   created_at: string | null;
 };
@@ -26,7 +27,15 @@ function isInProgressStatus(status: string | null): boolean {
   return IN_PROGRESS.has(status) || status.startsWith("optimizing ");
 }
 
-function isFailedStatus(status: string | null): boolean {
+// plan_status_stale (from the backend) means a real success happened more
+// recently than whatever set this error -- e.g. a stray/duplicate retry that
+// failed AFTER the participant's latest week already completed for real.
+// Treating that as "failed" would show a Retry button implying something's
+// still broken when it isn't; has_plan_rows alone can't tell these apart
+// (a genuinely-still-stuck participant, like one needing next week generated,
+// usually also has old rows from an earlier successful week).
+function isFailedStatus(status: string | null, stale?: boolean): boolean {
+  if (stale) return false;
   return Boolean(status?.startsWith("error") || status?.includes("No solution"));
 }
 
@@ -36,13 +45,13 @@ function hasUsablePlan(participant: Participant): boolean {
 
 function statusLabel(participant: Participant): { label: string; className: string } {
   const status = participant.plan_status;
-  if (participant.has_plan_rows && isFailedStatus(status)) {
+  if (participant.has_plan_rows && isFailedStatus(status, participant.plan_status_stale)) {
     return { label: "Ready", className: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400" };
   }
   if (!status) return { label: "No plan", className: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400" };
   if (status.startsWith("ok:")) return { label: "Ready", className: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400" };
   if (isInProgressStatus(status)) return { label: "Generating", className: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400" };
-  if (isFailedStatus(status)) return { label: "Failed", className: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400" };
+  if (isFailedStatus(status, participant.plan_status_stale)) return { label: "Failed", className: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400" };
   return { label: status, className: "bg-gray-100 text-gray-500" };
 }
 
@@ -169,7 +178,7 @@ export function MealPlansClient({
                 const { label, className } = statusLabel(p);
                 const inProgress = isInProgressStatus(p.plan_status);
                 const hasReady = hasUsablePlan(p);
-                const hasFailed = isFailedStatus(p.plan_status);
+                const hasFailed = isFailedStatus(p.plan_status, p.plan_status_stale);
                 return (
                   <tr key={p.user_id} className="hover:bg-muted/30 transition-colors">
                     <td className="px-4 py-3.5">

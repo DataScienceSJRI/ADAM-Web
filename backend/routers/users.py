@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ class ParticipantResponse(BaseModel):
     plan_status: str | None = None
     plan_id: str | None = None
     has_plan_rows: bool = False
+    plan_status_stale: bool = False
     last_plan_at: str | None = None
     created_at: str | None = None
     password: str | None = None
@@ -123,7 +125,7 @@ def list_participants(
     p_ids = [p["user_id"] for p in participants]
     sessions = (
         sb.table("BE_Onboarding_Sessions")
-        .select("onboarding_id, user_id, plan_status, created_at, plan_id")
+        .select("onboarding_id, user_id, plan_status, created_at, plan_id, next_plan_at")
         .in_("user_id", p_ids)
         .order("created_at", desc=True)
         .execute()
@@ -160,11 +162,22 @@ def list_participants(
     )
     whatsapp_map = {w["user_id"]: w for w in whatsapp_rows if w.get("user_id")}
 
+    # plan_status alone is unreliable: _write_plan_status only ever overwrites
+    # plan_status on an error, never next_plan_at -- so a stray/duplicate
+    # retry that ran (and failed) AFTER a real successful completion leaves
+    # plan_status looking like "still failing" even though the participant's
+    # latest week genuinely completed (next_plan_at only gets set by
+    # _schedule_next_week_job, called only from the success path). next_plan_at
+    # sitting in the future means a real success happened more recently than
+    # whatever set this error -- same signal used by /status/infeasible.
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     result = []
     for p in participants:
         s = session_map.get(p["user_id"], {})
         w = whatsapp_map.get(p["user_id"], {})
         plan_id = s.get("plan_id")
+        next_plan_at = s.get("next_plan_at")
         result.append(ParticipantResponse(
             user_id=p["user_id"],
             participant_id=p.get("participant_id") or "",
@@ -174,6 +187,7 @@ def list_participants(
             plan_status=s.get("plan_status"),
             plan_id=plan_id,
             has_plan_rows=bool(plan_id and plan_row_counts.get(plan_id, 0) > 0),
+            plan_status_stale=bool(next_plan_at and str(next_plan_at) > now_iso),
             last_plan_at=s.get("created_at"),
             created_at=p.get("created_at"),
             whatsapp_phone=w.get("phone"),
