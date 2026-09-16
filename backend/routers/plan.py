@@ -78,7 +78,164 @@ class ModelOptimiser(ADAMPersonalizationModel):
         # (merge_preferences_with_subcategory) overwrites it safely via assignment.
         if "sub_category_code" in prefs.columns:
             prefs = prefs.drop(columns=["sub_category_code"])
+        prefs = self._apply_adaptive_main_preferences(prefs, ds, uid)
         return prefs
+
+    def _apply_adaptive_main_preferences(self, prefs, ds, uid):
+        """Overlays services.adaptive_preferences' learned demotions/promotions
+        on top of the declared Main preferences, scoped to dish_type == "Main"
+        (see that module's docstring for why Main-only). Demoted subcategories
+        are dropped so they never get pulled into the candidate pool; promoted
+        ones are appended as ordinary liked-Main preference rows -- downstream
+        code (score_personalization, the Main1->Main2/Main3 expansion) treats
+        them exactly the same as anything the user declared at onboarding.
+
+        compute_adaptive_main_preferences returns subcategory CODEs (e.g.
+        "A1A"), but at this point in the pipeline prefs["sub_category"] holds
+        the declared subcategory's human-readable NAME (e.g. "Dosa") --
+        sub_category_code isn't resolved until Functions_Base.run() merges it
+        in later, and by then this override has already dropped that (empty)
+        column. So codes are resolved back to names via ds["sub_category"]
+        (Code -> SubCategory) before matching; a code with no resolvable name
+        is skipped rather than silently mismatched.
+
+        Fails safe: any error here just returns the declared preferences
+        unchanged rather than breaking generation."""
+        if not uid:
+            return prefs
+        try:
+            from services.adaptive_preferences import compute_adaptive_main_preferences
+            rows = compute_adaptive_main_preferences(uid)
+        except Exception:
+            logger.warning("Could not compute adaptive Main preferences for uid=%s", uid, exc_info=True)
+            return prefs
+        if not rows:
+            return prefs
+
+        sub_ref = ds.get("sub_category", pd.DataFrame())
+        code_to_name: dict[str, str] = {}
+        if not sub_ref.empty and {"Code", "SubCategory"}.issubset(sub_ref.columns):
+            tmp = sub_ref[["Code", "SubCategory"]].dropna()
+            code_to_name = {
+                str(c).strip().upper(): str(n).strip()
+                for c, n in zip(tmp["Code"], tmp["SubCategory"])
+            }
+
+        def resolve_name(code) -> str | None:
+            return code_to_name.get(str(code).strip().upper()) or None
+
+        demote_keys = set()
+        for r in rows:
+            if r.get("action") != "demote":
+                continue
+            name = resolve_name(r["sub_category_code"])
+            if not name:
+                logger.warning(
+                    "Adaptive: could not resolve demoted code=%s to a subcategory name for uid=%s; skipping",
+                    r["sub_category_code"], uid,
+                )
+                continue
+            demote_keys.add((str(r["meal_time"]).strip().title(), name.upper()))
+        promote_rows = [r for r in rows if r.get("action") == "promote"]
+
+        if demote_keys and not prefs.empty:
+            is_main = prefs["dish_type"].astype(str).str.strip().str.title() == "Main"
+            row_keys = list(zip(
+                prefs["meal_time"].astype(str).str.strip().str.title(),
+                prefs["sub_category"].astype(str).str.strip().str.upper(),
+            ))
+            drop_mask = is_main & pd.Series([k in demote_keys for k in row_keys], index=prefs.index)
+            if drop_mask.any():
+                logger.info("Adaptive: dropping %d demoted Main preference row(s) for uid=%s", int(drop_mask.sum()), uid)
+                prefs = prefs[~drop_mask].copy()
+
+        if promote_rows:
+            next_id = int(prefs["Preference_Row_ID"].max()) + 1 if not prefs.empty else 1
+            new_rows = []
+            for r in promote_rows:
+                meal_time = str(r["meal_time"]).strip().title()
+                name = resolve_name(r["sub_category_code"])
+                if not name:
+                    logger.warning(
+                        "Adaptive: could not resolve promoted code=%s to a subcategory name for uid=%s; skipping",
+                        r["sub_category_code"], uid,
+                    )
+                    continue
+                already = not prefs.empty and (
+                    (prefs["meal_time"].astype(str).str.strip().str.title() == meal_time)
+                    & (prefs["dish_type"].astype(str).str.strip().str.title() == "Main")
+                    & (prefs["sub_category"].astype(str).str.strip().str.upper() == name.upper())
+                ).any()
+                if already:
+                    continue
+                new_rows.append({
+                    "Preference_Row_ID": next_id,
+                    "meal_time": meal_time,
+                    "dish_type": "Main",
+                    "sub_category": name,
+                    "sub_category_norm": self._normalize_text(name),
+                })
+                next_id += 1
+            if new_rows:
+                logger.info("Adaptive: adding %d promoted Main preference row(s) for uid=%s", len(new_rows), uid)
+                prefs = pd.concat([prefs, pd.DataFrame(new_rows)], ignore_index=True)
+
+        return prefs
+
+    def _get_main1_main2_main3_map(self, ds):
+        main1_to_main2, main1_to_main3, main1_to_optional = super()._get_main1_main2_main3_map(ds)
+        if not self._user_id:
+            return main1_to_main2, main1_to_main3, main1_to_optional
+        try:
+            from services.adaptive_preferences import compute_adaptive_main_combinations
+            rows = compute_adaptive_main_combinations(self._user_id)
+        except Exception:
+            logger.warning("Could not compute adaptive Main combinations for uid=%s", self._user_id, exc_info=True)
+            return main1_to_main2, main1_to_main3, main1_to_optional
+
+        # Learned companions are blended in on top of whatever the global
+        # registry already has for that Main -- for every Main, registered
+        # or not (see services.adaptive_preferences' module docstring for
+        # why). Real-world pairings supplement the curated data rather than
+        # only covering the gap for unregistered Mains.
+        #
+        # Routed to main1_to_optional instead of main1_to_main2 when the
+        # companion is beverage-like -- detected by checking whether that
+        # exact code already appears anywhere in the global registry's
+        # Optional set for any Main1, rather than guessing from the code
+        # prefix. Main2 and Optional are capped independently by the LP (at
+        # most 1 selected from each), never jointly, so a learned beverage
+        # dumped into Main2 can end up selected ALONGSIDE a different
+        # beverage the global registry already offers via Optional for the
+        # same Main -- confirmed for real: A003's G1C got both H5A (learned,
+        # wrongly in Main2) and H5B (global, correctly in Optional) selected
+        # in the same generated breakfast, something he never once actually
+        # did (he drinks one or the other, never both). Putting the learned
+        # beverage in Optional too means it now shares that same real cap.
+        if rows:
+            optional_universe = {c for companions in main1_to_optional.values() for c in companions}
+            added_main2 = 0
+            added_optional = 0
+            for r in rows:
+                main_code = str(r.get("main_subcategory_code") or "").strip().upper()
+                companion_code = str(r.get("companion_subcategory_code") or "").strip().upper()
+                if not main_code or not companion_code:
+                    continue
+                target = main1_to_optional if companion_code in optional_universe else main1_to_main2
+                existing = target.setdefault(main_code, set())
+                if companion_code not in existing:
+                    existing.add(companion_code)
+                    if target is main1_to_optional:
+                        added_optional += 1
+                    else:
+                        added_main2 += 1
+            if added_main2 or added_optional:
+                logger.info(
+                    "Adaptive: blended %d learned Main->companion pairing(s) into main1_to_main2 "
+                    "and %d into main1_to_optional for uid=%s",
+                    added_main2, added_optional, self._user_id,
+                )
+        return main1_to_main2, main1_to_main3, main1_to_optional
 
     def optimize_weekly_menu_with_constraints(self, meal_choices, ds, age_group_col, **kwargs):
         kwargs.setdefault("per_recipe_max_gl", 20)
