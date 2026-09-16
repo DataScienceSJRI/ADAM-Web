@@ -42,10 +42,10 @@ def enqueue_food_id_job(
 ) -> str:
     """Enqueue a food-ID job and return the RQ job ID."""
     from rq import Queue
-    from core.redis_client import FOOD_ID_JOB_TIMEOUT_SECONDS, FOOD_ID_QUEUE_NAME, get_redis
+    from core.redis_client import FOOD_ID_JOB_TIMEOUT_SECONDS, FOOD_ID_QUEUE_NAME, get_redis_fast
 
     backend = vlm_backend or os.environ.get("VLM_BACKEND", "ollama")
-    redis = get_redis()
+    redis = get_redis_fast()
     queue = Queue(FOOD_ID_QUEUE_NAME, connection=redis, default_timeout=FOOD_ID_JOB_TIMEOUT_SECONDS)
     job = queue.enqueue(run_food_id_job, review_id, image_url, backend)
     logger.info(
@@ -91,10 +91,10 @@ def enqueue_food_id_job_post(
 ) -> str:
     """Enqueue a food-ID job for the post-meal image and return the RQ job ID."""
     from rq import Queue
-    from core.redis_client import FOOD_ID_JOB_TIMEOUT_SECONDS, FOOD_ID_QUEUE_NAME, get_redis
+    from core.redis_client import FOOD_ID_JOB_TIMEOUT_SECONDS, FOOD_ID_QUEUE_NAME, get_redis_fast
 
     backend = vlm_backend or os.environ.get("VLM_BACKEND", "ollama")
-    redis = get_redis()
+    redis = get_redis_fast()
     queue = Queue(FOOD_ID_QUEUE_NAME, connection=redis, default_timeout=FOOD_ID_JOB_TIMEOUT_SECONDS)
     job = queue.enqueue(run_food_id_job_post, review_id, image_url, backend)
     logger.info(

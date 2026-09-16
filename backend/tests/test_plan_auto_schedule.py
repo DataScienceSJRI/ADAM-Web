@@ -33,7 +33,7 @@ def _sb(data=None):
 
 class TestScheduleNextWeekJob:
     def test_skips_when_no_onboarding_id(self):
-        with patch("routers.plan.get_redis") as mock_get_redis:
+        with patch("routers.plan.get_redis_fast") as mock_get_redis:
             _schedule_next_week_job("user-1", None, week_no=1, start_date=date(2026, 7, 12))
         mock_get_redis.assert_not_called()
 
@@ -43,7 +43,7 @@ class TestScheduleNextWeekJob:
         fake_queue.enqueue_at.return_value = MagicMock(id="job-abc")
 
         with patch("core.supabase.get_supabase", return_value=sb), \
-             patch("routers.plan.get_redis", return_value=MagicMock()), \
+             patch("routers.plan.get_redis_fast", return_value=MagicMock()), \
              patch("routers.plan.Queue", return_value=fake_queue):
             _schedule_next_week_job("user-1", "ob-1", week_no=1, start_date=date(2026, 7, 12))
 
@@ -66,7 +66,7 @@ class TestScheduleNextWeekJob:
         fake_old_job = MagicMock()
 
         with patch("core.supabase.get_supabase", return_value=sb), \
-             patch("routers.plan.get_redis", return_value=MagicMock()), \
+             patch("routers.plan.get_redis_fast", return_value=MagicMock()), \
              patch("routers.plan.Queue", return_value=fake_queue), \
              patch("routers.plan.Job") as mock_job_cls:
             mock_job_cls.fetch.return_value = fake_old_job
@@ -76,7 +76,7 @@ class TestScheduleNextWeekJob:
         fake_old_job.cancel.assert_called_once()
 
     def test_never_raises_when_redis_unavailable(self):
-        with patch("routers.plan.get_redis", side_effect=RuntimeError("redis down")):
+        with patch("routers.plan.get_redis_fast", side_effect=RuntimeError("redis down")):
             _schedule_next_week_job("user-1", "ob-1", week_no=1, start_date=date(2026, 7, 12))  # must not raise
 
 
@@ -211,7 +211,7 @@ class TestDeletePlanCancelsAutoJob:
         fake_job = MagicMock()
 
         with patch("core.supabase.get_supabase", return_value=sb), \
-             patch("routers.plan.get_redis", return_value=MagicMock()), \
+             patch("routers.plan.get_redis_fast", return_value=MagicMock()), \
              patch("routers.plan.Job") as mock_job_cls:
             mock_job_cls.fetch.return_value = fake_job
             r = client.delete(BASE)

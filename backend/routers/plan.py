@@ -12,7 +12,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from rq import Queue
 from rq.job import Job
-from core.redis_client import PLAN_JOB_TIMEOUT_SECONDS, PLAN_QUEUE_NAME, get_redis
+from core.redis_client import PLAN_JOB_TIMEOUT_SECONDS, PLAN_QUEUE_NAME, get_redis_fast
 from core.auth import get_current_user
 from models.schemas import GeneratePlanRequest, GeneratePlanResponse, PlanStatusResponse
 from services.data_loader import _fetch, _fetch_cached, load_data_from_supabase
@@ -101,7 +101,7 @@ def _schedule_next_week_job(user_id: str, onboarding_id: str | None, week_no: in
     try:
         from core.supabase import get_supabase
 
-        redis = get_redis()
+        redis = get_redis_fast()
         supabase = get_supabase()
 
         existing = (
@@ -155,7 +155,7 @@ def _schedule_day4_checkin(user_id: str, start_date: date) -> None:
     (start_date + 3 days).
     """
     try:
-        redis = get_redis()
+        redis = get_redis_fast()
         trigger_date = start_date + timedelta(days=3)  # Day 4
         trigger_at_ist = datetime.combine(trigger_date, dt_time(9, 0), tzinfo=_IST)
         trigger_at_utc = trigger_at_ist.astimezone(timezone.utc)
@@ -934,7 +934,7 @@ def generate_plan(
     try:
         queue = Queue(
             PLAN_QUEUE_NAME,
-            connection=get_redis(),
+            connection=get_redis_fast(),
             default_timeout=PLAN_JOB_TIMEOUT_SECONDS,
         )
         job = queue.enqueue(
@@ -989,7 +989,7 @@ async def delete_plan(user_id: str = Depends(get_current_user)):
         .execute()
     )
     if sessions.data:
-        redis = get_redis()
+        redis = get_redis_fast()
         for s in sessions.data:
             job_id = s.get("next_plan_job_id")
             try:
