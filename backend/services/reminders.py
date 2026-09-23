@@ -87,7 +87,7 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
         count = send_bulk_push(
             player_ids=player_ids,
             title=f"Reminder: Log your {label}",
-            body="Keeping an accurate diet log helps the study team track your progress.",
+            body=f"Don't forget to log your {label} to keep your diet record up to date.",
             data={"type": "meal_reminder", "meal_slot": slot},
         )
         results[slot] = count
@@ -102,7 +102,7 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
             if send_whatsapp(
                 uid,
                 f"Reminder: Log your {label}",
-                "Keeping an accurate diet log helps the study team track your progress.",
+                f"Don't forget to log your {label} to keep your diet record up to date.",
             ):
                 sent += 1
         logger.info("WhatsApp meal reminder sent: slot=%s recipients=%d", slot, sent)
