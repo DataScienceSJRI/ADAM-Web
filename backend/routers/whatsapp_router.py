@@ -21,9 +21,6 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 _NOT_ACTIVATED_REPLY = "Send START ADAM to activate meal reminders and plan updates on this number."
 _WELCOME_REPLY = "You're activated! You'll get meal reminders and plan updates here."
-_FALLBACK_REPLY = (
-    "This line sends meal reminders and plan updates only — for help, contact your study coordinator."
-)
 
 
 def handle_message(msg: IncomingMessage) -> None:
@@ -86,7 +83,9 @@ def handle_message(msg: IncomingMessage) -> None:
             reply("No plan is currently scheduled.")
         return
 
-    reply(_FALLBACK_REPLY)
+    # Anything else from an activated, linked user is just ignored — no
+    # catch-all reply for unrecognized text.
+    logger.info("Ignoring unrecognized WhatsApp message from user_id=%s", user_id)
 
 
 @router.post("/webhook")
