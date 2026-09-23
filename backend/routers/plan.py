@@ -1042,7 +1042,7 @@ def _run_plan_background(
         notify(
             user_id=user_id,
             title="Your meal plan is ready!",
-            body="Your personalised 7-day meal plan has been generated. Tap to view it.",
+            body="Your personalised 7-day meal plan has been generated.",
             data={"plan_id": plan_id, "type": "plan_ready"},
         )
     except Exception:

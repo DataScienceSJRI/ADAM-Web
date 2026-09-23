@@ -19,10 +19,6 @@ router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
 _WEBHOOK_SECRET = os.getenv("WAHA_WEBHOOK_SECRET", "")
 _IST = timezone(timedelta(hours=5, minutes=30))
 
-_NOT_LINKED_REPLY = (
-    "This number isn't linked to an ADAM account yet. Ask your study coordinator to "
-    "link it, then send START ADAM to activate."
-)
 _NOT_ACTIVATED_REPLY = "Send START ADAM to activate meal reminders and plan updates on this number."
 _WELCOME_REPLY = "You're activated! You'll get meal reminders and plan updates here."
 _FALLBACK_REPLY = (
@@ -36,7 +32,11 @@ def handle_message(msg: IncomingMessage) -> None:
 
     link_resp = sb.table("WH_Users").select("*").eq("phone", msg.phone).limit(1).execute()
     if not link_resp.data:
-        gateway.send_text(msg.phone, _NOT_LINKED_REPLY)
+        # Only numbers a coordinator has linked in-person via the dashboard
+        # get a response — an unrecognized number is silently ignored rather
+        # than auto-replied to, so the line doesn't talk back to anyone who
+        # happens to message it.
+        logger.info("Ignoring WhatsApp message from unlinked number %s", msg.phone)
         return
 
     link = link_resp.data[0]
