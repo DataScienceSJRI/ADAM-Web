@@ -652,7 +652,7 @@ def infeasible_generations(token: str):
 
     sessions = (
         sb.table("BE_Onboarding_Sessions")
-        .select("onboarding_id, user_id, plan_status, next_plan_at, created_at")
+        .select("onboarding_id, user_id, plan_status, next_plan_at, created_at, updated_at")
         .in_("user_id", lookup_ids)
         .execute()
         .data
@@ -740,7 +740,12 @@ def infeasible_generations(token: str):
             "participant_id": p.get("participant_id"),
             "display_name": p.get("display_name"),
             "plan_status": s.get("plan_status"),
-            "failed_at": s.get("created_at"),
+            # updated_at reflects the most recent _write_plan_status() call (i.e. the
+            # actual last generation attempt) -- created_at is frozen at whenever this
+            # onboarding_id row was first made, which for a returning participant is
+            # their original onboarding date, not this week's retry time. Falls back
+            # to created_at only for rows written before the updated_at column existed.
+            "failed_at": s.get("updated_at") or s.get("created_at"),
             "attempted_week_no": (prev_week_no + 1) if prev_week_no is not None else 1,
             "previous_plan": {
                 "week_no": prev_week_no,

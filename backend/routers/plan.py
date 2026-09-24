@@ -45,7 +45,7 @@ def _write_plan_status(onboarding_id: str | None, status: str, plan_id: str | No
         return
     try:
         from core.supabase import get_supabase
-        payload: dict = {"plan_status": status}
+        payload: dict = {"plan_status": status, "updated_at": datetime.now(timezone.utc).isoformat()}
         if plan_id:
             payload["plan_id"] = plan_id
         get_supabase().table("BE_Onboarding_Sessions").update(payload).eq("onboarding_id", onboarding_id).execute()

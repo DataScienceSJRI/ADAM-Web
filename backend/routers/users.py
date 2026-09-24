@@ -125,7 +125,7 @@ def list_participants(
     p_ids = [p["user_id"] for p in participants]
     sessions = (
         sb.table("BE_Onboarding_Sessions")
-        .select("onboarding_id, user_id, plan_status, created_at, plan_id, next_plan_at")
+        .select("onboarding_id, user_id, plan_status, created_at, updated_at, plan_id, next_plan_at")
         .in_("user_id", p_ids)
         .order("created_at", desc=True)
         .execute()
@@ -188,7 +188,7 @@ def list_participants(
             plan_id=plan_id,
             has_plan_rows=bool(plan_id and plan_row_counts.get(plan_id, 0) > 0),
             plan_status_stale=bool(next_plan_at and str(next_plan_at) > now_iso),
-            last_plan_at=s.get("created_at"),
+            last_plan_at=s.get("updated_at") or s.get("created_at"),
             created_at=p.get("created_at"),
             whatsapp_phone=w.get("phone"),
             whatsapp_activated=bool(w.get("activated_at")),
