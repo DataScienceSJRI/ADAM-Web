@@ -312,6 +312,39 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     if onboarding_id:
         _pref_filters["onboarding_id"] = onboarding_id
     prefs = _fetch("BE_Preference_onboarding", _pref_filters)
+
+    # Preference rows can land with onboarding_id = NULL when whatever wrote
+    # them didn't stamp a session id -- confirmed for real on A003_ANISH (and
+    # 5 other participants) on 2026-09-22: a full preference update landed
+    # orphaned this way and was silently invisible to plan generation, which
+    # only queries the one specific onboarding_id above. The stale original
+    # onboarding preferences stayed in effect instead, causing an avoidable
+    # Infeasible solve (his real, current Lunch/Breakfast Main choices were
+    # sitting in the table the whole time, just not linked to this session).
+    # Orphaned rows have no session of their own to belong to, so they're
+    # folded into whichever onboarding_id is actually being used -- this
+    # never pulls in another onboarding session's real, non-null rows.
+    if onboarding_id:
+        try:
+            orphaned = (
+                get_supabase()
+                .table("BE_Preference_onboarding")
+                .select("*")
+                .eq("user_id", user_id)
+                .is_("onboarding_id", "null")
+                .execute()
+                .data or []
+            )
+        except Exception:
+            logger.exception("Could not fetch orphaned (onboarding_id=NULL) preferences for user_id=%s", user_id)
+            orphaned = []
+        if orphaned:
+            orphaned_df = pd.DataFrame(orphaned)
+            prefs = pd.concat([prefs, orphaned_df], ignore_index=True) if not prefs.empty else orphaned_df
+            dedup_cols = [c for c in ["meal_time", "dish_type", "sub_category"] if c in prefs.columns]
+            if dedup_cols:
+                prefs = prefs.drop_duplicates(subset=dedup_cols).reset_index(drop=True)
+
     if not prefs.empty:
         prefs = prefs.rename(columns={"user_id": "UID"})
         if "Reaction" in prefs.columns:
