@@ -108,11 +108,12 @@ def send_missed_slot_messages(
     message for each one that hasn't already gotten one.
 
     Call this every 15 minutes from a cron job, same cadence and secret as
-    /send-reminders. Escalation times: snacks gets a reminder at its own due
-    time; breakfast/lunch/dinner instead get a later "did you have X"
-    question at 12:30pm / 3:30pm / 8:30am the next day respectively
-    (see services.whatsapp_feedback._MISSED_QUESTION_TIME). Idempotent —
-    safe to call repeatedly, never sends the same occasion's message twice.
+    /send-reminders. Same short generic reminder text for every slot
+    (including snacks); breakfast/lunch/dinner escalate later than their own
+    due time — 12:30pm / 3:30pm / 8:30am the next day respectively (see
+    services.whatsapp_feedback._MISSED_QUESTION_TIME) — while snacks reminds
+    at its own due time. Idempotent — safe to call repeatedly, never sends
+    the same occasion's message twice.
     """
     if not _CRON_SECRET or x_cron_secret != _CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid or missing cron secret")
@@ -122,18 +123,22 @@ def send_missed_slot_messages(
     return {"status": "ok", "messages_sent": counts}
 
 
-@router.post("/send-weekly-digest")
-def send_weekly_digest(
+@router.post("/send-next-day-preview")
+def send_next_day_preview_messages(
     x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret"),
 ):
-    """Send each real study participant a one-way WhatsApp summary of the
-    past 7 days (meals logged, GL-target hits) — no reply expected, deliberately
-    not a poll. Call this once a week (e.g. Sunday evening) from a cron job.
-    Protected by X-Cron-Secret, same as /send-reminders.
+    """Send each real study participant a short heads-up of tomorrow's
+    planned meals — just dish names and time per slot, nothing else — so
+    they can be ready with ingredients/recipes ahead of time.
+
+    Call this once a day around 7:00 PM IST from a cron job (safe to call
+    more often too, e.g. every 15 minutes like the other reminder crons —
+    idempotent, only ever sends once per user per day). Protected by
+    X-Cron-Secret, same as /send-reminders.
     """
     if not _CRON_SECRET or x_cron_secret != _CRON_SECRET:
         raise HTTPException(status_code=403, detail="Invalid or missing cron secret")
 
-    from services.whatsapp_feedback import send_weekly_digests
-    inserted_ids = send_weekly_digests()
+    from services.whatsapp_feedback import send_next_day_previews
+    inserted_ids = send_next_day_previews()
     return {"status": "ok", "messages_sent": len(inserted_ids)}

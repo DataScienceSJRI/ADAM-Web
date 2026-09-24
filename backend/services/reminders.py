@@ -13,12 +13,18 @@ DEFAULT_MEAL_TIMES: dict[str, tuple[int, int]] = {
     "breakfast": (8, 30),
     "lunch": (13, 0),
     "dinner": (19, 30),
+    # Snacks has no preference-time column of its own, so this is a fixed
+    # time rather than a fallback default — always 4:30 PM regardless of
+    # any user preference. (services/whatsapp_feedback.py's later missed-slot
+    # follow-up for snacks is a separate fixed time, 6:30 PM.)
+    "snacks": (16, 30),
 }
 
 _SLOT_LABELS = {
     "breakfast": "Breakfast",
     "lunch": "Lunch",
     "dinner": "Dinner",
+    "snacks": "Snacks",
 }
 
 
@@ -66,11 +72,17 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
     now_ist = datetime.now(IST)
     now_minutes = now_ist.hour * 60 + now_ist.minute
 
-    slot_player_ids: dict[str, list[str]] = {"breakfast": [], "lunch": [], "dinner": []}
-    slot_user_ids: dict[str, list[str]] = {"breakfast": [], "lunch": [], "dinner": []}
+    slots = list(_SLOT_LABELS.keys())
+    slot_player_ids: dict[str, list[str]] = {slot: [] for slot in slots}
+    slot_user_ids: dict[str, list[str]] = {slot: [] for slot in slots}
     for uid in all_user_ids:
         prefs = user_prefs.get(uid, {})
-        for slot, default in DEFAULT_MEAL_TIMES.items():
+        for slot in slots:
+            default = DEFAULT_MEAL_TIMES[slot]
+            # No snacks_time preference column exists, so prefs.get() is
+            # always empty for snacks and it always falls back to the fixed
+            # default (16:30) below — same effect as before, just without a
+            # dedicated branch.
             raw_time = prefs.get(f"{slot}_time") or ""
             meal_minutes = time_to_minutes(raw_time, default) if raw_time else (default[0] * 60 + default[1])
             if abs(now_minutes - meal_minutes) <= window_minutes:
