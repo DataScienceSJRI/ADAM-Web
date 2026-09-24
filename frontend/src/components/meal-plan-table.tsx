@@ -56,12 +56,24 @@ function ReactionButtons({
       const subCategory = tag?.Subcategories as string | null;
       if (subCategory) {
         if (next === "disliked") {
+          // Stamp the user's current onboarding_id so this feedback isn't
+          // orphaned (onboarding_id NULL) and silently invisible to the next
+          // plan generation, which only reads preferences scoped to a
+          // specific onboarding_id.
+          const { data: session } = await supabase
+            .from("BE_Onboarding_Sessions")
+            .select("onboarding_id")
+            .eq("user_id", userId)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
           await supabase.from("BE_Preference_onboarding").insert({
             user_id: userId,
             meal_time: mealTiming,
             sub_category: subCategory,
             dish_type: null,
             Reaction: "disliked",
+            onboarding_id: session?.onboarding_id ?? null,
           });
         } else if (next === null) {
           await supabase
