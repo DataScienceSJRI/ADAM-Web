@@ -43,7 +43,11 @@ from services.whatsapp_gateway import get_gateway
 
 MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snacks"]
 _SLOT_TIMINGS_TO_MEAL_SLOT = {"Breakfast": "breakfast", "Lunch": "lunch", "Dinner": "dinner", "Snacks": "snacks"}
-_SNACK_DUE_AFTER_SLOT = "dinner"  # same convention as routers/status_dashboard.py
+# Snacks has no preference-time column of its own, so both of its reminder
+# times are fixed rather than derived from a preference: the at-mealtime
+# reminder (services/reminders.py) fires at 4:30 PM, and this missed-slot
+# follow-up (only if still unlogged) fires later, at 6:30 PM.
+_SNACK_MISSED_REMINDER_TIME = (18, 30)
 
 _GL_TOLERANCE_PCT = 0.20
 _GL_TOLERANCE_FLOOR = 1.0
@@ -54,6 +58,13 @@ _SAME_BASE_MIN_DIFF_PCT = 0.10
 # plan" doesn't get a "ran high" warning.
 _GL_ABSOLUTE_SAFE_CEILING = 25
 _PROCESSING_DELAY_MINUTES = 5  # time the bot would need to compute GL/insight after a log
+# A logged breakfast/lunch/dinner with GL below this is a red flag, not a win:
+# it usually means only part of the meal got logged (e.g. one boiled egg
+# standing in for the whole plate), not that the user ate an exceptionally
+# low-GL meal. Never applied to snacks (genuinely meant to be tiny), and only
+# when the plan itself expected something more substantial — a plan that's
+# ALSO this low (or no plan at all) isn't grounds to second-guess the log.
+_INCOMPLETE_MEAL_GL_FLOOR = 3
 
 # Sentiment of each message type, for the response_status column — Positive
 # (praise/reinforcement), Negative (a miss or a concern to correct), or
@@ -72,6 +83,7 @@ _RESPONSE_STATUS = {
     "missed_slot_reminder": "Negative",
     "missed_slot_question": "Negative",
     "logged_unidentified": "Neutral",
+    "possibly_incomplete_meal": "Negative",
 }
 
 # Macro/sodium subset of routers/kpi.py's NUTRIENT_COLS — the nutrients a
@@ -96,15 +108,15 @@ NUTRIENT_HIGHER_IS_BETTER = {
     "Protein_PROTCNT_g": True, "TotalFat_FATCE_g": False, "Carbohydrate_g": False,
     "TotalDietaryFibre_FIBTG_g": True, "Sodium_mg": False,
 }
-# Nutrient-specific praise for the self-chosen, good-direction case — generic
-# "that was your own choice" reads as a hedge; naming the specific good habit
-# (less salt, more protein) reads as actual feedback.
-_GOOD_DIRECTION_PRAISE = {
-    "Sodium_mg": "nice and light on the salt",
-    "TotalFat_FATCE_g": "nice, kept it light on the oil/fat",
-    "Carbohydrate_g": "nice and light on the carbs",
-    "Protein_PROTCNT_g": "good protein boost",
-    "TotalDietaryFibre_FIBTG_g": "good fibre boost",
+# Nutrient-specific action for the good-direction case — every message ends
+# with an action per the Acknowledgment/Finding/Action structure, so this is
+# phrased as a next step ("keep doing X") rather than a bare compliment.
+_NUTRIENT_GOOD_ACTION = {
+    "Sodium_mg": "Keep going easy on the salt!",
+    "TotalFat_FATCE_g": "Keep it light on the oil!",
+    "Carbohydrate_g": "Keep your portions balanced!",
+    "Protein_PROTCNT_g": "Keep including protein-rich foods!",
+    "TotalDietaryFibre_FIBTG_g": "Keep including vegetables in your meals!",
 }
 
 def _norm_date(d) -> str:
@@ -119,9 +131,11 @@ def _daterange(start: date, end: date):
 
 
 def _due_minutes(prefs: dict, slot: str) -> int:
-    lookup_slot = _SNACK_DUE_AFTER_SLOT if slot == "snacks" else slot
-    raw_time = prefs.get(f"{lookup_slot}_time") or ""
-    return time_to_minutes(raw_time, DEFAULT_MEAL_TIMES[lookup_slot])
+    if slot == "snacks":
+        hour, minute = _SNACK_MISSED_REMINDER_TIME
+        return hour * 60 + minute
+    raw_time = prefs.get(f"{slot}_time") or ""
+    return time_to_minutes(raw_time, DEFAULT_MEAL_TIMES[slot])
 
 
 def _fmt_ist(dt: datetime) -> str:
@@ -237,33 +251,6 @@ def _split_base_and_accomp(rows: list[dict], recipe_category: dict, mapping_rows
     return base, accomp
 
 
-def _fmt_qty(qty) -> str:
-    try:
-        q = float(qty)
-    except (TypeError, ValueError):
-        return ""
-    return str(int(q)) if q == int(q) else f"{q:g}"
-
-
-def _dish_with_qty(row: dict, unit_map: dict) -> str:
-    """'1 cup Rice' / '3 Chapathi' rather than just 'Rice' — the dish itself
-    may be fine, it's the amount eaten that pushed the GL up, so naming a
-    culprit without its quantity/unit can misleadingly read as "this food is
-    bad". Unit comes from RecipeTagging.Description (e.g. "Cup", "Roti") —
-    skipped when it's the generic "Number" placeholder or already implied by
-    the dish name itself (no point saying "2 roti Roti")."""
-    q = _fmt_qty(row.get("qty"))
-    if not q:
-        return row["name"]
-    unit = str(unit_map.get(row.get("code")) or "").strip()
-    unit_lower = unit.lower()
-    name_lower = row["name"].strip().lower()
-    generic_placeholders = {"number", "no", "nos", "no.", "pcs"}
-    if unit and unit_lower not in generic_placeholders and unit_lower not in name_lower and name_lower not in unit_lower:
-        return f"{q} {unit_lower} {row['name']}"
-    return f"{q} {row['name']}"
-
-
 def _pick_main_dish_name(codes: list[str], recipe_category: dict, mapping_rows: list[dict], recipe_info: dict) -> str:
     """Same Main1_Code precedence as _split_base_and_accomp, for a list of
     PLANNED codes (no GL to break ties on, so falls back to the first code
@@ -290,27 +277,6 @@ def _meal_source(rows: list[dict], planned: bool) -> str:
     if sources == {"self_logged"}:
         return "self_logged_deviated"
     return "mixed"
-
-
-def _source_note(meal_source: str) -> str:
-    """One short, plain-language trailing clause — used AT MOST ONCE per
-    message, never repeated per dish, so messages stay readable."""
-    return {
-        "self_logged_deviated": " (this was your own choice, not your planned menu)",
-        "mixed": " (partly your own choice, not fully your planned menu)",
-        "no_plan_available": " (no menu was planned for you that day)",
-    }.get(meal_source, "")
-
-
-def _relative_phrase(pct: float) -> str:
-    """Plain-language way to describe a planned-vs-actual gap — most people
-    read "more than double" faster than "127% more"."""
-    ratio = 1 + pct
-    if ratio >= 1.8:
-        return "more than double"
-    if ratio <= 0.55:
-        return "less than half"
-    return f"about {round(abs(pct) * 100)}% {'more' if pct > 0 else 'less'}"
 
 
 def _nutrient_totals(items: list[dict], recipe_info: dict, portion_map: dict) -> dict:
@@ -398,37 +364,24 @@ def score_missed_occasion(
     time (live: whenever the scheduled check runs; backtest: datetime.now(IST))
     so a slot whose escalation time hasn't actually arrived yet doesn't get a
     message invented for it. Returns None in that case. Without `now`, always
-    scores (used for days that have already fully elapsed)."""
-    if slot == "snacks":
-        send_dt = _missed_reminder_dt(d, prefs, slot)
-        if now is not None and send_dt > now:
-            return None
-        return {
-            **base_row,
-            "message_type": "missed_slot_reminder",
-            "message": f"Hey! Looks like you haven't logged {slot} yet today — takes just a minute in the ADAM app 🙂",
-            "meal_source": "no_plan_available", "dishes": None, "actual_gl": None,
-            "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
-            "sent_at": _fmt_ist(send_dt), "status": "Pending",
-            "response_status": _RESPONSE_STATUS["missed_slot_reminder"],
-            "energy_kcal": None, "carbs_g": None, "fibre_g": None,
-        }
-    send_dt = _missed_question_dt(d, slot)
+    scores (used for days that have already fully elapsed).
+
+    Same short, generic reminder text for every slot (including snacks) —
+    no per-dish question. Kept plan-aware inputs (planned_items, recipe_*,
+    mapping_rows) in the signature for caller compatibility even though the
+    message itself no longer names a specific dish."""
+    send_dt = _missed_reminder_dt(d, prefs, slot) if slot == "snacks" else _missed_question_dt(d, slot)
     if now is not None and send_dt > now:
         return None
-    # Names just the MAIN dish (Main1_Code in the combination table), not
-    # every curry/side planned for the slot.
-    main_dish_name = _pick_main_dish_name(
-        [it["code"] for it in planned_items], recipe_category, mapping_rows, recipe_info
-    )
+    label = slot.capitalize()
     return {
         **base_row,
-        "message_type": "missed_slot_question",
-        "message": f"Hey, did you have {main_dish_name} for {slot} today? Let us know so we can log it for you 🙂",
-        "meal_source": "no_plan_available", "dishes": main_dish_name, "actual_gl": None,
+        "message_type": "missed_slot_reminder",
+        "message": f"*Reminder: Log Your {label}!*\nDon't forget to log your {slot} to keep your diet record up to date.",
+        "meal_source": "no_plan_available", "dishes": None, "actual_gl": None,
         "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
         "sent_at": _fmt_ist(send_dt), "status": "Pending",
-        "response_status": _RESPONSE_STATUS["missed_slot_question"],
+        "response_status": _RESPONSE_STATUS["missed_slot_reminder"],
         "energy_kcal": None, "carbs_g": None, "fibre_g": None,
     }
 
@@ -555,12 +508,21 @@ def score_logged_occasion(
     sent_at = _sent_at_for_logged(rows, d, prefs, slot)
 
     gl_rows = [r for r in rows if r["gl"] is not None]
-    dish_names = ", ".join(r["name"] for r in rows)
+    # "Pending" is the placeholder Food_Name for a photo upload nobody has
+    # identified yet — never a real dish, so it must never appear in a dish
+    # list.
+    named_rows = [r for r in rows if str(r.get("name") or "").strip().lower() != "pending"]
+    dish_names = ", ".join(r["name"] for r in named_rows)
 
-    if not gl_rows:
-        # A photo upload writes Food_Name="Pending" until a coordinator
-        # reviews it — nothing readable to name yet, so skip the dish list.
-        what = "" if dish_names.strip().lower() in ("pending", "") else f" ({dish_names})"
+    if len(gl_rows) < len(rows):
+        # At least one dish in this slot — not necessarily all of them — is
+        # still awaiting identification (e.g. one photo already reviewed,
+        # another upload for the same slot still pending). A GL/nutrition
+        # message built from only the identified part would be incomplete or
+        # misleading, so hold off on ANY feedback until every dish in the
+        # slot is verified. Still banks nothing into history for the same
+        # reason — the totals aren't final yet.
+        what = f" ({dish_names})" if dish_names else ""
         message = {
             **base_row,
             "message_type": "logged_unidentified",
@@ -603,12 +565,38 @@ def score_logged_occasion(
     if log_gap is not None and log_gap >= _STALE_LOG_GAP_DAYS:
         return [], history_entry
 
+    # A suspiciously low GL for a full breakfast/lunch/dinner (not snacks)
+    # usually means an incomplete log (e.g. one boiled egg standing in for
+    # the whole meal), not an exceptionally good one — never praise this as
+    # a personal best or "on target". Only flags when the PLAN expected
+    # something more substantial; a plan that's also this low (or no plan
+    # at all) isn't grounds to second-guess what was actually logged.
+    if slot != "snacks" and total_gl < _INCOMPLETE_MEAL_GL_FLOOR and (
+        planned_gl is None or planned_gl >= _INCOMPLETE_MEAL_GL_FLOOR
+    ):
+        what = dish_names or "This"
+        message = {
+            **base_row,
+            "message_type": "possibly_incomplete_meal",
+            "message": (
+                f"Thanks for logging your {slot}! {what} alone may not make a complete, balanced {slot}. "
+                f"Please follow your recommended meal plan, and if you had anything else, add it to your "
+                f"log so we can give you accurate feedback."
+            ),
+            "meal_source": meal_source, "dishes": dish_names, "actual_gl": total_gl,
+            "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
+            "sent_at": sent_at, "status": "Pending",
+            "response_status": _RESPONSE_STATUS["possibly_incomplete_meal"],
+            "energy_kcal": slot_energy_kcal, "carbs_g": slot_carbs_g, "fibre_g": slot_fibre_g,
+        }
+        return [message], history_entry
+
     # Nutrition (macro/sodium) variance vs the plan for this slot — computed
-    # BEFORE the GL message below so each branch can weave it into ONE
-    # sentence/paragraph (same occasion, same recall — one WhatsApp message,
-    # not two stapled together with their own separate "Heads up:" preamble).
-    nutrient_good = None        # short clause to credit, e.g. "nice and light on the salt"
-    nutrient_bad_fact = None    # bare fact, e.g. "more than double sodium than planned (1359mg vs 110mg planned)"
+    # BEFORE the GL message below so each branch can weave it into the SAME
+    # short message (same occasion, same recall — one WhatsApp message, at
+    # most two findings total, not a running list).
+    nutrient_good = None        # (fact, action) to credit, e.g. ("more fibre (6g vs 3g planned)", "Keep including vegetables...")
+    nutrient_bad_fact = None    # bare fact, e.g. "more sodium (1359mg vs 110mg planned)"
     nutrient_bad_culprit = None  # the dish that actually drove it — NOT assumed to be the GL culprit
     nutrient_type_suffix = ""
     if planned_items:
@@ -618,15 +606,15 @@ def score_logged_occasion(
         if gap:
             col, p, a, pct = gap
             label_txt, unit = NUTRIENT_LABELS[col], NUTRIENT_UNITS[col]
-            phrase = _relative_phrase(pct)
-            nutrient_fact = f"{phrase} {label_txt} than planned ({round(a)}{unit} vs {round(p)}{unit} planned)"
+            direction = "more" if pct > 0 else "less"
+            nutrient_fact = f"{direction} {label_txt} ({round(a)}{unit} vs {round(p)}{unit} planned)"
             # Direction matters: more protein/fibre than planned, or less
-            # fat/carbs/sodium than planned, is a GOOD outcome — praise it
-            # specifically rather than hedging with a vague "that was your
-            # own choice" line. The opposite direction is a real concern, so
-            # for THAT case never credit/blame "your choice".
+            # fat/carbs/sodium than planned, is a GOOD outcome — call it out
+            # specifically rather than hedging with a vague "own choice" line.
+            # The opposite direction is a real concern, so for THAT case
+            # never credit/blame "your choice".
             if (pct > 0) == NUTRIENT_HIGHER_IS_BETTER[col]:
-                nutrient_good = (nutrient_fact, _GOOD_DIRECTION_PRAISE[col])
+                nutrient_good = (nutrient_fact, _NUTRIENT_GOOD_ACTION[col])
             else:
                 nutrient_bad_fact = nutrient_fact
                 # Rice drives GL but has almost no sodium — a curry/pickle
@@ -642,14 +630,12 @@ def score_logged_occasion(
     if prior_totals and total_gl < min(prior_totals):
         msg_type = "personal_best"
         if nutrient_good:
-            extra = f" It also came in {nutrient_good[0]} — {nutrient_good[1]}!"
+            tail = f" It also gave you {nutrient_good[0]}. {nutrient_good[1]}"
         elif nutrient_bad_fact:
-            extra = f" Just note it ran {nutrient_bad_fact}."
+            tail = f" Just note it had {nutrient_bad_fact}. Keep this one in rotation!"
         else:
-            extra = ""
-        msg = (f"🎉 Your best {slot} yet! Today's {dish_names} was easier on your blood sugar than any "
-               f"{slot} you've logged so far (GL {round(total_gl)}, previous best {round(min(prior_totals))})."
-               f"{extra} Keep this one in rotation!")
+            tail = " Keep this one in rotation!"
+        msg = f"Great job! Today's {slot} had your lowest GL yet ({round(total_gl)} vs previous best {round(min(prior_totals))}).{tail}"
 
     if msg_type is None and accomp:
         same_base_prior = [
@@ -661,35 +647,24 @@ def score_logged_occasion(
             prev = same_base_prior[-1]
             hi, lo = max(total_gl, prev["total_gl"]), min(total_gl, prev["total_gl"])
             if hi > 0 and (hi - lo) / hi >= _SAME_BASE_MIN_DIFF_PCT:
-                # Only call out who-chose-what once, and only when it
-                # actually differs between the two days being compared
-                # — no point noting "your own choice" on both sides.
-                today_planned = meal_source == "as_planned"
-                prev_planned = prev.get("meal_source") == "as_planned"
-                if today_planned and not prev_planned:
-                    pairing_note = " (today's version was your planned meal)"
-                elif prev_planned and not today_planned:
-                    pairing_note = f" ({prev['date']}'s version was your planned meal)"
-                else:
-                    pairing_note = ""
                 if nutrient_good:
-                    extra = f" It also came in {nutrient_good[0]} — {nutrient_good[1]}!"
+                    nut_tail = f" It also gave you {nutrient_good[0]}."
+                    action = nutrient_good[1]
                 elif nutrient_bad_fact:
-                    extra = f" Just note it ran {nutrient_bad_fact}."
+                    nut_tail = f" Just note it had {nutrient_bad_fact}."
+                    action = "Keep making balanced food choices!"
                 else:
-                    extra = ""
+                    nut_tail = ""
+                    action = "Keep making balanced food choices!"
                 if total_gl < prev["total_gl"]:
                     msg_type = "same_base_lower_today"
-                    msg = (f"👍 Good choice — {base['name']} with {accomp_names} today was easier on your "
-                           f"blood sugar than {base['name']} with {prev['accomp_names']} on {prev['date']} "
-                           f"(GL {round(total_gl)} vs {round(prev['total_gl'])}){pairing_note}."
-                           f"{extra} Stick with today's pairing!")
+                    msg = (f"Good choice! Today's {slot} had a lower GL than your previous meal "
+                           f"({round(total_gl)} vs {round(prev['total_gl'])}).{nut_tail} {action}")
                 else:
                     msg_type = "same_base_better_option_exists"
-                    msg = (f"Today's {base['name']} with {accomp_names} had a GL of {round(total_gl)}. "
-                           f"On {prev['date']}, the same {base['name']} with {prev['accomp_names']} had a "
-                           f"GL of only {round(prev['total_gl'])}{pairing_note} — that combo worked better, "
-                           f"worth repeating.{extra}")
+                    msg = (f"Heads up! Today's {slot} had a higher GL than a meal you had on {prev['date']} "
+                           f"({round(total_gl)} vs {round(prev['total_gl'])}).{nut_tail} "
+                           f"Next time, try repeating that earlier combination.")
 
     if msg_type is None and planned_gl is not None:
         tolerance = max(_GL_TOLERANCE_FLOOR, planned_gl * _GL_TOLERANCE_PCT)
@@ -704,94 +679,66 @@ def score_logged_occasion(
             # the absolute GL is.
             msg_type = "gl_high_but_safe"
             if nutrient_good:
-                extra = f", and also came in {nutrient_good[0]} — {nutrient_good[1]}"
+                tail = f" It also gave you {nutrient_good[0]}. {nutrient_good[1]}"
             elif nutrient_bad_fact:
-                extra = f" — though it did run {nutrient_bad_fact}"
+                tail = f" Just note it had {nutrient_bad_fact}. Keep it up!"
             else:
-                extra = ""
-            msg = (f"Nice work — even though the meal changed, today's GL came to {round(total_gl)} "
-                   f"(planned was {round(planned_gl)}), which is still within a safe range{extra}!")
+                tail = " Keep it up!"
+            msg = (f"Nice work! Even though your {slot} changed, the GL stayed in a safe range "
+                   f"({round(total_gl)} vs {round(planned_gl)} planned).{tail}")
         elif exceeded:
             culprit = max(gl_rows, key=lambda r: r["gl"])
-            culprit_display = _dish_with_qty(culprit, unit_map)
+            culprit_name = culprit["name"]
+            same_culprit = nutrient_bad_culprit is None or nutrient_bad_culprit["code"] == culprit["code"]
+            if nutrient_bad_fact and not same_culprit:
+                nutrient_clause = f" It also had {nutrient_bad_fact}, mainly from {nutrient_bad_culprit['name']}."
+            elif nutrient_bad_fact:
+                nutrient_clause = f" and {nutrient_bad_fact}"
+            else:
+                nutrient_clause = ""
             if culprit["source"] == "planned":
                 msg_type = "high_gl_planned_review"
-                if nutrient_bad_fact:
-                    same_culprit = nutrient_bad_culprit is None or nutrient_bad_culprit["code"] == culprit["code"]
-                    if same_culprit:
-                        msg = (f"Today's {slot} was a bit higher on GL than usual ({round(total_gl)} vs a "
-                               f"target of {round(planned_gl)}) and {nutrient_bad_fact}, mainly from "
-                               f"{culprit_display} — that's exactly what we planned for you, so this one's on us, "
-                               f"not you. We're reviewing the recommendation.")
-                    else:
-                        nutrient_culprit_display = _dish_with_qty(nutrient_bad_culprit, unit_map)
-                        msg = (f"Today's {slot} was a bit higher on GL than usual ({round(total_gl)} vs a "
-                               f"target of {round(planned_gl)}), mainly from {culprit_display}, and also "
-                               f"{nutrient_bad_fact}, mainly from {nutrient_culprit_display} — that's exactly what "
-                               f"we planned for you, so this one's on us, not you. We're reviewing the recommendation.")
-                elif nutrient_good:
-                    msg = (f"Today's {slot} was a bit higher on GL than usual ({round(total_gl)} vs a "
-                           f"target of {round(planned_gl)}), mainly from {culprit_display} — that's exactly "
-                           f"what we planned for you, so this one's on us, not you (though it did come in "
-                           f"{nutrient_good[0]} — {nutrient_good[1]}!). We're reviewing the recommendation.")
+                gl_clause = f"Your {slot} had a higher GL than usual ({round(total_gl)} vs {round(planned_gl)} planned)"
+                if nutrient_bad_fact and same_culprit:
+                    msg = (f"{gl_clause}{nutrient_clause}, mainly from the portion of {culprit_name} — this was "
+                           f"part of your planned meal, so we're reviewing the recommendation.")
                 else:
-                    msg = (f"Today's {slot} was a bit higher on GL than usual ({round(total_gl)} vs a "
-                           f"target of {round(planned_gl)}), mainly from {culprit_display} — that's exactly "
-                           f"what we planned for you, so this one's on us, not you. We're reviewing the "
-                           f"recommendation.")
+                    msg = (f"{gl_clause}, mainly from the portion of {culprit_name} — this was part of your "
+                           f"planned meal, so we're reviewing the recommendation.{nutrient_clause}")
+                if nutrient_good:
+                    msg += f" On the plus side, it gave you {nutrient_good[0]}."
             else:
                 msg_type = "high_gl_culprit"
-                if nutrient_bad_fact:
-                    planned_dish_names = ", ".join(dict.fromkeys(
-                        recipe_info.get(it["code"], {}).get("Recipe_Name") or it["code"] for it in planned_items
-                    ))
-                    same_culprit = nutrient_bad_culprit is None or nutrient_bad_culprit["code"] == culprit["code"]
-                    if same_culprit:
-                        # The same dish actually drives both — genuinely one
-                        # cause, so one shared "mainly from" attribution.
-                        msg = (f"Today's {slot} ran high on GL ({round(total_gl)} vs a target of {round(planned_gl)}) "
-                               f"and {nutrient_bad_fact}, mainly from {culprit_display} — your planned {slot} of "
-                               f"{planned_dish_names} would have kept both in check. Next time, try sticking to the "
-                               f"plan or ask us for a lower-GL swap.")
-                    else:
-                        # Different dish drives the nutrient than drives the
-                        # GL (e.g. rice for GL, a curry/pickle for sodium) —
-                        # naming ONE dish for both would misattribute it.
-                        nutrient_culprit_display = _dish_with_qty(nutrient_bad_culprit, unit_map)
-                        msg = (f"Today's {slot} ran high on GL ({round(total_gl)} vs a target of {round(planned_gl)}), "
-                               f"mainly from {culprit_display}, and also {nutrient_bad_fact}, mainly from "
-                               f"{nutrient_culprit_display} — your planned {slot} of {planned_dish_names} would "
-                               f"have kept both in check. Next time, try sticking to the plan or ask us for a "
-                               f"lower-GL swap.")
-                elif nutrient_good:
-                    msg = (f"Today's {slot} ran a bit high on GL ({round(total_gl)} vs a target of "
-                           f"{round(planned_gl)}), mainly from {culprit_display}, which wasn't part of your "
-                           f"planned {slot} — though it did come in {nutrient_good[0]}, {nutrient_good[1]}! "
-                           f"Next time, try sticking to the plan or ask us for a lower-GL swap.")
+                gl_clause = f"Your {slot} had a higher GL ({round(total_gl)} vs {round(planned_gl)} planned)"
+                if nutrient_bad_fact and same_culprit:
+                    msg = f"{gl_clause}{nutrient_clause}, mainly from the portion of {culprit_name}."
                 else:
-                    msg = (f"Today's {slot} ran a bit high on GL ({round(total_gl)} vs a target of "
-                           f"{round(planned_gl)}), mainly from {culprit_display}, which wasn't part of your "
-                           f"planned {slot}. Next time, try sticking to the plan or ask us for a lower-GL swap.")
+                    msg = f"{gl_clause}, mainly from the portion of {culprit_name}.{nutrient_clause}"
+                if nutrient_good:
+                    msg += f" On the plus side, it gave you {nutrient_good[0]}."
+                msg += " Next time, try a smaller portion or choose a lower-GL alternative from your meal plan."
         else:
             msg_type = "gl_compliant_reinforcement"
-            extra = " — and that was your own choice, even better" if meal_source in ("self_logged_deviated", "mixed") else ""
             if nutrient_good:
-                nut_clause = f", and came in {nutrient_good[0]} too — {nutrient_good[1]}"
+                nut_clause = f" and gave you {nutrient_good[0]}"
+                action = nutrient_good[1]
             elif nutrient_bad_fact:
-                nut_clause = f", though it ran {nutrient_bad_fact}"
+                nut_clause = f", though it had {nutrient_bad_fact}"
+                action = "Keep making balanced food choices!"
             else:
                 nut_clause = ""
-            msg = f"Nice work — today's {slot} ({dish_names}) stayed right on target{extra}{nut_clause}. Keep this one in rotation!"
+                action = "Keep making balanced food choices!"
+            msg = f"Great choice! Your {slot} met the planned GL target{nut_clause}. {action}"
 
     if msg_type is None:
         msg_type = "logged_no_insight"
         if nutrient_good:
-            extra = f", and came in {nutrient_good[0]} — {nutrient_good[1]}!"
+            extra = f", and gave you {nutrient_good[0]}"
         elif nutrient_bad_fact:
-            extra = f" — it ran {nutrient_bad_fact}."
+            extra = f" — it had {nutrient_bad_fact}"
         else:
-            extra = "."
-        msg = f"Logged: {dish_names}{extra} Thanks for keeping track!"
+            extra = ""
+        msg = f"Logged: {dish_names}{extra}. Thanks for keeping track!"
 
     messages = [{
         **base_row, "message_type": msg_type + nutrient_type_suffix, "message": msg, "meal_source": meal_source,
@@ -955,9 +902,9 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
 
 def _insert_and_send(sb, user_id: str, row: dict) -> int | None:
     """Insert one row into WH_Messages, then immediately attempt to send it
-    if the user has a linked+activated WhatsApp number — shared by
-    handle_diet_recall_entry and send_image_received_ack so there's exactly
-    one place that does this insert-then-send sequence."""
+    if the user has a linked+activated WhatsApp number — shared by every
+    live message-producing function so there's exactly one place that does
+    this insert-then-send sequence."""
     resp = sb.table("WH_Messages").insert(row).execute()
     if not resp.data:
         return None
@@ -971,30 +918,6 @@ def _insert_and_send(sb, user_id: str, row: dict) -> int | None:
     except Exception as exc:
         mark_error(msg_id, str(exc))
     return msg_id
-
-
-def send_image_received_ack(user_id: str, meal_slot: str, occasion_date: str) -> int | None:
-    """Call this right after services/recall.py's log_recall_image() creates
-    the Pending placeholder row for a NEW photo upload — sets the
-    expectation that real feedback (GL, nutrition, dish-level detail) comes
-    later, once a coordinator approves it and handle_diet_recall_entry fires
-    (via approve_review_diet_recall). Not called for a post-only upload that
-    patches an already-acknowledged occasion — no need to say it twice.
-
-    Returns the WH_Messages row id, or None if the insert itself failed."""
-    sb = get_supabase()
-    message = (
-        f"📸 Got your {meal_slot} photo — thanks for logging it! We'll send you feedback "
-        f"once it's reviewed and approved."
-    )
-    row = {
-        "user_id": user_id, "message": message, "status": "pending",
-        "meal_date": occasion_date, "meal_slot": meal_slot, "message_type": "image_received_ack",
-        "meal_source": None, "dishes": None, "actual_gl": None, "planned_gl": None,
-        "response_status": "Neutral", "energy_kcal": None, "carbs_g": None, "fibre_g": None,
-        "scheduled_at": _fmt_ist(datetime.now(IST)),
-    }
-    return _insert_and_send(sb, user_id, row)
 
 
 # ---------------------------------------------------------------------------
@@ -1159,19 +1082,128 @@ def check_missed_slots(
 
 
 # ---------------------------------------------------------------------------
-# Weekly digest — a ONE-WAY summary, no reply needed (deliberately not a
-# poll: the user only wants aggregate stats reinforced, not another channel
-# to monitor for responses). Call send_weekly_digests() from a weekly cron,
-# mirroring routers/notifications.py's /send-reminders pattern.
+# Next-day meal preview — a short, one-way heads-up of tomorrow's planned
+# meals (dish names + time per slot, nothing else) so the user can be ready
+# with ingredients/recipes ahead of time. Call send_next_day_previews() once
+# a day around _NEXT_DAY_PREVIEW_TIME (7:00 PM IST) — see
+# routers/notifications.py's send-next-day-preview endpoint.
+# ---------------------------------------------------------------------------
+
+_NEXT_DAY_PREVIEW_TIME = (19, 0)  # 7:00 PM IST
+# Chronological, not MEAL_SLOTS' order — reads like an actual day's schedule.
+_PREVIEW_SLOT_ORDER = ["breakfast", "lunch", "snacks", "dinner"]
+
+
+def build_next_day_preview(
+    user_id: str, tomorrow: date, dishes_by_slot: dict[str, list[str]],
+) -> dict | None:
+    """One user's heads-up for `tomorrow` — just slot name and dish names,
+    deliberately nothing else (no time, no GL, no nutrition) per the ask to
+    keep it short. Returns None if nothing is planned for tomorrow at all."""
+    lines = []
+    for slot in _PREVIEW_SLOT_ORDER:
+        names = dishes_by_slot.get(slot)
+        if not names:
+            continue
+        lines.append(f"{slot.capitalize()}: {', '.join(names)}")
+    if not lines:
+        return None
+    message = "*Tomorrow's Meal Plan*\n" + "\n".join(lines)
+    return {
+        "user_id": user_id, "message": message, "status": "pending",
+        "meal_date": _norm_date(tomorrow), "meal_slot": "next_day_summary",
+        "message_type": "next_day_meal_preview",
+        "meal_source": None, "dishes": None, "actual_gl": None, "planned_gl": None,
+        "response_status": "Neutral", "energy_kcal": None, "carbs_g": None, "fibre_g": None,
+        "scheduled_at": _fmt_ist(datetime.now(IST)),
+    }
+
+
+def send_next_day_previews(now: datetime | None = None) -> list[int]:
+    """Sends every real study participant a short heads-up of tomorrow's
+    planned meals. Call this once a day around _NEXT_DAY_PREVIEW_TIME
+    (7:00 PM IST) from a cron job.
+
+    Idempotent: skips any user who already has a next_day_meal_preview row
+    for tomorrow's date, so a cron running more than once a day (e.g. every
+    15 minutes, same cadence as the other reminder crons) never re-sends the
+    same preview after 7 PM."""
+    sb = get_supabase()
+    now = now or datetime.now(IST)
+    hour, minute = _NEXT_DAY_PREVIEW_TIME
+    send_dt = datetime(now.year, now.month, now.day, hour, minute, tzinfo=IST)
+    if now < send_dt:
+        return []
+
+    tomorrow = now.date() + timedelta(days=1)
+    tomorrow_str = _norm_date(tomorrow)
+
+    participants = sb.table("UserRoles").select("user_id, participant_id").execute().data or []
+    user_ids = [
+        p["user_id"] for p in participants
+        if str(p.get("participant_id") or "").strip().upper().startswith("A")
+    ]
+    if not user_ids:
+        return []
+
+    existing = (
+        sb.table("WH_Messages").select("user_id")
+        .in_("user_id", user_ids).eq("meal_date", tomorrow_str).eq("message_type", "next_day_meal_preview")
+        .execute().data
+    ) or []
+    already_sent = {r["user_id"] for r in existing}
+
+    planned_rows = (
+        sb.table("RecommendationsBackup").select("user_id, Timings, Food_Name_desc")
+        .in_("user_id", user_ids).eq("Date", tomorrow_str)
+        .execute().data
+    ) or []
+    codes = list({str(r["Food_Name_desc"]).strip() for r in planned_rows if r.get("Food_Name_desc")})
+    recipe_rows = (
+        sb.table("Recipe").select("Recipe_Code, Recipe_Name").in_("Recipe_Code", codes).execute().data
+        if codes else []
+    ) or []
+    name_map = {r["Recipe_Code"]: r.get("Recipe_Name") for r in recipe_rows}
+
+    dishes_by_user_slot: dict[tuple, list[str]] = defaultdict(list)
+    for r in planned_rows:
+        slot = _SLOT_TIMINGS_TO_MEAL_SLOT.get(str(r.get("Timings") or "").strip())
+        code = str(r.get("Food_Name_desc") or "").strip()
+        if not slot or not code:
+            continue
+        name = name_map.get(code) or code
+        key = (r["user_id"], slot)
+        if name not in dishes_by_user_slot[key]:
+            dishes_by_user_slot[key].append(name)
+
+    inserted_ids = []
+    for uid in user_ids:
+        if uid in already_sent:
+            continue
+        dishes_by_slot = {slot: dishes_by_user_slot.get((uid, slot), []) for slot in MEAL_SLOTS}
+        row = build_next_day_preview(uid, tomorrow, dishes_by_slot)
+        if row is None:
+            continue
+        msg_id = _insert_and_send(sb, uid, row)
+        if msg_id is not None:
+            inserted_ids.append(msg_id)
+    return inserted_ids
+
+
+# ---------------------------------------------------------------------------
+# Weekly digest — NOT live (by explicit request). build_weekly_digest exists
+# only for build_backtest, the offline analysis tool, to preview what a
+# weekly summary would look like. There is no live send function or cron
+# endpoint for it — do not add one without being asked again.
 # ---------------------------------------------------------------------------
 
 _WEEKLY_DIGEST_WINDOW_DAYS = 7
 
-# Headline nutrients for the weekly digest, by the label build_daily_nutrient_summary
-# (routers/kpi.py) already returns them under.
-_WEEKLY_NUTRIENT_SHORT = {
-    "Energy (kcal)": "Energy", "Protein (g)": "Protein",
-    "Carbohydrate (g)": "Carbs", "Dietary Fibre (g)": "Fibre",
+# Headline nutrients for the weekly digest, keyed by the internal column
+# name routers/kpi.py's _daily_ear_map/Recipe table use.
+_WEEKLY_NUTRIENT_COLS = {
+    "Energy_ENERC_Kcal": "Energy", "Protein_PROTCNT_g": "Protein",
+    "Carbohydrate_g": "Carbs", "TotalDietaryFibre_FIBTG_g": "Fibre",
 }
 
 
@@ -1183,25 +1215,69 @@ def _weekly_nutrient_pct_met(user_id: str, week_start: date, week_end: date) -> 
     push as the rest of this file. Capped at 100 per nutrient — exceeding
     target isn't something to chase further, so it's not shown as e.g. 280%.
     Skips a nutrient entirely if there's no requirement data for this user's
-    profile (rather than showing a misleading 0%)."""
-    from routers.kpi import build_daily_nutrient_summary
+    profile (rather than showing a misleading 0%).
 
-    totals = {name: {"req": 0.0, "intake": 0.0} for name in _WEEKLY_NUTRIENT_SHORT}
-    d = week_start
-    while d <= week_end:
-        for row in build_daily_nutrient_summary(user_id, str(d)):
-            t = totals.get(row["Nutrient"])
-            if t is None:
-                continue
-            if row["Requirement"] is not None:
-                t["req"] += row["Requirement"]
-            t["intake"] += row["Intake"] or 0
-        d += timedelta(days=1)
+    Replicates routers/kpi.py's build_daily_nutrient_summary scaling logic
+    as ONE bulk fetch across the whole week, instead of calling that function
+    once per day (7x redundant profile/EAR/Recipe/RecipeTagging queries per
+    user) — the per-day version made the weekly digest slow enough (100+
+    seconds for just 7 users in testing) to risk a cron/HTTP timeout as the
+    participant count grows."""
+    from routers.kpi import _daily_ear_map
+    from services.profile_builder import build_profile
 
-    return {
-        _WEEKLY_NUTRIENT_SHORT[name]: min(100, round(v["intake"] / v["req"] * 100))
-        for name, v in totals.items() if v["req"] > 0
-    }
+    profile = build_profile(user_id)
+    daily_min = _daily_ear_map(profile) if profile else {}
+    if not daily_min:
+        return {}
+
+    sb = get_supabase()
+    start_str, end_str = str(week_start), str(week_end)
+    recall_rows = (
+        sb.table("DietRecall").select("Food_Name_desc, Food_Qty")
+        .eq("user_id", user_id).gte("Date", start_str).lte("Date", end_str)
+        .execute().data
+    ) or []
+    eaten = [r for r in recall_rows if r.get("Food_Name_desc")]
+    if not eaten:
+        return {}
+
+    recipe_codes = list({r["Food_Name_desc"] for r in eaten})
+    recipe_cols = [c for c in _WEEKLY_NUTRIENT_COLS if c != "Energy_ENERC_Kcal"]
+    recipe_rows = (
+        sb.table("Recipe").select("Recipe_Code, Energy_ENERC_KJ, " + ", ".join(recipe_cols))
+        .in_("Recipe_Code", recipe_codes).execute().data
+    ) or []
+    recipe_map = {r["Recipe_Code"]: r for r in recipe_rows}
+    tag_rows = (
+        sb.table("RecipeTagging").select("Recipe_Code, Portion").in_("Recipe_Code", recipe_codes).execute().data
+    ) or []
+    portion_map = {t["Recipe_Code"]: t.get("Portion") for t in tag_rows}
+
+    totals = {col: 0.0 for col in _WEEKLY_NUTRIENT_COLS}
+    for r in eaten:
+        recipe = recipe_map.get(r["Food_Name_desc"])
+        if not recipe:
+            continue
+        try:
+            base_portion = float(portion_map.get(r["Food_Name_desc"]))
+            food_qty = float(r.get("Food_Qty"))
+            prop = food_qty / base_portion if base_portion > 0 else 1.0
+        except (TypeError, ValueError):
+            prop = 1.0
+        totals["Energy_ENERC_Kcal"] += (float(recipe.get("Energy_ENERC_KJ") or 0) / 4.184) * prop
+        for col in recipe_cols:
+            val = recipe.get(col)
+            if val is not None:
+                totals[col] += float(val) * prop
+
+    num_days = (week_end - week_start).days + 1
+    result = {}
+    for col, label in _WEEKLY_NUTRIENT_COLS.items():
+        req = daily_min.get(col)
+        if req:
+            result[label] = min(100, round(totals[col] / (req * num_days) * 100))
+    return result
 
 
 def build_weekly_digest(user_id: str, week_end: date) -> dict | None:
@@ -1295,28 +1371,11 @@ def build_weekly_digest(user_id: str, week_end: date) -> dict | None:
     }
 
 
-def send_weekly_digests(week_end: date | None = None) -> list[int]:
-    """Builds and sends the weekly digest for every real study participant.
-    Call this once a week (e.g. Sunday evening) from a cron job — see
-    routers/notifications.py's send_weekly_digest endpoint."""
-    sb = get_supabase()
-    week_end = week_end or (date.today() - timedelta(days=1))
-
-    participants = sb.table("UserRoles").select("user_id, participant_id").execute().data or []
-    user_ids = [
-        p["user_id"] for p in participants
-        if str(p.get("participant_id") or "").strip().upper().startswith("A")
-    ]
-
-    inserted_ids = []
-    for user_id in user_ids:
-        row = build_weekly_digest(user_id, week_end)
-        if row is None:
-            continue
-        msg_id = _insert_and_send(sb, user_id, row)
-        if msg_id is not None:
-            inserted_ids.append(msg_id)
-    return inserted_ids
+# NOTE: the daily logging-streak report and the weekly digest are NOT live —
+# by explicit request, only score_logging_streak_report/build_weekly_digest
+# (used below by build_backtest, the offline analysis tool) exist. There is
+# no send_streak_reports/send_weekly_digests function and no cron endpoint
+# for either — do not re-add one without being asked again.
 
 
 def build_backtest(days: int) -> pd.DataFrame:
