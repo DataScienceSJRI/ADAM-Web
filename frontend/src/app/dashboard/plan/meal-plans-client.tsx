@@ -36,7 +36,14 @@ function isInProgressStatus(status: string | null): boolean {
 // usually also has old rows from an earlier successful week).
 function isFailedStatus(status: string | null, stale?: boolean): boolean {
   if (stale) return false;
-  return Boolean(status?.startsWith("error") || status?.includes("No solution"));
+  // "No solution" matches the old generic fallback message; "No feasible"
+  // matches services/lp_optimizer.py's actual message on a genuinely
+  // Infeasible/empty solve ("No feasible weekly menu found...") -- confirmed
+  // missing for real on A003_ANISH: that exact status never matched either
+  // check, so hasFailed stayed false and no Retry button ever appeared.
+  return Boolean(
+    status?.startsWith("error") || status?.includes("No solution") || status?.includes("No feasible")
+  );
 }
 
 function hasUsablePlan(participant: Participant): boolean {
