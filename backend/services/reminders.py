@@ -71,6 +71,25 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
 
     now_ist = datetime.now(IST)
     now_minutes = now_ist.hour * 60 + now_ist.minute
+    today_str = now_ist.date().isoformat()
+
+    # Users who've already logged a given slot today shouldn't get a reminder
+    # for it -- confirmed missing entirely before this: send_meal_reminders
+    # fired purely off the preferred meal-time window, with no check against
+    # DietRecall at all, so a reminder went out even to someone who'd already
+    # logged that exact meal.
+    already_logged_resp = (
+        sb.table("DietRecall")
+        .select("user_id, meal_slot")
+        .in_("user_id", all_user_ids)
+        .eq("Date", today_str)
+        .execute()
+    )
+    already_logged: set[tuple[str, str]] = {
+        (r["user_id"], str(r.get("meal_slot") or "").strip().lower())
+        for r in (already_logged_resp.data or [])
+        if r.get("user_id")
+    }
 
     slots = list(_SLOT_LABELS.keys())
     slot_player_ids: dict[str, list[str]] = {slot: [] for slot in slots}
@@ -78,6 +97,8 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
     for uid in all_user_ids:
         prefs = user_prefs.get(uid, {})
         for slot in slots:
+            if (uid, slot) in already_logged:
+                continue
             default = DEFAULT_MEAL_TIMES[slot]
             # No snacks_time preference column exists, so prefs.get() is
             # always empty for snacks and it always falls back to the fixed

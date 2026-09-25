@@ -30,6 +30,7 @@ Every message carries:
 Usage: python -m services.whatsapp_feedback [--days 20] [--output PATH]
 """
 import argparse
+import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
@@ -40,6 +41,8 @@ from services.recall import fetch_base_gl_map, fetch_portion_map, gl_for_quantit
 from services.reminders import IST, DEFAULT_MEAL_TIMES, time_to_minutes
 from services.wh_messages import mark_error, mark_sent
 from services.whatsapp_gateway import get_gateway
+
+logger = logging.getLogger("backend.services.whatsapp_feedback")
 
 MEAL_SLOTS = ["breakfast", "lunch", "dinner", "snacks"]
 _SLOT_TIMINGS_TO_MEAL_SLOT = {"Breakfast": "breakfast", "Lunch": "lunch", "Dinner": "dinner", "Snacks": "snacks"}
@@ -99,7 +102,15 @@ NUTRIENT_UNITS = {
     "TotalDietaryFibre_FIBTG_g": "g", "Sodium_mg": "mg",
 }
 NUTRIENT_FLOORS = {"Protein_PROTCNT_g": 3, "TotalFat_FATCE_g": 2, "Carbohydrate_g": 5, "TotalDietaryFibre_FIBTG_g": 1, "Sodium_mg": 50}
-_NUTRITION_VARIANCE_PCT = 0.30
+# Only flag a nutrient when actual is at least this many times planned (or
+# planned is at least this many times actual) -- raised from a 30%-either-way
+# threshold per explicit request: too many near-miss messages were going out
+# for routine variance (e.g. 21g vs 13g fat, an ~1.6x gap) that wasn't
+# actually meaningful. A plain percentage threshold can't express "2x either
+# direction" symmetrically (a value dropping to HALF of planned is only a
+# 50% decrease, not the mirror of a 100% increase), so this is checked as a
+# true ratio in both directions -- see _biggest_nutrient_gap below.
+_NUTRITION_VARIANCE_RATIO = 2.0
 
 # Which direction is actually GOOD for each nutrient — drives whether a
 # variance message praises the user or flags the plan. More protein/fibre
@@ -121,6 +132,23 @@ _NUTRIENT_GOOD_ACTION = {
 
 def _norm_date(d) -> str:
     return str(d)[:10]
+
+
+def _day_label(d: date) -> str:
+    """Day-relative label for a message referring to meal date `d`, based on
+    the ACTUAL current IST date at generation time -- never assumed to be
+    the meal's own date. Confirmed for real (A006_RAJENDRA) that feedback
+    processing can run many hours late, crossing midnight: a Sep-24 dinner
+    scored and sent around 10am IST on Sep-25 was still saying "Today's
+    dinner", which is simply wrong once the calendar day has turned over.
+    Falls back to the explicit date once it's more than a day stale, rather
+    than guessing further backwards."""
+    delta = (datetime.now(IST).date() - d).days
+    if delta <= 0:
+        return "Today's"
+    if delta == 1:
+        return "Yesterday's"
+    return f"Your {d.strftime('%b %-d')}"
 
 
 def _daterange(start: date, end: date):
@@ -167,9 +195,8 @@ def _sent_at_for_missed_question(d: date, slot: str) -> str:
     return _fmt_ist(_missed_question_dt(d, slot))
 
 
-def _earliest_logged_dt(rows: list[dict]):
-    """Earliest DietRecall.created_at among these rows, converted to IST — or
-    None if none carry a created_at (older data)."""
+def _parsed_logged_dts(rows: list[dict]) -> list[datetime]:
+    """Every DietRecall.created_at among these rows, converted to IST."""
     parsed = []
     for r in rows:
         ts = r.get("created_at")
@@ -185,10 +212,28 @@ def _earliest_logged_dt(rows: list[dict]):
                 # be IST on this machine, so it would silently pass the UTC clock
                 # value through unchanged instead of shifting it by +5:30.
                 dt = dt.replace(tzinfo=timezone.utc)
-            parsed.append(dt)
+            parsed.append(dt.astimezone(IST))
         except ValueError:
             continue
-    return min(parsed).astimezone(IST) if parsed else None
+    return parsed
+
+
+def _earliest_logged_dt(rows: list[dict]):
+    """Earliest DietRecall.created_at among these rows, converted to IST — or
+    None if none carry a created_at (older data)."""
+    parsed = _parsed_logged_dts(rows)
+    return min(parsed) if parsed else None
+
+
+def _latest_logged_dt(rows: list[dict]):
+    """Most recent DietRecall.created_at among these rows, converted to IST —
+    or None if none carry a created_at (older data). Used to debounce: as
+    long as new dishes keep arriving for the same occasion (another manually
+    typed item, or a coordinator approving another photo), this keeps moving
+    forward and the quiet-period check in handle_diet_recall_entry keeps
+    waiting."""
+    parsed = _parsed_logged_dts(rows)
+    return max(parsed) if parsed else None
 
 
 def _sent_at_for_logged(rows: list[dict], d: date, prefs: dict, slot: str) -> str:
@@ -323,14 +368,18 @@ def _nutrient_culprit_row(rows: list[dict], recipe_info: dict, portion_map: dict
 def _biggest_nutrient_gap(planned_n: dict, actual_n: dict):
     """Largest-magnitude relative gap among nutrients whose planned amount
     clears NUTRIENT_FLOORS (so a near-zero baseline can't produce a huge,
-    meaningless %). Returns (col, planned, actual, pct) or None."""
+    meaningless %), and whose actual/planned ratio is at least
+    _NUTRITION_VARIANCE_RATIO in either direction. Returns (col, planned,
+    actual, pct) or None."""
     best = None
     for col, floor in NUTRIENT_FLOORS.items():
         p, a = planned_n.get(col, 0.0), actual_n.get(col, 0.0)
         if p < floor:
             continue
         pct = (a - p) / p
-        if abs(pct) >= _NUTRITION_VARIANCE_PCT and (best is None or abs(pct) > abs(best[3])):
+        ratio = a / p if p else float("inf")
+        is_at_least_2x = ratio >= _NUTRITION_VARIANCE_RATIO or ratio <= 1.0 / _NUTRITION_VARIANCE_RATIO
+        if is_at_least_2x and (best is None or abs(pct) > abs(best[3])):
             best = (col, p, a, pct)
     return best
 
@@ -635,7 +684,7 @@ def score_logged_occasion(
             tail = f" Just note it had {nutrient_bad_fact}. Keep this one in rotation!"
         else:
             tail = " Keep this one in rotation!"
-        msg = f"Great job! Today's {slot} had your lowest GL yet ({round(total_gl)} vs previous best {round(min(prior_totals))}).{tail}"
+        msg = f"Great job! {_day_label(d)} {slot} had your lowest GL yet ({round(total_gl)} vs previous best {round(min(prior_totals))}).{tail}"
 
     if msg_type is None and accomp:
         same_base_prior = [
@@ -658,11 +707,11 @@ def score_logged_occasion(
                     action = "Keep making balanced food choices!"
                 if total_gl < prev["total_gl"]:
                     msg_type = "same_base_lower_today"
-                    msg = (f"Good choice! Today's {slot} had a lower GL than your previous meal "
+                    msg = (f"Good choice! {_day_label(d)} {slot} had a lower GL than your previous meal "
                            f"({round(total_gl)} vs {round(prev['total_gl'])}).{nut_tail} {action}")
                 else:
                     msg_type = "same_base_better_option_exists"
-                    msg = (f"Heads up! Today's {slot} had a higher GL than a meal you had on {prev['date']} "
+                    msg = (f"Heads up! {_day_label(d)} {slot} had a higher GL than a meal you had on {prev['date']} "
                            f"({round(total_gl)} vs {round(prev['total_gl'])}).{nut_tail} "
                            f"Next time, try repeating that earlier combination.")
 
@@ -767,6 +816,18 @@ def score_logged_occasion(
 
 _LIVE_HISTORY_LOOKBACK_DAYS = 14  # matches routers/kpi.py's GL_TREND_WINDOW_DAYS convention
 
+# How long to wait, after the LAST dish is logged for an occasion, before
+# scoring and sending feedback for it -- so a meal logged dish-by-dish
+# (manual entries one at a time, or a coordinator approving a pre-photo then
+# a post-photo separately) gets exactly ONE consolidated message instead of
+# a placeholder followed later by the real one, or multiple re-sends as more
+# dishes trickle in. Resets on every new dish: handle_diet_recall_entry is
+# re-invoked on every DietRecall insert AND by the poller below, and each
+# call re-checks how long it's been since the occasion's OWN most recent
+# row -- a fresh dish always pushes the wait out another
+# _FEEDBACK_DEBOUNCE_MINUTES from itself.
+_FEEDBACK_DEBOUNCE_MINUTES = 5
+
 
 def _get_activated_phone(sb, user_id: str) -> str | None:
     resp = (
@@ -797,8 +858,24 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
         .gte("Date", start_str).lte("Date", end_str)
         .execute().data
     ) or []
-    if not any(_norm_date(r["Date"]) == end_str for r in recall_rows):
+    occasion_rows = [r for r in recall_rows if _norm_date(r["Date"]) == end_str]
+    if not occasion_rows:
         return []  # nothing logged for this occasion (yet, or it was removed) — nothing to score
+
+    # Debounce: wait until _FEEDBACK_DEBOUNCE_MINUTES have passed since the
+    # LAST dish was added to this exact occasion before scoring/sending.
+    # Every insert (manual entry, or a coordinator's photo approval) calls
+    # this function again, so as long as new dishes keep arriving the wait
+    # keeps resetting -- only once it's been quiet for the full window does
+    # a call actually proceed to send. The poller below (run from
+    # reminder_worker.py) is what re-checks a still-quiet occasion once the
+    # window has elapsed; a caller that inserts a row and gets "not yet" here
+    # doesn't need to do anything further itself.
+    latest = _latest_logged_dt(occasion_rows)
+    if latest is not None:
+        quiet_for = datetime.now(IST) - latest
+        if quiet_for < timedelta(minutes=_FEEDBACK_DEBOUNCE_MINUTES):
+            return []
 
     planned_rows = (
         sb.table("RecommendationsBackup")
@@ -884,6 +961,41 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
     if not messages:
         return []
 
+    # Dedup against messages already sent for this exact (user, date, slot)
+    # occasion -- this function fires again on EVERY new DietRecall row for
+    # the same occasion (e.g. a second dish added to an already-logged
+    # dinner before either is identified), which was re-sending real
+    # duplicates: confirmed for real on A005_ASHWIN, who got "Thanks for
+    # logging dinner (that item)!" and then, ~7 hours later when a second
+    # item was added to the same still-unidentified dinner, "Thanks for
+    # logging dinner (that item, that item)!" -- and separately got the
+    # exact same "possibly_incomplete_meal" lunch message twice, 90 seconds
+    # apart, with no new information between the two calls at all.
+    # "logged_unidentified" is a one-time ack that dishes are still being
+    # identified -- once sent, adding yet another still-unidentified dish to
+    # the same occasion shouldn't re-send it. Every message type is also
+    # deduped by exact text, which catches an identical re-fire regardless
+    # of type.
+    existing_rows = (
+        sb.table("WH_Messages")
+        .select("message, message_type")
+        .eq("user_id", user_id).eq("meal_date", end_str).eq("meal_slot", meal_slot)
+        .execute().data
+    ) or []
+    already_sent_types = {r["message_type"] for r in existing_rows if r.get("message_type")}
+    already_sent_texts = {r["message"] for r in existing_rows if r.get("message")}
+
+    deduped_messages = []
+    for m in messages:
+        if m["message_type"] == "logged_unidentified" and "logged_unidentified" in already_sent_types:
+            continue
+        if m["message"] in already_sent_texts:
+            continue
+        deduped_messages.append(m)
+    messages = deduped_messages
+    if not messages:
+        return []
+
     inserted_ids = []
     for m in messages:
         row = {
@@ -898,6 +1010,59 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
         if msg_id is not None:
             inserted_ids.append(msg_id)
     return inserted_ids
+
+
+# How far back to look for occasions that might have just cleared their
+# debounce window. Generous on purpose: a slow coordinator review queue (see
+# A006_RAJENDRA, ~13 hours between first and last dish on one occasion) means
+# an occasion can still be legitimately open well past a couple of hours, and
+# re-checking an already-fully-sent occasion is a cheap no-op (handle_diet_
+# recall_entry's own dedup skips it immediately), so there's little cost to
+# scanning generously here.
+_PENDING_FEEDBACK_LOOKBACK_HOURS = 24
+
+
+def send_pending_meal_feedback() -> int:
+    """Poller: finds every (user, meal_slot, date) occasion with a DietRecall
+    row created in the last _PENDING_FEEDBACK_LOOKBACK_HOURS and re-invokes
+    handle_diet_recall_entry for each. That function is what actually decides
+    whether the debounce window (_FEEDBACK_DEBOUNCE_MINUTES) has elapsed since
+    the occasion's last dish and whether anything's already been sent for it
+    — this poller doesn't duplicate that logic, it just supplies the "check
+    again" tick that a purely insert-triggered design can't provide on its
+    own (an occasion whose last dish arrived 5 minutes ago has nothing left
+    to trigger it, since no NEW row is inserted while it waits).
+
+    Meant to be called on a short interval (e.g. every 60-90s) from
+    services/reminder_worker.py, which already runs independently of the
+    plan-generation queue for exactly this kind of time-sensitive check.
+    Returns how many new WH_Messages rows were sent this tick."""
+    sb = get_supabase()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=_PENDING_FEEDBACK_LOOKBACK_HOURS)).isoformat()
+    recent_rows = (
+        sb.table("DietRecall")
+        .select("user_id, meal_slot, Date, created_at")
+        .gte("created_at", cutoff)
+        .execute().data
+    ) or []
+
+    occasions = {
+        (r["user_id"], r["meal_slot"], _norm_date(r["Date"]))
+        for r in recent_rows
+        if r.get("user_id") and r.get("meal_slot") and r.get("Date")
+    }
+
+    sent = 0
+    for user_id, meal_slot, occasion_date in occasions:
+        try:
+            ids = handle_diet_recall_entry(user_id, meal_slot, occasion_date)
+            sent += len(ids)
+        except Exception:
+            logger.exception(
+                "Pending meal feedback check failed for user_id=%s meal_slot=%s date=%s",
+                user_id, meal_slot, occasion_date,
+            )
+    return sent
 
 
 def _insert_and_send(sb, user_id: str, row: dict) -> int | None:
