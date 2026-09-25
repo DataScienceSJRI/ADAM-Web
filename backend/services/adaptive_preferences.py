@@ -47,7 +47,7 @@ nothing is persisted to Supabase, so there's no cron job and no table to
 keep in sync.
 """
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from core.supabase import get_supabase, fetch_all_rows
 
@@ -58,6 +58,9 @@ ADAPTIVE_DEMOTE_MIN_EATEN_COUNT = 3
 ADAPTIVE_PROMOTE_AFTER_COUNT = 3
 ADAPTIVE_MIN_REMAINING_AFTER_DEMOTE = 4
 ADAPTIVE_COMBINATION_MIN_COUNT = 2
+
+DIETRECALL_DOMINANT_WINDOW_DAYS = 42
+DIETRECALL_DOMINANT_MIN_COUNT = 10
 
 
 def _normalize_date(raw: str) -> str | None:
@@ -290,5 +293,113 @@ def compute_adaptive_main_combinations(user_id: str) -> list[dict]:
     logger.info(
         "Recomputed adaptive Main combinations for user_id=%s: %d learned pairing(s)",
         user_id, len(results),
+    )
+    return results
+
+
+def compute_dietrecall_dominant_preferences(
+    user_id: str,
+    window_days: int = DIETRECALL_DOMINANT_WINDOW_DAYS,
+    min_count: int = DIETRECALL_DOMINANT_MIN_COUNT,
+) -> list[dict]:
+    """Detects a strongly repeated RECENT eating pattern per (meal_slot,
+    EXACT recipe) -- e.g. a user who has logged the exact same rice dish for
+    lunch on most of his last 6 weeks' entries. Keyed by the specific
+    recipe code, not its subcategory: confirmed for real on A003_ANISH that
+    subcategory-level aggregation actively picks the wrong dish -- his
+    Lunch/Main "E2A" (plain rice/stewed rice) pattern of 20 logged entries
+    was 18 of those literally "Rice" (A000445, GL=40.4, the WORST-GL option
+    among E2A's 6 recipes), yet subcategory-level bonus/relaxation let the
+    solver settle on "Basmati rice" (R000170, GL=14.2, best-GL, but never
+    once actually logged) instead -- cheaper by the objective, not what he
+    actually eats. Deliberately scoped to a recent window (unlike
+    compute_adaptive_main_preferences' all-time history) so a habit that's
+    since changed doesn't lock in a stale bonus, and to ADAM_Recipes == 1
+    codes only (Rec_ADAM_yes_no) -- the same catalog the model actually
+    draws candidates from, so a DietRecall entry logged against a USDA-only
+    reference code can't produce a bonus toward something the model could
+    never offer as a candidate.
+
+    sub_category_code is still resolved and returned (services/data_loader.py
+    uses it to widen the candidate pool with the recipe's ADAM-catalog
+    siblings, as headroom in case the exact recipe alone can't cover every
+    day for a genuine GL/nutrition reason) but the bonus/cap-relaxation
+    itself (see lp_optimizer.py's dietrecall_dominant_bonus) targets the
+    exact recipe_code, not the whole subcategory.
+
+    Returned as a soft-preference signal, not a hard override: exceeding
+    min_count biases the objective strongly toward that exact recipe at that
+    meal_slot, but the solver can still substitute another option when
+    GL/nutrition genuinely requires it. Called live on every plan
+    generation; purely in-memory, nothing is persisted."""
+    sb = get_supabase()
+    cutoff = date.today() - timedelta(days=window_days)
+
+    # Filtered in Python, not via a server-side .gte("Date", ...) -- Date is
+    # a text column with a confirmed mix of 'YYYY-MM-DD' and 'DD-MM-YYYY'
+    # rows in this project (see _normalize_date above), so a raw string
+    # comparison would silently misorder/misfilter the DD-MM-YYYY rows.
+    all_recall_rows = fetch_all_rows(lambda: (
+        sb.table("DietRecall").select("Date,meal_slot,Food_Name_desc").eq("user_id", user_id)
+    ))
+    recall_rows = []
+    for r in all_recall_rows:
+        d = _normalize_date(r.get("Date"))
+        if d and date.fromisoformat(d) >= cutoff:
+            recall_rows.append(r)
+    if not recall_rows:
+        return []
+
+    recipe_codes = {
+        str(r["Food_Name_desc"]).strip().upper() for r in recall_rows if r.get("Food_Name_desc")
+    }
+    if not recipe_codes:
+        return []
+
+    adam_rows = fetch_all_rows(lambda: sb.table("Rec_ADAM_yes_no").select("Recipe_Code,ADAM_Recipes"))
+    adam_codes = {
+        str(r["Recipe_Code"]).strip().upper() for r in adam_rows
+        if r.get("Recipe_Code") and str(r.get("ADAM_Recipes")) == "1"
+    }
+    eligible_codes = recipe_codes & adam_codes
+    if not eligible_codes:
+        return []
+
+    tag_rows = fetch_all_rows(lambda: (
+        sb.table("RecipeTagging").select("Recipe_Code,Subcategories").in_("Recipe_Code", list(eligible_codes))
+    ))
+    recipe_to_subcat = {
+        str(r["Recipe_Code"]).strip().upper(): str(r.get("Subcategories") or "").strip().upper()
+        for r in tag_rows
+    }
+
+    counts: dict[tuple[str, str], int] = {}
+    for r in recall_rows:
+        code = str(r.get("Food_Name_desc") or "").strip().upper()
+        if code not in eligible_codes:
+            continue
+        meal_time = str(r.get("meal_slot") or "").strip().title()
+        if not meal_time:
+            continue
+        key = (meal_time, code)
+        counts[key] = counts.get(key, 0) + 1
+
+    results = [
+        {
+            "user_id": user_id,
+            "meal_time": meal_time,
+            "recipe_code": code,
+            "sub_category_code": recipe_to_subcat.get(code),
+            "count": count,
+            "window_days": window_days,
+        }
+        for (meal_time, code), count in counts.items()
+        if count > min_count
+    ]
+
+    logger.info(
+        "Computed diet-recall dominant preferences for user_id=%s (last %d days): %s",
+        user_id, window_days,
+        [(r["meal_time"], r["recipe_code"], r["sub_category_code"], r["count"]) for r in results],
     )
     return results

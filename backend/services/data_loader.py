@@ -638,6 +638,61 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
         ds["liked_recipe_codes"] = set()
         ds["millet_recipe_codes"] = set()
 
+    # Diet-recall-driven soft-preference signals for lp_optimizer.py's
+    # objective (dietrecall_dominant_bonus / dietrecall_combo_bonus): a
+    # strongly repeated RECENT eating pattern (e.g. egg most days at
+    # breakfast) or a real companion pairing gets extra pull toward being
+    # picked again, on top of ordinary candidate eligibility. Soft, not a
+    # hard override -- GL/nutrition can still win.
+    try:
+        from services.adaptive_preferences import (
+            compute_dietrecall_dominant_preferences,
+            compute_adaptive_main_combinations,
+        )
+
+        liked_codes = ds.get("liked_recipe_codes") or set()
+        recipe_tag_df = ds.get("recipe_tag", pd.DataFrame())
+
+        dominant_rows = compute_dietrecall_dominant_preferences(user_id)
+        dietrecall_dominant_bonus: dict = {}
+        for row in dominant_rows:
+            # Keyed by the EXACT recipe code, not its subcategory -- confirmed
+            # for real on A003_ANISH that subcategory-level targeting picks
+            # the wrong dish: his 20-count Lunch/E2A ("plain rice") pattern
+            # was 18x literally "Rice" (A000445, GL=40.4, the worst-GL E2A
+            # option), but a subcategory-wide bonus let the solver settle on
+            # "Basmati rice" (R000170, GL=14.2, best-GL, never once logged)
+            # instead -- cheaper by the objective, not what he actually eats.
+            key = (row["meal_time"], row["recipe_code"])
+            dietrecall_dominant_bonus[key] = dietrecall_dominant_bonus.get(key, 0.0) + float(row["count"])
+            # Still widen the candidate pool to the recipe's ADAM-catalog
+            # subcategory siblings -- not for the bonus/cap-relaxation itself
+            # (that's exact-recipe-scoped above), just as feasibility
+            # headroom in case the exact recipe alone can't cover every day
+            # for a genuine GL/nutrition reason (the variety-cap Infeasible
+            # failure a thin Lunch/Main pool caused for A003_ANISH originally).
+            subcat = row.get("sub_category_code")
+            if subcat and not recipe_tag_df.empty and "Subcategories" in recipe_tag_df.columns:
+                sibling_codes = recipe_tag_df.loc[
+                    recipe_tag_df["Subcategories"].astype(str).str.strip().str.upper() == subcat,
+                    "Recipe_Code",
+                ]
+                liked_codes.update(sibling_codes.dropna().astype(str).str.strip().str.upper().unique())
+
+        ds["liked_recipe_codes"] = liked_codes
+        ds["dietrecall_dominant_bonus"] = dietrecall_dominant_bonus
+
+        combo_rows = compute_adaptive_main_combinations(user_id)
+        dietrecall_combo_bonus: dict = {}
+        for row in combo_rows:
+            key = (row["meal_time"], row["companion_subcategory_code"])
+            dietrecall_combo_bonus[key] = dietrecall_combo_bonus.get(key, 0.0) + float(row["co_occurrence_count"])
+        ds["dietrecall_combo_bonus"] = dietrecall_combo_bonus
+    except Exception:
+        logger.exception("Diet-recall weighting signals failed for user_id=%s — skipping extra bonus", user_id)
+        ds["dietrecall_dominant_bonus"] = {}
+        ds["dietrecall_combo_bonus"] = {}
+
     # Only computed when it can actually matter: non-veg diet with more than
     # one selected meat type. Feeds services/lp_optimizer.py's non-veg-type
     # variety constraint — skipped entirely for the vast majority of users

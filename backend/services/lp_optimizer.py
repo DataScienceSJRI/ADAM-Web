@@ -187,6 +187,65 @@ def run_lp(
         is_liked = candidates["Recipe_Code"].astype(str).str.strip().str.upper().isin(liked_codes)
         candidates.loc[is_liked, "Weighted_Objective_Score"] -= float(liked_recipe_bonus)
 
+    # Diet-recall soft preferences (services/adaptive_preferences.py, wired
+    # in via services/data_loader.py): the EXACT recipe logged >10 times at
+    # the same meal_slot in the last 6 weeks gets a bonus that scales
+    # QUADRATICALLY with how often it's actually eaten. Matched on the exact
+    # Recipe_Code, not the candidate's subcategory: a subcategory-level match
+    # (tried first) actively picked the wrong dish -- confirmed for real on
+    # A003_ANISH, whose Lunch/Main "E2A" (plain rice/stewed rice) pattern of
+    # 20 logged entries was 18x literally "Rice" (A000445, GL=40.4, the
+    # worst-GL option among E2A's 6 recipes), yet a subcategory-wide bonus
+    # let the solver settle on "Basmati rice" (R000170, GL=14.2, best-GL,
+    # never once actually logged) instead -- cheaper by the objective, not
+    # what he actually eats. A flat/linear bonus also turned out to be
+    # nowhere near enough on its own: real candidate data showed a 500*GL
+    # spread of up to ~20,000 between these two recipes' Weighted_Objective_Score
+    # (20,196 vs. 7,100). Quadratic-from-just-below-threshold means a
+    # barely-qualifying count (11) stays a mild nudge, while a strongly
+    # dominant one (18+, like A003's actual 18) gets a bonus competitive with
+    # that worst-case GL gap -- genuinely strong, not a hard lock: GL/TUL
+    # constraints are untouched, this only shifts which otherwise-feasible
+    # candidate wins.
+    DIETRECALL_DOMINANT_BONUS_BASE = 180.0
+    DIETRECALL_DOMINANT_BONUS_FLOOR_COUNT = 9  # one below the qualifying threshold (>10) -- bonus starts near 0 right above it
+    DIETRECALL_DOMINANT_BONUS_MAX_COUNT = 42  # the recall window length itself (see DIETRECALL_DOMINANT_WINDOW_DAYS) -- a natural ceiling
+    dominant_bonus = ds.get("dietrecall_dominant_bonus") or {}
+    if dominant_bonus:
+        meal_time_title = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        recipe_code_upper = candidates["Recipe_Code"].astype(str).str.strip().str.upper()
+        for (mt, recipe_code), weight in dominant_bonus.items():
+            mask = (meal_time_title == mt) & (recipe_code_upper == recipe_code)
+            if mask.any():
+                capped = min(float(weight), DIETRECALL_DOMINANT_BONUS_MAX_COUNT)
+                excess = max(0.0, capped - DIETRECALL_DOMINANT_BONUS_FLOOR_COUNT)
+                bonus = DIETRECALL_DOMINANT_BONUS_BASE * (excess ** 2)
+                candidates.loc[mask, "Weighted_Objective_Score"] -= bonus
+
+    # Diet-recall companion pairings (compute_adaptive_main_combinations,
+    # sourced from the same DietRecall history): a companion recipe he
+    # actually eats alongside a given Main, at the meal_slot it was
+    # co-occurring in, gets a bonus scaled the same quadratic way (smaller
+    # base -- these already became eligible candidates via
+    # ModelOptimiser._get_main1_main2_main3_map's mapping blend, this just
+    # makes the solver more likely to actually pick them over an equally
+    # eligible but never-actually-paired alternative, so it doesn't need to
+    # cover as wide a GL gap as the full-slot dominant bonus above).
+    DIETRECALL_COMBO_BONUS_BASE = 250.0
+    DIETRECALL_COMBO_BONUS_FLOOR_COUNT = 1  # one below ADAPTIVE_COMBINATION_MIN_COUNT (2)
+    DIETRECALL_COMBO_BONUS_MAX_COUNT = 15
+    combo_bonus = ds.get("dietrecall_combo_bonus") or {}
+    if combo_bonus:
+        meal_time_title = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        for (mt, subcat), weight in combo_bonus.items():
+            mask = (meal_time_title == mt) & (category_upper == subcat)
+            if mask.any():
+                capped = min(float(weight), DIETRECALL_COMBO_BONUS_MAX_COUNT)
+                excess = max(0.0, capped - DIETRECALL_COMBO_BONUS_FLOOR_COUNT)
+                bonus = DIETRECALL_COMBO_BONUS_BASE * (excess ** 2)
+                candidates.loc[mask, "Weighted_Objective_Score"] -= bonus
+
     objective_metric_col = "Weighted_Objective_Score"
 
     required_slots = (
@@ -650,6 +709,48 @@ def run_lp(
             if str(candidates.loc[i, "Recipe_Name"]).strip().lower() == "boiled egg"
         )
 
+    # Diet-recall dominant-pattern exemption: the EXACT recipe confirmed as a
+    # strongly repeated real eating pattern (ds["dietrecall_dominant_bonus"],
+    # same signal and same exact-recipe matching as the objective bonus
+    # above) is exempted from the repetition ceilings below -- per-slot hard
+    # cap, per-slot soft penalty, global per-recipe cap -- but ONLY at that
+    # exact meal_time; the same recipe code at a different meal_time, and
+    # every other (non-dominant) recipe in its subcategory, are still
+    # governed normally. Without this, the objective bonus alone can't move
+    # the exact recipe's realized frequency past its per-recipe cap:
+    # confirmed for real on A003_ANISH, whose dominant Lunch/Main recipe
+    # (A000445, "Rice", logged 18x) sits in a 6-recipe subcategory (E2A) and
+    # so is hard-capped at 1 use/week by Layer A below -- no bonus size could
+    # push it past that without this. Scoped to exactly the observed (meal_time,
+    # recipe_code) pair, not a blanket relaxation or a subcategory-wide one,
+    # per instruction: only relax where the pattern was actually observed,
+    # and only for the exact recipe that pattern is.
+    # Hard floor, tried at the user's explicit request after the soft
+    # quadratic bonus alone (with gapRel back at the production default of
+    # 0.3) only landed the dominant recipe on 2-3 of 7 days rather than
+    # reliably "most days": a confirmed dominant (meal_time, recipe) pair
+    # must now appear at least DIETRECALL_DOMINANT_MIN_DAYS_HARD times across
+    # the week, as a genuine hard constraint, not just a heavily-weighted
+    # preference. This is a real behavior change from "strong soft
+    # preference" -- it can force out an otherwise better-GL/lower-penalty
+    # candidate on days it wouldn't naturally win, and, unlike the bonus, can
+    # in principle make the week Infeasible if satisfying it on enough days
+    # genuinely conflicts with GL/portion/energy constraints elsewhere.
+    DIETRECALL_DOMINANT_MIN_DAYS_HARD = 4
+
+    dominant_bonus_keys = ds.get("dietrecall_dominant_bonus") or {}
+    dominant_slot_ids: dict[str, set] = {}
+    if dominant_bonus_keys:
+        meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        recipe_code_upper_all = candidates["Recipe_Code"].astype(str).str.strip().str.upper()
+        for (mt, recipe_code) in dominant_bonus_keys.keys():
+            dom_mask = (meal_time_title_all == mt) & (recipe_code_upper_all == recipe_code)
+            if dom_mask.any():
+                ids_for_pair = [int(i) for i in candidates.index[dom_mask]]
+                dominant_slot_ids.setdefault(mt, set()).update(ids_for_pair)
+                min_days = min(DIETRECALL_DOMINANT_MIN_DAYS_HARD, n_days)
+                model += lpSum(y[(d, i)] for d in days for i in ids_for_pair) >= min_days
+
     # 1) Recipe Repetition: Combined Soft Penalty + Dynamic Hard Ceiling
     for (meal_time, dish_type, recipe_code), group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
         ids = [int(i) for i in group_df.index.tolist()]
@@ -658,26 +759,36 @@ def run_lp(
         if boiled_egg_ids and set(ids) <= boiled_egg_ids:
             continue  # boiled egg exempted from repetition ceilings for this user
 
+        is_dominant_recall_slot = bool(set(ids) & dominant_slot_ids.get(meal_time, set()))
+
         # --- LAYER A: Dynamic Hard Guardrail ---
-        # Look up how many unique recipes are competing for this specific slot
-        unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
-        if unique_recipes <= 2:
-            max_recipe_rep = 3  # Scarce choices: allow repeating up to 3 times if forced by macros
-        elif unique_recipes <= 5:
-            max_recipe_rep = 2  # Medium variety: allow up to 2 times absolute maximum
+        if is_dominant_recall_slot:
+            # Relaxed: let the quadratic diet-recall bonus (and the ordinary
+            # exactly-1-per-day / other-slot competition) decide how often
+            # this repeats, instead of an artificial per-recipe ceiling.
+            max_recipe_rep = n_days
         else:
-            max_recipe_rep = 1  # Abundant choices: force high variety (strict cap of 1 time)
+            # Look up how many unique recipes are competing for this specific slot
+            unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
+            if unique_recipes <= 2:
+                max_recipe_rep = 3  # Scarce choices: allow repeating up to 3 times if forced by macros
+            elif unique_recipes <= 5:
+                max_recipe_rep = 2  # Medium variety: allow up to 2 times absolute maximum
+            else:
+                max_recipe_rep = 1  # Abundant choices: force high variety (strict cap of 1 time)
 
         # Apply the absolute upper ceiling
         model += lpSum(y[(d, i)] for d in days for i in ids) <= max_recipe_rep
 
         # --- LAYER B: Soft Repetition Penalty ---
-        # Only create penalty variables if the recipe has enough data entries to actually repeat
-        if len(ids) > 1:
+        # Only create penalty variables if the recipe has enough data entries
+        # to actually repeat -- skipped for a dominant-recall slot, since a
+        # penalty here would fight the bonus we're deliberately applying.
+        if len(ids) > 1 and not is_dominant_recall_slot:
             safe_mt = str(meal_time).replace(" ", "_").replace("-", "_")
             safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
             safe_rc = str(recipe_code).replace(" ", "_").replace("-", "_")
-            
+
             v_recipe = LpVariable(f"recipe_excess_{safe_mt}_{safe_dt}_{safe_rc}", lowBound=0)
             # First appearance is free, subsequent appearances add to v_recipe penalty
             model += lpSum(y[(d, i)] for d in days for i in ids) <= 1 + v_recipe
@@ -688,13 +799,23 @@ def run_lp(
     main_df = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"].copy()
     main_subcats = main_df["Preferred_SubCategory_code"].dropna().nunique()
     global_recipe_cap = 2 if main_subcats <= 5 else 1
+    all_dominant_recall_ids = set().union(*dominant_slot_ids.values()) if dominant_slot_ids else set()
     for recipe_code, recipe_df in candidates.groupby("Recipe_Code", dropna=False):
         non_snack_ids = [int(i) for i in recipe_df.index.tolist()
                          if str(candidates.loc[i, "Dish_Type"]).strip().lower() != "snacks"]
         if boiled_egg_ids and set(non_snack_ids) <= boiled_egg_ids:
             continue  # boiled egg exempted from the global cap for this user
-        if non_snack_ids:
-            model += lpSum(y[(d, i)] for d in days for i in non_snack_ids) <= global_recipe_cap
+        # Split off ids that belong to a dominant-recall (meal_time,
+        # subcategory) slot -- those get their own relaxed cap (matching
+        # Layer A above) instead of the normal global one; the SAME recipe
+        # code used at a different, non-dominant meal_time still falls
+        # under the ordinary global_recipe_cap below.
+        dominant_ids_here = [i for i in non_snack_ids if i in all_dominant_recall_ids]
+        remaining_ids = [i for i in non_snack_ids if i not in all_dominant_recall_ids]
+        if remaining_ids:
+            model += lpSum(y[(d, i)] for d in days for i in remaining_ids) <= global_recipe_cap
+        if dominant_ids_here:
+            model += lpSum(y[(d, i)] for d in days for i in dominant_ids_here) <= n_days
 
     # When pool is small (≤5 subcategories), ensure any selected subcategory appears at most 14 times
     if main_subcats <= 5 and main_subcats > 1:
