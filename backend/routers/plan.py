@@ -832,18 +832,30 @@ def _run_plan_background(
             )
 
     def _is_usable(paths: dict) -> bool:
-        # Mirrors services/lp_optimizer.run_lp's own usable_status check: a
+        # An "Optimal" result is trusted outright: the LP hard-requires
+        # exactly one Breakfast/Lunch/Dinner Main per day (see
+        # lp_optimizer.py's required_slots == 1 constraint), so a genuinely
+        # proven-optimal solution already has every core meal filled by
+        # construction — re-checking day-by-day here only ever second-guessed
+        # a correct result and forced needless taper-relaxation retries
+        # (confirmed for real on A008_NAGABHUSHA: first solve came back
+        # Optimal in 535s, still got rejected by this check, and burned
+        # another multi-minute retry for nothing).
+        #
         # "Not Solved" (solver hit the time limit before proving optimality)
-        # result can still carry a real, constraint-satisfying incumbent
-        # worth keeping — but non-empty alone isn't enough. CBC can time out
-        # with an incumbent that never assigned a candidate to some days at
-        # all, which is a genuinely broken/incomplete week, not just a
-        # suboptimal one — so every day must at least have its three core
-        # meals (Breakfast/Lunch/Dinner) before we call it usable.
+        # is different: CBC can time out with an incumbent that never
+        # assigned a candidate to some days at all, which is a genuinely
+        # broken/incomplete week, not just a suboptimal one — so THAT case
+        # still requires every day to have its three core meals before being
+        # called usable.
         summary = paths.get("weekly_optimization_summary") or {}
         s = summary.get("status")
         menu = paths.get("weekly_menu")
-        if s not in ("Optimal", "Not Solved") or menu is None or menu.empty:
+        if menu is None or menu.empty:
+            return False
+        if s == "Optimal":
+            return True
+        if s != "Not Solved":
             return False
         if "Day" not in menu.columns or "Meal_Time" not in menu.columns:
             return False
