@@ -1,0 +1,13 @@
+[Unit]
+Description=ADAM WhatsApp jobs worker (missed-slot nudges + next-day meal preview)
+After=network-online.target
+
+[Service]
+User=datascience
+WorkingDirectory=/home/datascience/ADAM-Web/backend
+ExecStart=/home/datascience/ADAM-Web/.adam/bin/python -m services.whatsapp_worker
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
