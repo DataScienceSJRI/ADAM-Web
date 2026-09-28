@@ -1,5 +1,5 @@
 [Unit]
-Description=ADAM WhatsApp jobs worker (missed-slot nudges + next-day meal preview)
+Description=ADAM WhatsApp jobs worker (next-day meal preview)
 After=network-online.target
 
 [Service]
