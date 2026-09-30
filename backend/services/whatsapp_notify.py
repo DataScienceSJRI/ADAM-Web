@@ -25,6 +25,10 @@ def _get_activated_phone(user_id: str) -> str | None:
 def send_whatsapp(user_id: str, title: str, body: str) -> bool:
     """Send a WhatsApp text to a user's linked+activated number. Returns True on success,
     False (silently — no linked number is the common case) if there's nothing to send to."""
+    from core.roles import is_user_active
+    if not is_user_active(user_id):
+        return False
+
     phone = _get_activated_phone(user_id)
     if not phone:
         return False

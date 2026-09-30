@@ -1069,7 +1069,16 @@ def _insert_and_send(sb, user_id: str, row: dict) -> int | None:
     """Insert one row into WH_Messages, then immediately attempt to send it
     if the user has a linked+activated WhatsApp number — shared by every
     live message-producing function so there's exactly one place that does
-    this insert-then-send sequence."""
+    this insert-then-send sequence.
+
+    A disabled user (UserRoles.is_active = false) gets nothing logged or
+    sent at all -- checked here since every live sender in this file
+    (missed-slot, next-day preview, meal feedback, image-received ack)
+    routes through this one function."""
+    from core.roles import is_user_active
+    if not is_user_active(user_id):
+        return None
+
     resp = sb.table("WH_Messages").insert(row).execute()
     if not resp.data:
         return None

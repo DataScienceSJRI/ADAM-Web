@@ -40,6 +40,14 @@ def run_auto_next_week_job(user_id: str, onboarding_id: str, week_no: int, start
     from routers.plan import _run_plan_background
     from services.profile_builder import build_profile
     from services.notify import notify
+    from core.roles import is_user_active
+
+    if not is_user_active(user_id):
+        logger.info(
+            "Skipping auto-generated week %d plan for disabled user_id=%s",
+            week_no, user_id,
+        )
+        return
 
     logger.info(
         "Auto-generating week %d plan for user_id=%s onboarding_id=%s",

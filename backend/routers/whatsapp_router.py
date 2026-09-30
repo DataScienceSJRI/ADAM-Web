@@ -39,6 +39,11 @@ def handle_message(msg: IncomingMessage) -> None:
     link = link_resp.data[0]
     user_id = link["user_id"]
 
+    from core.roles import is_user_active
+    if not is_user_active(user_id):
+        logger.info("Ignoring WhatsApp message from disabled user_id=%s", user_id)
+        return
+
     def reply(text: str) -> None:
         message_id = log_pending(user_id, text)
         try:

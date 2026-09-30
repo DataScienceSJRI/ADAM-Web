@@ -20,3 +20,10 @@ def require_admin(role: str = Depends(get_current_role)) -> str:
     if role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return role
+
+
+def is_user_active(user_id: str) -> bool:
+    resp = get_supabase().table("UserRoles").select("is_active").eq("user_id", user_id).limit(1).execute()
+    if not resp.data:
+        return True
+    return resp.data[0].get("is_active") is not False

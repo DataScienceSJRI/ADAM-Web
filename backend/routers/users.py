@@ -23,6 +23,10 @@ class CreateParticipantRequest(BaseModel):
     group: Literal["test", "participant"] = "test"
 
 
+class SetActiveRequest(BaseModel):
+    is_active: bool
+
+
 class ParticipantResponse(BaseModel):
     user_id: str
     participant_id: str
@@ -38,6 +42,7 @@ class ParticipantResponse(BaseModel):
     password: str | None = None
     whatsapp_phone: str | None = None
     whatsapp_activated: bool = False
+    is_active: bool = True
 
 
 @router.post("", response_model=ParticipantResponse)
@@ -111,7 +116,7 @@ def list_participants(
     """List participants. Admin sees all whereas the coordinators will only see thei own participants without the prefix P"""
     sb = get_supabase()
     query = sb.table("UserRoles").select(
-        "user_id, participant_id, display_name, coordinator_id, created_at"
+        "user_id, participant_id, display_name, coordinator_id, created_at, is_active"
     ).eq("role", "participant")
     if role == "coordinator":
         query = query.eq("coordinator_id", user_id).ilike("participant_id", "A%")
@@ -192,8 +197,37 @@ def list_participants(
             created_at=p.get("created_at"),
             whatsapp_phone=w.get("phone"),
             whatsapp_activated=bool(w.get("activated_at")),
+            is_active=p.get("is_active") is not False,
         ))
     return result
+
+
+@router.patch("/{user_id}/active")
+def set_participant_active(
+    user_id: str,
+    body: SetActiveRequest,
+    coordinator_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Enable/disable a participant. A disabled participant gets no plan
+    generation (new requests and the next auto-scheduled week are blocked;
+    an already-running generation is left to finish) and no notifications
+    of any kind, proactive or reply -- see core.roles.is_user_active's
+    call sites. Admins can toggle any participant; coordinators only their
+    own."""
+    sb = get_supabase()
+    query = sb.table("UserRoles").select("user_id, coordinator_id").eq("user_id", user_id).eq("role", "participant")
+    existing = query.limit(1).execute().data
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Participant {user_id} not found")
+    if role == "coordinator" and existing[0].get("coordinator_id") != coordinator_id:
+        raise HTTPException(status_code=403, detail="Not your participant")
+
+    sb.table("UserRoles").update({"is_active": body.is_active}).eq("user_id", user_id).execute()
+    logger.info(
+        "Participant %s set to is_active=%s by %s", user_id, body.is_active, coordinator_id,
+    )
+    return {"status": "ok", "user_id": user_id, "is_active": body.is_active}
 
 
 @router.get("/me/role")

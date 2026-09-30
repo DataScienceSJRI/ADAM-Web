@@ -32,6 +32,7 @@ type Participant = {
   created_at: string | null;
   whatsapp_phone: string | null;
   whatsapp_activated: boolean;
+  is_active: boolean;
 };
 
 type CreatedUser = { participant_id: string; display_name: string; user_id: string; password?: string };
@@ -160,6 +161,8 @@ export function UsersClient({
   const [waJustLinked, setWaJustLinked] = useState(false);
   const [copiedFor, setCopiedFor] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [confirmParticipant, setConfirmParticipant] = useState<Participant | null>(null);
 
   function copyActivationLink(key: string) {
     if (!ACTIVATION_LINK) return;
@@ -254,6 +257,31 @@ export function UsersClient({
       setError(err instanceof Error ? err.message : "Failed to queue retry");
     } finally {
       setRetryingId(null);
+    }
+  }
+
+  async function confirmToggleActive() {
+    if (!confirmParticipant) return;
+    const participant = confirmParticipant;
+    const nextActive = !participant.is_active;
+    const verb = nextActive ? "re-enable" : "disable";
+    setTogglingId(participant.user_id);
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(participant.user_id)}/active`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_active: nextActive }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail ?? `Failed to ${verb} participant`);
+      }
+      await load();
+      setConfirmParticipant(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${verb} participant`);
+    } finally {
+      setTogglingId(null);
     }
   }
 
@@ -461,7 +489,14 @@ export function UsersClient({
                 return (
                   <tr key={p.user_id} className="transition-colors hover:bg-accent/25">
                     <td className="px-4 py-3.5 font-mono text-xs font-semibold text-primary">{p.participant_id}</td>
-                    <td className="px-4 py-3.5 text-sm">{p.display_name ?? "—"}</td>
+                    <td className="px-4 py-3.5 text-sm">
+                      {p.display_name ?? "—"}
+                      {!p.is_active && (
+                        <span className="ml-2 rounded-md bg-destructive/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-destructive">
+                          Disabled
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3.5"><StatusBadge participant={p} /></td>
                     <td className="px-4 py-3.5"><WhatsAppStatus participant={p} /></td>
                     <td className="px-4 py-3.5 text-xs text-muted-foreground">{fmtDate(p.last_plan_at)}</td>
@@ -533,17 +568,23 @@ export function UsersClient({
                               </DropdownMenuItem>
                             )}
                             {p.whatsapp_phone && (
-                              <>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  variant="destructive"
-                                  onSelect={() => handleUnlinkWhatsapp(p.user_id, p.whatsapp_phone!)}
-                                >
-                                  <X className="h-4 w-4" />
-                                  Unlink WhatsApp
-                                </DropdownMenuItem>
-                              </>
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={() => handleUnlinkWhatsapp(p.user_id, p.whatsapp_phone!)}
+                              >
+                                <X className="h-4 w-4" />
+                                Unlink WhatsApp
+                              </DropdownMenuItem>
                             )}
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              variant={p.is_active ? "destructive" : "default"}
+                              disabled={togglingId === p.user_id}
+                              onSelect={() => setConfirmParticipant(p)}
+                            >
+                              {p.is_active ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                              {togglingId === p.user_id ? "Updating..." : p.is_active ? "Disable participant" : "Re-enable participant"}
+                            </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -749,6 +790,55 @@ export function UsersClient({
                 </form>
               </>
             )}
+          </div>
+        </div>
+      )}
+      {confirmParticipant && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget && togglingId === null) setConfirmParticipant(null); }}
+        >
+          <div className="relative w-full max-w-sm rounded-xl border bg-background p-6 shadow-lg space-y-4">
+            <button
+              onClick={() => setConfirmParticipant(null)}
+              disabled={togglingId !== null}
+              className="absolute top-3 right-3 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+            <div className="space-y-1.5">
+              <p className="text-base font-semibold">
+                {confirmParticipant.is_active ? "Disable" : "Re-enable"} {confirmParticipant.display_name ?? confirmParticipant.participant_id}?
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {confirmParticipant.is_active
+                  ? "They'll stop receiving any notifications (push, WhatsApp) and no new plan generation will run for them. An in-progress generation, if any, is left to finish."
+                  : "Plan generation and notifications (push, WhatsApp) will resume for this participant."}
+              </p>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={confirmToggleActive}
+                disabled={togglingId !== null}
+                className={`flex-1 rounded-lg px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${
+                  confirmParticipant.is_active
+                    ? "bg-destructive text-white hover:bg-destructive/90"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                }`}
+              >
+                {togglingId !== null ? "Updating…" : confirmParticipant.is_active ? "Disable" : "Re-enable"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmParticipant(null)}
+                disabled={togglingId !== null}
+                className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

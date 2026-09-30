@@ -61,6 +61,21 @@ def send_meal_reminders(window_minutes: int = 7) -> dict[str, int]:
     if not all_user_ids:
         return {}
 
+    # Filtered here rather than relying on send_push/send_whatsapp's own
+    # is_active checks -- send_bulk_push below takes raw player_ids (no
+    # user_id to check against once merged), so a disabled user has to be
+    # excluded before that point or their push reminder would slip through.
+    active_resp = (
+        sb.table("UserRoles").select("user_id, is_active").in_("user_id", all_user_ids).execute()
+    )
+    inactive_ids = {r["user_id"] for r in (active_resp.data or []) if r.get("is_active") is False}
+    if inactive_ids:
+        all_user_ids = [uid for uid in all_user_ids if uid not in inactive_ids]
+        user_tokens = {uid: t for uid, t in user_tokens.items() if uid not in inactive_ids}
+        whatsapp_user_ids = whatsapp_user_ids - inactive_ids
+    if not all_user_ids:
+        return {}
+
     prefs_resp = (
         sb.table("BE_Preference_onboarding_details")
         .select("user_id, breakfast_time, lunch_time, dinner_time")

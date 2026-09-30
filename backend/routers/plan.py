@@ -1070,6 +1070,10 @@ def generate_plan(
 ):
     """Queue a 7-day personalised meal plan generation. Poll /plan/status for completion."""
     effective_user_id = body.target_user_id if body.target_user_id else user_id
+    from core.roles import is_user_active
+    if not is_user_active(effective_user_id):
+        raise HTTPException(status_code=403, detail=f"Participant {effective_user_id} is disabled — re-enable them first to generate a plan.")
+
     profile = build_profile(effective_user_id, onboarding_id=body.onboarding_id)
     if profile is None:
         raise HTTPException(

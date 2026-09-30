@@ -59,6 +59,11 @@ def send_bulk_push(player_ids: list[str], title: str, body: str, data: dict | No
 
 def send_push(user_id: str, title: str, body: str, data: dict | None = None) -> bool:
     """Send a push notification to all registered devices for a user. Returns True on success."""
+    from core.roles import is_user_active
+    if not is_user_active(user_id):
+        logger.info("Skipping push for disabled user_id=%s", user_id)
+        return False
+
     if not ONESIGNAL_APP_ID or not ONESIGNAL_REST_KEY:
         logger.warning("OneSignal credentials not configured — skipping push for user_id=%s", user_id)
         return False
