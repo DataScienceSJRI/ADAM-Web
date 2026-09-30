@@ -241,13 +241,16 @@ def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
 
     participants = (
         sb.table("UserRoles")
-        .select("user_id, participant_id, display_name")
+        .select("user_id, participant_id, display_name, is_active")
         .eq("role", "participant")
         .order("participant_id")
         .execute()
         .data
     ) or []
-    participants = [p for p in participants if str(p.get("participant_id") or "").strip().upper().startswith("A")]
+    participants = [
+        p for p in participants
+        if str(p.get("participant_id") or "").strip().upper().startswith("A") and p.get("is_active") is not False
+    ]
     if not participants:
         return _empty_overview()
 
@@ -636,13 +639,16 @@ def infeasible_generations(token: str):
 
     participants = (
         sb.table("UserRoles")
-        .select("user_id, participant_id, display_name")
+        .select("user_id, participant_id, display_name, is_active")
         .eq("role", "participant")
         .order("participant_id")
         .execute()
         .data
     ) or []
-    participants = [p for p in participants if str(p.get("participant_id") or "").strip().upper().startswith("A")]
+    participants = [
+        p for p in participants
+        if str(p.get("participant_id") or "").strip().upper().startswith("A") and p.get("is_active") is not False
+    ]
     if not participants:
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "entries": []}
 

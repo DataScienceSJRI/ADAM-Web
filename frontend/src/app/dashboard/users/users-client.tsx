@@ -147,6 +147,7 @@ export function UsersClient({
   const [search, setSearch] = useState("");
   const [cohortFilter, setCohortFilter] = useState<CohortFilter>("actual");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "generating" | "none" | "failed">("all");
+  const [showDisabled, setShowDisabled] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [group, setGroup] = useState<"test" | "participant">("test");
@@ -309,12 +310,16 @@ export function UsersClient({
   const testUsers = participants.filter(isTestUser);
   const showCohortSwitch = isAdmin;
   const cohortParticipants = showCohortSwitch && cohortFilter === "test" ? testUsers : actualUsers;
-  const total = cohortParticipants.length;
-  const ready = cohortParticipants.filter(hasUsablePlan).length;
-  const generating = cohortParticipants.filter((p) => isInProgressStatus(p.plan_status)).length;
-  const noPlan = cohortParticipants.filter((p) => !p.plan_status && !p.has_plan_rows).length;
+  const disabledCount = cohortParticipants.filter((p) => !p.is_active).length;
+  // Disabled participants are excluded from every count/list on this page by
+  // default (not just the table) -- showDisabled opts back in everywhere at once.
+  const visibleParticipants = showDisabled ? cohortParticipants : cohortParticipants.filter((p) => p.is_active);
+  const total = visibleParticipants.length;
+  const ready = visibleParticipants.filter(hasUsablePlan).length;
+  const generating = visibleParticipants.filter((p) => isInProgressStatus(p.plan_status)).length;
+  const noPlan = visibleParticipants.filter((p) => !p.plan_status && !p.has_plan_rows).length;
 
-  const filtered = cohortParticipants.filter((p) => {
+  const filtered = visibleParticipants.filter((p) => {
     const q = search.trim().toLowerCase();
     if (q && !p.participant_id.toLowerCase().includes(q) && !(p.display_name ?? "").toLowerCase().includes(q)) return false;
     if (statusFilter === "ready" && !hasUsablePlan(p)) return false;
@@ -459,6 +464,19 @@ export function UsersClient({
                   {f === "all" ? "All" : f === "ready" ? "Ready" : f === "generating" ? "Generating" : f === "none" ? "No plan" : "Failed"}
                 </button>
               ))}
+              {disabledCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowDisabled((v) => !v)}
+                  className={`h-9 rounded-xl border px-3 text-xs font-medium transition-colors ${
+                    showDisabled
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "bg-background/60 text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {showDisabled ? "Hide disabled" : `Show disabled (${disabledCount})`}
+                </button>
+              )}
             </div>
           </div>
           <div className="overflow-x-auto">
