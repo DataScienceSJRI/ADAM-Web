@@ -66,6 +66,10 @@ export function ReviewStep({
               <dd className="font-medium">{basicDetails.Weight} kg</dd>
             </div>
             <div>
+              <dt className="text-xs text-muted-foreground">Height</dt>
+              <dd className="font-medium">{basicDetails.Height} cm</dd>
+            </div>
+            <div>
               <dt className="text-xs text-muted-foreground">Activity Level</dt>
               <dd className="font-medium">{basicDetails.Activity_levels}</dd>
             </div>
