@@ -170,6 +170,28 @@ function serializePickers(pickers: PickerEntry[]): ConfirmedFood[] {
     }));
 }
 
+function pickersFromConfirmed(foods: ConfirmedFood[]): PickerEntry[] {
+  if (foods.length === 0) return [newEntry()];
+  return foods.map((f) => newEntry({
+    query: f.recipe_name,
+    selected: f.recipe_name ? { code: f.recipe_code ?? "", name: f.recipe_name } : null,
+    qty: f.quantity != null ? String(f.quantity) : "",
+    unit: f.unit || "g",
+  }));
+}
+
+function initialPickers(review: MealImageReview): PickerEntry[] {
+  if (review.reviewed_foods_by_human) {
+    try {
+      const parsed = JSON.parse(review.reviewed_foods_by_human) as ConfirmedFood[];
+      if (Array.isArray(parsed) && parsed.length > 0) return pickersFromConfirmed(parsed);
+    } catch {
+      /* legacy plain-string value */
+    }
+  }
+  return initPickers(pickerSourceFoods(review));
+}
+
 function formatConfirmedFood(f: ConfirmedFood): string {
   if (!f.quantity || !f.unit) return f.recipe_name;
   return f.unit === "g" ? `${f.recipe_name} (${f.quantity}g)` : `${f.recipe_name} (${f.quantity} ${f.unit})`;
@@ -659,7 +681,7 @@ export function ImageReviewModal({
   const parsedPost = parseAi(review.tracked_foods_by_ai_post);
   const parsedConsumption = parseAi(review.consumption_result);
 
-  const [pickers, setPickers] = useState<PickerEntry[]>(() => initPickers(pickerSourceFoods(review)));
+  const [pickers, setPickers] = useState<PickerEntry[]>(() => initialPickers(review));
   const [manualText, setManualText] = useState(review.reviewed_foods_by_human ?? "");
 
   function updatePicker(id: string, partial: Partial<PickerEntry>) {
@@ -681,13 +703,13 @@ export function ImageReviewModal({
     setReview(r);
     setManualText(r.reviewed_foods_by_human ?? "");
     setError(null);
-    setPickers(initPickers(pickerSourceFoods(r)));
+    setPickers(initialPickers(r));
     setPendingAction(null);
   }
 
   const handlePoll = useCallback((u: MealImageReview) => {
     setReview(u);
-    setPickers(initPickers(pickerSourceFoods(u)));
+    setPickers(initialPickers(u));
     onUpdated(u);
   }, [onUpdated]);
 
