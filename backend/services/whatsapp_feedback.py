@@ -112,6 +112,14 @@ NUTRIENT_FLOORS = {"Protein_PROTCNT_g": 3, "TotalFat_FATCE_g": 2, "Carbohydrate_
 # true ratio in both directions -- see _biggest_nutrient_gap below.
 _NUTRITION_VARIANCE_RATIO = 2.0
 
+# Same threshold, different purpose: at this ratio a GL or nutrient gap is no
+# longer treated as "worth telling the user about" (_NUTRITION_VARIANCE_RATIO
+# above) but as "probably bad recipe data, route to the team instead" (see
+# the RecipeDataIssues block in score_logged_occasion). Kept as a separate
+# constant even though the value is currently the same, since these are
+# conceptually different decisions that could reasonably diverge later.
+_DATA_ISSUE_RATIO = 2.0
+
 # Which direction is actually GOOD for each nutrient — drives whether a
 # variance message praises the user or flags the plan. More protein/fibre
 # than planned is good; more fat/carbs/sodium than planned is not.
@@ -540,17 +548,22 @@ def score_logged_occasion(
     planned: bool, planned_gl: float | None, planned_items: list[dict], prefs: dict,
     recipe_category: dict, mapping_rows: list[dict], recipe_info: dict, portion_map: dict,
     unit_map: dict, hist: list[dict],
-) -> tuple[list[dict], dict | None]:
+) -> tuple[list[dict], dict | None, list[dict]]:
     """Scores ONE (user, slot, date) occasion that HAS at least one DietRecall
     row. `hist` is that user+slot's rolling history — build_backtest passes
     its in-memory accumulator; a live trigger would pass a freshly-queried
     trailing window (e.g. last 14 days) from DietRecall instead.
 
-    Returns (messages, history_entry): messages is 0-2 dicts to emit (main +
-    optional nutrition_variance — empty when the occasion is too stale to
-    message, per _STALE_LOG_GAP_DAYS); history_entry is what the caller
-    should append to `hist` for future occasions (None when there's nothing
-    usable to bank yet, e.g. GL not identified)."""
+    Returns (messages, history_entry, issues): messages is 0-2 dicts to emit
+    (main + optional nutrition_variance — empty when the occasion is too
+    stale to message, per _STALE_LOG_GAP_DAYS); history_entry is what the
+    caller should append to `hist` for future occasions (None when there's
+    nothing usable to bank yet, e.g. GL not identified); issues is 0+ dicts
+    for RecipeDataIssues — a GL or nutrient value at least
+    _DATA_ISSUE_RATIO x the planned value is treated as a likely bad-data
+    recipe rather than a real dietary event, so the detailed message is
+    replaced with a plain logged-successfully ack and the discrepancy is
+    recorded for the team to verify instead of shown to the participant."""
     for r in rows:
         r["source"] = "planned" if r["code"] in {it["code"] for it in planned_items} else "self_logged"
     meal_source = _meal_source(rows, planned)
@@ -582,7 +595,7 @@ def score_logged_occasion(
             "response_status": _RESPONSE_STATUS["logged_unidentified"],
             "energy_kcal": None, "carbs_g": None, "fibre_g": None,
         }
-        return [message], {"date": d_str, "total_gl": None, "base_code": None, "accomp_codes": None}
+        return [message], {"date": d_str, "total_gl": None, "base_code": None, "accomp_codes": None}, []
 
     total_gl = round(sum(r["gl"] for r in gl_rows), 1)
 
@@ -612,7 +625,7 @@ def score_logged_occasion(
     # history so future personal-best/same-base comparisons stay accurate.
     log_gap = _log_gap_days(rows, d)
     if log_gap is not None and log_gap >= _STALE_LOG_GAP_DAYS:
-        return [], history_entry
+        return [], history_entry, []
 
     # A suspiciously low GL for a full breakfast/lunch/dinner (not snacks)
     # usually means an incomplete log (e.g. one boiled egg standing in for
@@ -638,7 +651,7 @@ def score_logged_occasion(
             "response_status": _RESPONSE_STATUS["possibly_incomplete_meal"],
             "energy_kcal": slot_energy_kcal, "carbs_g": slot_carbs_g, "fibre_g": slot_fibre_g,
         }
-        return [message], history_entry
+        return [message], history_entry, []
 
     # Nutrition (macro/sodium) variance vs the plan for this slot — computed
     # BEFORE the GL message below so each branch can weave it into the SAME
@@ -672,6 +685,56 @@ def score_logged_occasion(
                 if len(rows) > 1:
                     nutrient_bad_culprit = _nutrient_culprit_row(rows, recipe_info, portion_map, col)
             nutrient_type_suffix = "+nutrition_variance"
+
+    # A GL or nutrient value at least _DATA_ISSUE_RATIO x the planned value
+    # is treated as a likely bad-data recipe (wrong portion size, a unit
+    # error, a bad nutrient value) rather than a real dietary event — showing
+    # the participant a detailed, possibly-wrong-on-its-face callout isn't
+    # useful and can be actively misleading, so the message is replaced with
+    # a plain logged-successfully ack and the discrepancy goes to
+    # RecipeDataIssues for the team to verify the recipe and mark fixed
+    # instead. Only the BAD-direction nutrient gap counts here (nutrient_good
+    # is a positive highlight, not a data concern); GL only counts when it's
+    # too HIGH, not suspiciously low (handled separately above as
+    # possibly_incomplete_meal). This skips the rest of the normal
+    # personal_best/same_base/high_gl_* branches entirely for this occasion.
+    gl_ratio = (total_gl / planned_gl) if planned_gl else None
+    is_gl_issue = gl_ratio is not None and gl_ratio >= _DATA_ISSUE_RATIO
+    is_nutrient_issue = nutrient_bad_fact is not None
+    if is_gl_issue or is_nutrient_issue:
+        issues = []
+        if is_nutrient_issue:
+            culprit_row = nutrient_bad_culprit if (len(rows) > 1 and nutrient_bad_culprit) else rows[0]
+            issues.append({
+                "user_id": base_row["user_id"], "meal_date": d_str, "meal_slot": slot,
+                "recipe_code": culprit_row["code"], "recipe_name": culprit_row.get("name"),
+                "issue_type": "nutrient_2x", "nutrient": col,
+                "planned_value": round(p, 1), "actual_value": round(a, 1), "ratio": round(a / p, 2) if p else None,
+                "description": f"{NUTRIENT_LABELS[col]} {round(a / p, 1) if p else '?'}x planned "
+                                f"({round(a)}{NUTRIENT_UNITS[col]} vs {round(p)}{NUTRIENT_UNITS[col]}) "
+                                f"for {culprit_row.get('name') or culprit_row['code']} ({slot}, {d_str})",
+            })
+        if is_gl_issue:
+            gl_culprit = max(gl_rows, key=lambda r: r["gl"])
+            issues.append({
+                "user_id": base_row["user_id"], "meal_date": d_str, "meal_slot": slot,
+                "recipe_code": gl_culprit["code"], "recipe_name": gl_culprit.get("name"),
+                "issue_type": "gl_2x", "nutrient": None,
+                "planned_value": round(planned_gl, 1), "actual_value": total_gl, "ratio": round(gl_ratio, 2),
+                "description": f"GL {round(gl_ratio, 1)}x planned ({total_gl} vs {round(planned_gl, 1)}) "
+                                f"for {gl_culprit.get('name') or gl_culprit['code']} ({slot}, {d_str})",
+            })
+        message = {
+            **base_row,
+            "message_type": "logged_success_generic",
+            "message": f"Thanks for logging your {slot}! Your meal has been logged successfully.",
+            "meal_source": meal_source, "dishes": dish_names, "actual_gl": total_gl,
+            "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
+            "sent_at": sent_at, "status": "Pending",
+            "response_status": "Neutral",
+            "energy_kcal": slot_energy_kcal, "carbs_g": slot_carbs_g, "fibre_g": slot_fibre_g,
+        }
+        return [message], history_entry, issues
 
     msg_type, msg = None, None
 
@@ -798,7 +861,7 @@ def score_logged_occasion(
         "energy_kcal": slot_energy_kcal, "carbs_g": slot_carbs_g, "fibre_g": slot_fibre_g,
     }]
 
-    return messages, history_entry
+    return messages, history_entry, []
 
 
 # ---------------------------------------------------------------------------
@@ -942,13 +1005,14 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
     # blank slate, or day 2's message would never recognize day 1 happened.
     hist: list[dict] = []
     messages: list[dict] = []
+    issues: list[dict] = []
     for d in _daterange(start_date, end_date):
         d_str = _norm_date(d)
         rows = occasions_by_date.get(d_str)
         if not rows:
             continue
         base_row = {"user_id": user_id, "date": d_str, "meal_slot": meal_slot}
-        day_messages, history_entry = score_logged_occasion(
+        day_messages, history_entry, day_issues = score_logged_occasion(
             base_row, meal_slot, d, d_str, rows,
             d_str in planned_occasions, planned_gl_by_date.get(d_str), planned_items_by_date.get(d_str, []),
             prefs, recipe_category, mapping_rows, recipe_info, portion_map, unit_map, hist,
@@ -957,6 +1021,7 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
             hist.append(history_entry)
         if d_str == end_str:
             messages = day_messages  # only today's messages get sent — earlier days already were, at their own trigger time
+            issues = day_issues
 
     if not messages:
         return []
@@ -1009,6 +1074,24 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
         msg_id = _insert_and_send(sb, user_id, row)
         if msg_id is not None:
             inserted_ids.append(msg_id)
+
+    if issues:
+        try:
+            existing_issues = (
+                sb.table("RecipeDataIssues")
+                .select("recipe_code,issue_type")
+                .eq("user_id", user_id).eq("meal_date", end_str).eq("meal_slot", meal_slot)
+                .execute().data
+            ) or []
+            already_flagged = {(r["recipe_code"], r["issue_type"]) for r in existing_issues}
+            new_issues = [i for i in issues if (i["recipe_code"], i["issue_type"]) not in already_flagged]
+            if new_issues:
+                sb.table("RecipeDataIssues").insert(new_issues).execute()
+        except Exception:
+            logger.exception(
+                "Failed to log RecipeDataIssues for user_id=%s meal_date=%s meal_slot=%s",
+                user_id, end_str, meal_slot,
+            )
     return inserted_ids
 
 
@@ -1725,7 +1808,7 @@ def build_backtest(days: int) -> pd.DataFrame:
                         output_rows.append(missed_message)
                     continue
 
-                messages, history_entry = score_logged_occasion(
+                messages, history_entry, _issues = score_logged_occasion(
                     base_row, slot, d, d_str, rows, planned, planned_gl, planned_items,
                     prefs, recipe_category, mapping_rows, recipe_info, portion_map,
                     unit_map, history[(uid, slot)],
