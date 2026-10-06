@@ -584,18 +584,16 @@ def score_logged_occasion(
         # misleading, so hold off on ANY feedback until every dish in the
         # slot is verified. Still banks nothing into history for the same
         # reason — the totals aren't final yet.
-        what = f" ({dish_names})" if dish_names else ""
-        message = {
-            **base_row,
-            "message_type": "logged_unidentified",
-            "message": f"Thanks for logging {slot}{what}! We're still processing it — feedback coming soon.",
-            "meal_source": meal_source, "dishes": dish_names, "actual_gl": None,
-            "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
-            "sent_at": sent_at, "status": "Pending",
-            "response_status": _RESPONSE_STATUS["logged_unidentified"],
-            "energy_kcal": None, "carbs_g": None, "fibre_g": None,
-        }
-        return [message], {"date": d_str, "total_gl": None, "base_code": None, "accomp_codes": None}, []
+        #
+        # No message is sent for this at all (not even a placeholder ack) —
+        # per explicit request: a "still processing, feedback coming soon"
+        # message that may never actually resolve (confirmed for real: a
+        # 166-review coordinator backlog, some pending since May) just reads
+        # as a broken promise. The occasion is silently re-checked on every
+        # later trigger/poll tick until it's fully identified, at which
+        # point the real feedback message (GL/nutrition/personal-best/etc.)
+        # goes out directly, with nothing having been sent before it.
+        return [], {"date": d_str, "total_gl": None, "base_code": None, "accomp_codes": None}, []
 
     total_gl = round(sum(r["gl"] for r in gl_rows), 1)
 
