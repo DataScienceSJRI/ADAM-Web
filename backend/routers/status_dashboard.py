@@ -2,10 +2,12 @@ import os
 from datetime import date as date_type, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from core.auth import get_current_user
+from core.roles import require_coordinator
 from core.supabase import get_supabase, fetch_all_rows
-from models.schemas import ContactParticipantRequest
+from models.schemas import ContactParticipantRequest, RecipeIssueStatusRequest
 from services.push import send_push
 from services.recall import fetch_base_gl_map, fetch_portion_map, gl_for_quantity
 from services.reminders import DEFAULT_MEAL_TIMES, IST, time_to_minutes
@@ -767,6 +769,92 @@ def infeasible_generations(token: str):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "entries": entries,
     }
+
+
+_ISSUE_COLUMNS = (
+    "id, created_at, user_id, meal_date, meal_slot, recipe_code, recipe_name, issue_type, "
+    "nutrient, planned_value, actual_value, ratio, description, status, fixed_at, fixed_by"
+)
+
+
+def _coordinator_name(sb, user_id: str) -> str:
+    """Display name for a signed-in coordinator, used as fixed_by. Falls back to
+    their login email when UserRoles has no display_name set."""
+    resp = sb.table("UserRoles").select("display_name").eq("user_id", user_id).limit(1).execute()
+    name = (resp.data[0].get("display_name") if resp.data else None) or ""
+    return name.strip() or user_id
+
+
+# Read: same dashboard token as the rest of /status, so anyone who can open the
+# dashboard can see the queue. Only marking fixed/reopened needs a coordinator login.
+@router.get("/recipe-issues/{token}")
+def recipe_issues(token: str):
+    _check_token(token)
+    sb = get_supabase()
+
+    open_rows = _fetch_all(lambda: (
+        sb.table("RecipeDataIssues")
+        .select(_ISSUE_COLUMNS)
+        .eq("status", "open")
+        .order("created_at", desc=True)
+    ))
+    fixed_rows = _fetch_all(lambda: (
+        sb.table("RecipeDataIssues")
+        .select(_ISSUE_COLUMNS)
+        .eq("status", "fixed")
+        .order("fixed_at", desc=True)
+    ))
+
+    # RecipeDataIssues only stores user_id; attach the participant's
+    # participant_id and display_name from UserRoles so the page can show
+    # the same identifier the rest of the dashboard uses.
+    issue_uids = list({r["user_id"] for r in open_rows + fixed_rows if r.get("user_id")})
+    roles_by_uid: dict[str, dict] = {}
+    if issue_uids:
+        roles = _fetch_all(lambda: (
+            sb.table("UserRoles")
+            .select("user_id, participant_id, display_name")
+            .in_("user_id", _lookup_ids(issue_uids))
+        ))
+        roles_by_uid = {str(r.get("user_id", "")).split("@")[0]: r for r in roles}
+
+    def _with_participant(row: dict) -> dict:
+        role_row = roles_by_uid.get(str(row.get("user_id", "")).split("@")[0], {})
+        return {
+            **row,
+            "participant_id": role_row.get("participant_id"),
+            "display_name": role_row.get("display_name"),
+        }
+
+    return {
+        "open": [_with_participant(r) for r in open_rows],
+        "fixed": [_with_participant(r) for r in fixed_rows],
+    }
+
+
+@router.post("/recipe-issues/{issue_id}/status")
+def set_recipe_issue_status(
+    issue_id: int,
+    body: RecipeIssueStatusRequest,
+    user_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    sb = get_supabase()
+
+    if body.status == "fixed":
+        update = {
+            "status": "fixed",
+            "fixed_at": datetime.now(timezone.utc).isoformat(),
+            "fixed_by": _coordinator_name(sb, user_id),
+        }
+    else:
+        # Reopening clears the fix metadata so the row reads as untouched again.
+        update = {"status": "open", "fixed_at": None, "fixed_by": None}
+
+    resp = sb.table("RecipeDataIssues").update(update).eq("id", issue_id).execute()
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Recipe data issue not found")
+    return resp.data[0]
 
 
 @router.post("/contact/{token}")
