@@ -956,7 +956,12 @@ export function ImageReviewModal({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => doAction("identify", { vlm_backend: "openai", image: "pre" }, "identify-pre")}
-                    disabled={!!busy || parsed.status === "processing"}
+                    disabled={!!busy}
+                    title={
+                      parsed.status === "processing"
+                        ? "Still shows Processing — the background job may be stuck (e.g. after a server restart). Click to re-run directly."
+                        : undefined
+                    }
                     className="flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
                   >
                     {busy === "identify-pre"
@@ -966,7 +971,12 @@ export function ImageReviewModal({
                   </button>
                   <button
                     onClick={() => doAction("identify", { vlm_backend: "openai", image: "post" }, "identify-post")}
-                    disabled={!!busy || !review.post_image_id || parsedPost.status === "processing"}
+                    disabled={!!busy || !review.post_image_id}
+                    title={
+                      parsedPost.status === "processing"
+                        ? "Still shows Processing — the background job may be stuck (e.g. after a server restart). Click to re-run directly."
+                        : undefined
+                    }
                     className="flex items-center justify-center gap-1.5 rounded-lg border py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
                   >
                     {busy === "identify-post"

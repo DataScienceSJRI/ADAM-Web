@@ -17,10 +17,9 @@ import {
   Users,
   X,
 } from "lucide-react";
-
-
-const DASHBOARD_PASSWORD = "Adam2026";
-const SESSION_KEY = "adam-status-unlocked";
+import { DASHBOARD_PASSWORD, SESSION_KEY } from "@/lib/status-auth";
+import { PasswordGate } from "@/components/status/status-password-gate";
+import { StatusNav } from "@/components/status/status-nav";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -92,6 +91,9 @@ type OverviewResponse = {
   missed_logs_today: MissedLog[];
   pending_reviews_24h: PendingReview[];
 };
+
+// Mirrors a RecipeDataIssues row. Written by services/whatsapp_feedback.py when
+// a logged meal's GL or nutrient is >= 2x planned; reviewed here.
 
 const MEAL_LABELS: Record<MealSlotKey, string> = {
   breakfast: "Breakfast",
@@ -1085,59 +1087,6 @@ function ParticipantDetailModal({ participant, onClose }: { participant: Partici
   );
 }
 
-// ─── Password gate ────────────────────────────────────────────────────────────
-
-function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState(false);
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (value === DASHBOARD_PASSWORD) {
-      sessionStorage.setItem(SESSION_KEY, "1");
-      onUnlock();
-    } else {
-      setError(true);
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-6">
-      <form onSubmit={handleSubmit} className="w-full max-w-sm rounded-xl border bg-card p-6 space-y-4">
-        <div className="flex flex-col items-center text-center gap-2">
-          <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-            <Lock className="h-5 w-5 text-muted-foreground" />
-          </div>
-          <h1 className="text-lg font-semibold">Compliance Dashboard</h1>
-          <p className="text-sm text-muted-foreground">Enter the password to continue.</p>
-        </div>
-        <div>
-          <input
-            type="password"
-            autoFocus
-            value={value}
-            onChange={(e) => {
-              setValue(e.target.value);
-              setError(false);
-            }}
-            placeholder="Password"
-            className={`w-full px-3 py-2 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-ring ${
-              error ? "border-rose-500" : ""
-            }`}
-          />
-          {error && <p className="text-xs text-rose-600 dark:text-rose-400 mt-1.5">Incorrect password.</p>}
-        </div>
-        <button
-          type="submit"
-          className="w-full py-2 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
-        >
-          Enter
-        </button>
-      </form>
-    </div>
-  );
-}
-
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function StatusDashboardPage() {
@@ -1158,11 +1107,9 @@ export default function StatusDashboardPage() {
   const [search, setSearch] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
   const [detailParticipant, setDetailParticipant] = useState<ParticipantOverview | null>(null);
-
   // Live feeds (missed logs, pending reviews) refresh on a short poll; the
   // rest of the dashboard rides along on the same response.
   const REFRESH_MS = 60_000;
-
   useEffect(() => {
     if (!unlocked) return;
     let cancelled = false;
@@ -1224,6 +1171,7 @@ export default function StatusDashboardPage() {
 
   return (
     <div className="min-h-screen bg-background">
+      <StatusNav active="compliance" />
       <div className="max-w-7xl mx-auto px-6 py-10 space-y-6">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>

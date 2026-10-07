@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 
 class GeneratePlanRequest(BaseModel):
@@ -175,6 +175,10 @@ class LinkPhoneRequest(BaseModel):
 class ContactParticipantRequest(BaseModel):
     user_id: str
     missing_slots: List[str] = []
+
+
+class RecipeIssueStatusRequest(BaseModel):
+    status: Literal["open", "fixed"]
 
 
 class UserProfileResponse(BaseModel):
