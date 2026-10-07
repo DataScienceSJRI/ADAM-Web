@@ -688,10 +688,10 @@ def score_logged_occasion(
     # is treated as a likely bad-data recipe (wrong portion size, a unit
     # error, a bad nutrient value) rather than a real dietary event — showing
     # the participant a detailed, possibly-wrong-on-its-face callout isn't
-    # useful and can be actively misleading, so the message is replaced with
-    # a plain logged-successfully ack and the discrepancy goes to
-    # RecipeDataIssues for the team to verify the recipe and mark fixed
-    # instead. Only the BAD-direction nutrient gap counts here (nutrient_good
+    # useful and can be actively misleading, so no message is sent at all
+    # (not even a generic ack) and the discrepancy goes to RecipeDataIssues
+    # for the team to verify the recipe and mark fixed instead. Only the
+    # BAD-direction nutrient gap counts here (nutrient_good
     # is a positive highlight, not a data concern); GL only counts when it's
     # too HIGH, not suspiciously low (handled separately above as
     # possibly_incomplete_meal). This skips the rest of the normal
@@ -722,17 +722,11 @@ def score_logged_occasion(
                 "description": f"GL {round(gl_ratio, 1)}x planned ({total_gl} vs {round(planned_gl, 1)}) "
                                 f"for {gl_culprit.get('name') or gl_culprit['code']} ({slot}, {d_str})",
             })
-        message = {
-            **base_row,
-            "message_type": "logged_success_generic",
-            "message": f"Thanks for logging your {slot}! Your meal has been logged successfully.",
-            "meal_source": meal_source, "dishes": dish_names, "actual_gl": total_gl,
-            "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
-            "sent_at": sent_at, "status": "Pending",
-            "response_status": "Neutral",
-            "energy_kcal": slot_energy_kcal, "carbs_g": slot_carbs_g, "fibre_g": slot_fibre_g,
-        }
-        return [message], history_entry, issues
+        # No user-facing message for this either (matches the
+        # logged_unidentified treatment above) — the participant gets
+        # nothing at all for a likely-bad-data occasion; only the
+        # RecipeDataIssues row is written for the team to verify.
+        return [], history_entry, issues
 
     msg_type, msg = None, None
 
