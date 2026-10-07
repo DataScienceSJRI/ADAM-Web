@@ -128,7 +128,7 @@ export default function RecipeIssuesPage() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Recipe Data Issues</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Verify each flagged recipe, then mark it fixed. Reopen it if the fix is reverted.
+              Verify each flagged recipe, then mark it fixed.
             </p>
           </div>
           <div className="flex items-center gap-3 text-xs text-muted-foreground">

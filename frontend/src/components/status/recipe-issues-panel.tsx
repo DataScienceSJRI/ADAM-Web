@@ -208,7 +208,7 @@ export function RecipeIssuesPanel({
           <div>
             <p className="text-sm font-semibold">Recipe data issues</p>
             <p className="mt-0.5 text-[11px] text-muted-foreground sm:max-w-md">
-              Meals logged at 2× or more of the planned GL or nutrient. Participants only saw a plain acknowledgement.
+              Meals logged at 2× or more of the planned GL or nutrient.
             </p>
           </div>
         </div>
