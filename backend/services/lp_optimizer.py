@@ -743,13 +743,37 @@ def run_lp(
     if dominant_bonus_keys:
         meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
         recipe_code_upper_all = candidates["Recipe_Code"].astype(str).str.strip().str.upper()
-        for (mt, recipe_code) in dominant_bonus_keys.keys():
+        # Two distinct recipes can both be "dominant" at the same meal_time
+        # (a user genuinely alternating between two go-to dishes) -- applying
+        # the >= DIETRECALL_DOMINANT_MIN_DAYS_HARD floor independently to each
+        # then demands more day-slots than the week has (e.g. two pairs each
+        # needing >=4 days can't both fit in a 7-day week, since only one
+        # dish fills that slot per day), guaranteeing Infeasible regardless
+        # of GL/nutrition. Confirmed for real on A006_RAJENDRA: two Lunch
+        # recipes (USDA009025, USDA016516) each logged 12x in the 42-day
+        # window, each demanding >=4 days -> 8 > 7, proven Infeasible in 67s.
+        # Allocate the fixed min_days floor across pairs sharing a meal_time
+        # instead of stacking it per pair, so the total never exceeds
+        # n_days -- the most strongly-observed pattern (highest count) is
+        # given priority for the full floor, and a competing pattern only
+        # gets whatever day budget is left.
+        sorted_keys = sorted(
+            dominant_bonus_keys.keys(),
+            key=lambda k: (-float(dominant_bonus_keys[k]), k[0], k[1]),
+        )
+        allocated_days_by_slot: dict[str, int] = {}
+        for (mt, recipe_code) in sorted_keys:
             dom_mask = (meal_time_title_all == mt) & (recipe_code_upper_all == recipe_code)
-            if dom_mask.any():
-                ids_for_pair = [int(i) for i in candidates.index[dom_mask]]
-                dominant_slot_ids.setdefault(mt, set()).update(ids_for_pair)
-                min_days = min(DIETRECALL_DOMINANT_MIN_DAYS_HARD, n_days)
-                model += lpSum(y[(d, i)] for d in days for i in ids_for_pair) >= min_days
+            if not dom_mask.any():
+                continue
+            ids_for_pair = [int(i) for i in candidates.index[dom_mask]]
+            dominant_slot_ids.setdefault(mt, set()).update(ids_for_pair)
+            used = allocated_days_by_slot.get(mt, 0)
+            min_days = min(DIETRECALL_DOMINANT_MIN_DAYS_HARD, n_days - used)
+            if min_days <= 0:
+                continue  # this meal_time's day budget is already fully claimed by a stronger pattern
+            allocated_days_by_slot[mt] = used + min_days
+            model += lpSum(y[(d, i)] for d in days for i in ids_for_pair) >= min_days
 
     # 1) Recipe Repetition: Combined Soft Penalty + Dynamic Hard Ceiling
     for (meal_time, dish_type, recipe_code), group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
