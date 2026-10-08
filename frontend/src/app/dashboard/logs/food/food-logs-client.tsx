@@ -115,6 +115,17 @@ function slotStatus(planItems: PlanItem[], slotLogs: LogItem[]): SlotStatus {
   return asPlanned ? "as_planned" : "modified";
 }
 
+function todayIST(): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+}
+
+function defaultDateIndex(dates: string[]): number {
+  if (dates.length === 0) return 0;
+  const today = todayIST();
+  const idx = dates.findIndex((d) => d <= today);
+  return idx === -1 ? dates.length - 1 : idx;
+}
+
 function isoWeek(dateStr: string): number {
   const d = new Date(dateStr);
   const tmp = new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -666,10 +677,17 @@ export function FoodLogsClient({
     return { [initialSelectedId]: initialParticipantData };
   });
   const [loadingData, setLoadingData] = useState(false);
-  const [dateIndex, setDateIndex] = useState(0);
+  const [dateIndex, setDateIndex] = useState(() => defaultDateIndex(initialParticipantData?.dates ?? []));
   const [editState, setEditState] = useState<EditState | null>(null);
   const [reviewsMap, setReviewsMap] = useState<Record<string, MealImageReview>>(initialReviewsMap);
   const [loadError] = useState(initialError);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const cached = participantDataById[selectedId];
+    setDateIndex(cached ? defaultDateIndex(cached.dates) : 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   // Load participant data when selection changes
   useEffect(() => {
@@ -683,7 +701,9 @@ export function FoodLogsClient({
       .then((r) => r.ok ? r.json() : null)
       .then((d) => {
         if (d) {
-          setParticipantDataById((prev) => ({ ...prev, [selectedId]: d as ParticipantData }));
+          const data = d as ParticipantData;
+          setParticipantDataById((prev) => ({ ...prev, [selectedId]: data }));
+          setDateIndex(defaultDateIndex(data.dates));
         }
       })
       .finally(() => setLoadingData(false));
