@@ -38,6 +38,17 @@ type PlannedItem = {
   Date?: string;
 };
 
+type LoggedItem = {
+  ID?: string;
+  Food_Name?: string;
+  Food_Qty?: number | string;
+  R_desc?: string;
+  Energy_Kcal?: number;
+  notes?: string;
+  meal_slot?: string;
+  Date?: string;
+};
+
 interface MatchCandidate {
   recipe_code: string;
   recipe_name: string | null;
@@ -646,9 +657,11 @@ export function ImageReviewModal({
   const [plannedItems, setPlannedItems] = useState<PlannedItem[] | null>(null);
   const [plannedLoading, setPlannedLoading] = useState(false);
   const [plannedError, setPlannedError] = useState<string | null>(null);
+  const [loggedItems, setLoggedItems] = useState<LoggedItem[] | null>(null);
 
-  // Planned foods for this date/slot — fetched once so the coordinator can
-  // compare against the photo without leaving the modal.
+  // Planned foods AND the participant's own manual log for this date/slot —
+  // both come from the same endpoint, fetched once so the coordinator can
+  // compare the photo against either without leaving the modal.
   useEffect(() => {
     let cancelled = false;
     async function loadPlanned() {
@@ -659,13 +672,16 @@ export function ImageReviewModal({
           headers: authHeaders(token),
         });
         if (!res.ok) throw new Error("Failed to load planned meals");
-        const data = (await res.json()) as { plan?: PlannedItem[] };
+        const data = (await res.json()) as { plan?: PlannedItem[]; logs?: LoggedItem[] };
         const dateStr = reviews[0].created_at.slice(0, 10);
         const slot = (reviews[0].meal_slot ?? "").toLowerCase();
         const items = (data.plan ?? []).filter(
           (p) => (p.Date ?? "").slice(0, 10) === dateStr && (p.Timings ?? "").toLowerCase() === slot
         );
-        if (!cancelled) setPlannedItems(items);
+        const logged = (data.logs ?? []).filter(
+          (l) => (l.Date ?? "").slice(0, 10) === dateStr && (l.meal_slot ?? "").toLowerCase() === slot
+        );
+        if (!cancelled) { setPlannedItems(items); setLoggedItems(logged); }
       } catch (e) {
         if (!cancelled) setPlannedError(e instanceof Error ? e.message : "Unknown error");
       } finally {
@@ -1075,6 +1091,46 @@ export function ImageReviewModal({
                 </p>
               </>
             )}
+
+            <div className="border-t pt-3">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest mb-2">
+                Logged
+              </p>
+              {plannedLoading && <p className="text-xs text-muted-foreground">Loading…</p>}
+              {!plannedLoading && !plannedError && loggedItems?.length === 0 && (
+                <p className="text-xs text-muted-foreground italic">No manual log for this slot.</p>
+              )}
+              {loggedItems && loggedItems.length > 0 && (
+                <>
+                  {loggedItems.map((l, i) => {
+                    const skipped = l.notes === "skipped" || (!l.Food_Name && !l.notes);
+                    return (
+                      <div key={l.ID ?? i} className="rounded-lg border px-3 py-2 space-y-0.5 mb-1.5">
+                        {skipped ? (
+                          <p className="text-xs font-medium text-red-500">Skipped</p>
+                        ) : (
+                          <>
+                            <p className="text-xs font-medium truncate">{l.Food_Name ?? "—"}</p>
+                            {l.notes && l.notes !== "changed" && (
+                              <p className="text-[10px] text-muted-foreground italic">&ldquo;{l.notes}&rdquo;</p>
+                            )}
+                            <div className="flex items-center justify-between pt-0.5">
+                              <span className="text-xs tabular-nums">{l.Food_Qty ?? "—"} {l.R_desc ?? ""}</span>
+                              {l.Energy_Kcal != null && (
+                                <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(l.Energy_Kcal)} kcal</span>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <p className="text-[10px] text-muted-foreground text-right pt-1">
+                    {Math.round(loggedItems.reduce((s, l) => s + (l.Energy_Kcal ?? 0), 0))} kcal logged
+                  </p>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>
