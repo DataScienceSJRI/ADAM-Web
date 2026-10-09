@@ -382,11 +382,11 @@ function RecipeSearchPicker({
 
       {/* Selected chip */}
       {entry.selected && (
-        <div className="flex items-center gap-1.5 rounded-lg bg-emerald-100 border border-emerald-300 dark:bg-emerald-900/30 dark:border-emerald-700 px-2.5 py-1.5">
-          <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <span className="text-xs font-medium truncate flex-1 text-emerald-800 dark:text-emerald-300">{entry.selected.name}</span>
+        <div className="flex items-start gap-1.5 rounded-lg bg-emerald-100 border border-emerald-300 dark:bg-emerald-900/30 dark:border-emerald-700 px-2.5 py-1.5">
+          <Check className="h-3 w-3 mt-0.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+          <span className="text-xs font-medium break-words flex-1 text-emerald-800 dark:text-emerald-300">{entry.selected.name}</span>
           {!disabled && (
-            <button onClick={clearSelected} className="text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors shrink-0">
+            <button onClick={clearSelected} className="text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors shrink-0 mt-0.5">
               <X className="h-3 w-3" />
             </button>
           )}
@@ -539,9 +539,9 @@ function FoodCard({ f, index }: { f: FoodItem; index: number }) {
   return (
     <div className="flex items-start justify-between gap-3 rounded-xl border px-3.5 py-3 text-sm">
       <div className="min-w-0 space-y-0.5">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[10px] text-muted-foreground tabular-nums bg-muted px-1.5 py-0.5 rounded font-mono">{index + 1}</span>
-          <p className="font-medium text-sm truncate">{name}</p>
+        <div className="flex items-start gap-2 flex-wrap">
+          <span className="text-[10px] text-muted-foreground tabular-nums bg-muted px-1.5 py-0.5 rounded font-mono shrink-0">{index + 1}</span>
+          <p className="font-medium text-sm break-words">{name}</p>
         </div>
         {desc && <p className="text-xs text-muted-foreground pl-7 truncate">{desc}</p>}
         {f.match_status && <p className="text-[10px] text-muted-foreground pl-7 capitalize">{f.match_status}</p>}
@@ -770,6 +770,7 @@ export function ImageReviewModal({
       const data = (await res.json()) as MealImageReview & { detail?: string };
       if (!res.ok) throw new Error(data.detail ?? "Action failed");
       setReview(data); onUpdated(data);
+      if (act === "identify" || act === "check_consumption") setPickers(initialPickers(data));
       if (act === "approve" || act === "reject") onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
@@ -1076,7 +1077,7 @@ export function ImageReviewModal({
               <>
                 {plannedItems.map((p, i) => (
                   <div key={i} className="rounded-lg border px-3 py-2 space-y-0.5">
-                    <p className="text-xs font-medium truncate">{p.Food_Name ?? "—"}</p>
+                    <p className="text-xs font-medium break-words">{p.Food_Name ?? "—"}</p>
                     {p.R_desc && <p className="text-[10px] text-muted-foreground">{p.R_desc}</p>}
                     <div className="flex items-center justify-between pt-0.5">
                       <span className="text-xs tabular-nums">{p.Food_Qty ?? "—"}</span>
@@ -1110,7 +1111,7 @@ export function ImageReviewModal({
                           <p className="text-xs font-medium text-red-500">Skipped</p>
                         ) : (
                           <>
-                            <p className="text-xs font-medium truncate">{l.Food_Name ?? "—"}</p>
+                            <p className="text-xs font-medium break-words">{l.Food_Name ?? "—"}</p>
                             {l.notes && l.notes !== "changed" && (
                               <p className="text-[10px] text-muted-foreground italic">&ldquo;{l.notes}&rdquo;</p>
                             )}
