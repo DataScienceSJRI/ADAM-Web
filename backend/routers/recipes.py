@@ -121,9 +121,22 @@ def _fetch_relevance_order(sb, codes: list) -> dict:
     return result
 
 
+def _excluded_duplicate_codes(sb) -> set:
+    """Recipe_Codes flagged as a known duplicate of another recipe
+    (Rec_ADAM_yes_no.ADAM_Recipes == 0) -- these should never surface in the
+    recipe search/browse list, same as they're already excluded from model
+    recommendations. ADAM_Recipes == 1 or a missing row both mean "not a
+    flagged duplicate", so this only pulls the explicit 0 rows rather than
+    inverting the whole table (most recipes have no Rec_ADAM_yes_no row at
+    all and are still fine to search/browse)."""
+    resp = sb.table("Rec_ADAM_yes_no").select("Recipe_Code").eq("ADAM_Recipes", 0).execute()
+    return {r["Recipe_Code"] for r in (resp.data or [])}
+
+
 def _search_and_paginate(sb, search_term: Optional[str], meal_slot: Optional[str], page: int, page_size: int) -> dict:
     offset = (page - 1) * page_size
     allowed_codes = _resolve_allowed_codes(sb, meal_slot)
+    excluded_codes = _excluded_duplicate_codes(sb)
     fields = "Recipe_Code, Recipe_Name, Recipe_Category"
 
     def _base_query(with_count: bool):
@@ -132,6 +145,8 @@ def _search_and_paginate(sb, search_term: Optional[str], meal_slot: Optional[str
             q = q.ilike("Recipe_Name", f"%{search_term}%")
         if allowed_codes is not None:
             q = q.in_("Recipe_Code", allowed_codes) if allowed_codes else q.eq("Recipe_Code", "__no_match__")
+        if excluded_codes:
+            q = q.not_.in_("Recipe_Code", list(excluded_codes))
         return q
 
     if search_term:
@@ -143,6 +158,8 @@ def _search_and_paginate(sb, search_term: Optional[str], meal_slot: Optional[str
         if allowed_codes is not None:
             allowed_set = set(allowed_codes)
             rows = [r for r in rows if r.get("Recipe_Code") in allowed_set]
+        if excluded_codes:
+            rows = [r for r in rows if r.get("Recipe_Code") not in excluded_codes]
         relevance_map = _fetch_relevance_order(sb, [r.get("Recipe_Code") for r in rows if r.get("Recipe_Code")])
         rows.sort(
             key=lambda r: _search_rank_key(
