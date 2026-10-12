@@ -421,8 +421,26 @@ def run_lp(
             ids = slot_to_ids.get(slot, [])
             if not ids:
                 continue
+            mtime = str(slot_row["Meal_Time"]).strip()
             dtype = str(slot_row["Dish_Type"]).strip()
-            if dtype == "Snacks":
+            if dtype == "Snacks" or mtime == "Snacks":
+                # Keyed on Meal_Time too, not just Dish_Type: a candidate can
+                # reach this slot with Meal_Time="Snacks" but a Dish_Type
+                # other than "Snacks" (confirmed for real on A004_RAJAT --
+                # 3 beverage recipes, Code H5B, landed here tagged Dish_Type
+                # "Main"). Falling through to the `else: == 1` branch below
+                # made a mandatory, exactly-1-per-day slot out of a pool with
+                # only 3 unique recipes; Layer A's repetition cap elsewhere
+                # (slot_recipe_counts-driven, 3-5 unique recipes -> max 2
+                # uses/week each) then caps total weekly capacity for this
+                # slot at 3*2=6, one short of the 7 days required --
+                # guaranteed Infeasible regardless of every other constraint
+                # (confirmed: disabling every nutrient/variety constraint
+                # EXCEPT this one still failed; disabling only this one
+                # fixed it). Snacks is inherently flexible (the weekly >=5
+                # total requirement below already governs it) and was never
+                # meant to have a mandatory daily pick, regardless of what
+                # Dish_Type an individual snack candidate happens to carry.
                 model += lpSum(y[(d, i)] for i in ids) <= 2
                 model += lpSum(y[(d, i)] for i in ids) >= 0
             elif dtype in ("Main 2","Main 3", "Optional", "Beverage"):
@@ -801,6 +819,22 @@ def run_lp(
             else:
                 max_recipe_rep = 1  # Abundant choices: force high variety (strict cap of 1 time)
 
+            # These brackets don't guarantee unique_recipes * max_recipe_rep
+            # covers all n_days -- confirmed for real on A008_NAGABHUSHA:
+            # Lunch/Main had exactly 2 unique recipes (the <=2 bracket, cap
+            # 3), so weekly capacity topped out at 2*3=6, one short of the 7
+            # days Lunch/Main is mandatory for (required_slots' == 1 branch),
+            # guaranteeing Infeasible regardless of every other constraint.
+            # The same gap exists at exactly 1, 3, or 6 unique recipes too
+            # (capacities 3, 6, 6 against 7 days) -- not just this one count.
+            # Raising the cap here is harmless even for a slot that ISN'T
+            # mandatory every day (every use of it is still gated by a <=
+            # constraint elsewhere, never a floor), so widening unconditionally
+            # for every slot is a safe, general guarantee rather than special-
+            # casing only the slots known to be mandatory today.
+            if unique_recipes > 0:
+                max_recipe_rep = max(max_recipe_rep, -(-n_days // unique_recipes))
+
         # Apply the absolute upper ceiling
         model += lpSum(y[(d, i)] for d in days for i in ids) <= max_recipe_rep
 
@@ -837,7 +871,30 @@ def run_lp(
         dominant_ids_here = [i for i in non_snack_ids if i in all_dominant_recall_ids]
         remaining_ids = [i for i in non_snack_ids if i not in all_dominant_recall_ids]
         if remaining_ids:
-            model += lpSum(y[(d, i)] for d in days for i in remaining_ids) <= global_recipe_cap
+            # This global cap is a SEPARATE ceiling from Layer A's per-slot
+            # one above, applying across every meal_time/dish_type a recipe
+            # code appears in at once -- confirmed for real on A008_NAGABHUSHA:
+            # Layer A's per-slot capacity fix alone wasn't enough, because
+            # Lunch/Main's only 2 recipe codes (USDA000014, A005505) also
+            # each appear at Dinner/Main, so even with Layer A raised to
+            # allow 4 uses/week per slot, this global cap (1, since
+            # main_subcats=11 > 5 here) still limited each code to 1 use
+            # total across Lunch+Dinner combined -- max 2 combined uses for
+            # the 2 codes that can even fill Lunch/Main, against the 7
+            # mandatory fills Lunch/Main needs on its own. Same guarantee as
+            # Layer A: never let this cap alone leave a slot the recipe
+            # participates in under-capacity, by raising it to the largest
+            # per-slot requirement across every slot this code serves.
+            per_slot_floor = max(
+                (
+                    -(-n_days // slot_recipe_counts.get((mt_i, dt_i), 1))
+                    for mt_i, dt_i in candidates.loc[remaining_ids, ["Meal_Time", "Dish_Type"]]
+                    .drop_duplicates().itertuples(index=False, name=None)
+                ),
+                default=global_recipe_cap,
+            )
+            effective_cap = max(global_recipe_cap, per_slot_floor)
+            model += lpSum(y[(d, i)] for d in days for i in remaining_ids) <= effective_cap
         if dominant_ids_here:
             model += lpSum(y[(d, i)] for d in days for i in dominant_ids_here) <= n_days
 
