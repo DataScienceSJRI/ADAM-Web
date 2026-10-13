@@ -4,12 +4,16 @@ import time
 
 from services.reminders import send_meal_reminders
 from services.whatsapp_feedback import send_pending_meal_feedback
+from services.plan_retry_sweep import sweep_failed_plans
 
 logger = logging.getLogger("backend.services.reminder_worker")
 
 _INTERVAL_MINUTES = int(os.getenv("MEAL_REMINDER_INTERVAL_MINUTES", "15"))
 _WINDOW_MINUTES = int(os.getenv("MEAL_REMINDER_WINDOW_MINUTES", "7"))
 _FEEDBACK_POLL_SECONDS = int(os.getenv("MEAL_FEEDBACK_POLL_SECONDS", "60"))
+# Matches plan_retry_sweep._RETRY_COOLDOWN -- checking more often than the
+# cooldown itself allows would just waste a Supabase scan for nothing new.
+_PLAN_RETRY_SWEEP_SECONDS = int(os.getenv("PLAN_RETRY_SWEEP_SECONDS", str(60 * 60)))
 
 
 def main() -> None:
@@ -34,10 +38,11 @@ def main() -> None:
     )
     logger.info(
         "Starting meal-reminder service (every %d min, ±%d min window; "
-        "pending-feedback poll every %ds)",
-        _INTERVAL_MINUTES, _WINDOW_MINUTES, _FEEDBACK_POLL_SECONDS,
+        "pending-feedback poll every %ds; plan-retry sweep every %ds)",
+        _INTERVAL_MINUTES, _WINDOW_MINUTES, _FEEDBACK_POLL_SECONDS, _PLAN_RETRY_SWEEP_SECONDS,
     )
     next_reminder_check = 0.0
+    next_retry_sweep = 0.0
     while True:
         now = time.monotonic()
         if now >= next_reminder_check:
@@ -48,6 +53,15 @@ def main() -> None:
             except Exception:
                 logger.exception("Meal reminders tick failed")
             next_reminder_check = now + _INTERVAL_MINUTES * 60
+
+        if now >= next_retry_sweep:
+            try:
+                triggered = sweep_failed_plans()
+                if triggered:
+                    logger.info("Plan auto-retry sweep triggered %d retry/retries", triggered)
+            except Exception:
+                logger.exception("Plan auto-retry sweep tick failed")
+            next_retry_sweep = now + _PLAN_RETRY_SWEEP_SECONDS
 
         try:
             sent = send_pending_meal_feedback()

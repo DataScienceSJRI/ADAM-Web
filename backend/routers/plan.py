@@ -1045,6 +1045,8 @@ def _run_plan_background(
         logger.exception("Failed to write summary tables for plan_id=%s: %s", plan_id, e)
 
     _write_plan_status(body.onboarding_id, f"ok:{opt_summary.get('status', 'unknown')}", plan_id=plan_id)
+    from services.plan_retry_sweep import reset_auto_retry
+    reset_auto_retry(body.onboarding_id)
     _schedule_next_week_job(user_id, body.onboarding_id, body.week_no, effective_start_date)
     _schedule_day4_checkin(user_id, effective_start_date)
 
