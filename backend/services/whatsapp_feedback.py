@@ -634,22 +634,14 @@ def score_logged_occasion(
     if slot != "snacks" and total_gl < _INCOMPLETE_MEAL_GL_FLOOR and (
         planned_gl is None or planned_gl >= _INCOMPLETE_MEAL_GL_FLOOR
     ):
-        what = dish_names or "This"
-        message = {
-            **base_row,
-            "message_type": "possibly_incomplete_meal",
-            "message": (
-                f"Thanks for logging your {slot}! {what} alone may not make a complete, balanced {slot}. "
-                f"Please follow your recommended meal plan, and if you had anything else, add it to your "
-                f"log so we can give you accurate feedback."
-            ),
-            "meal_source": meal_source, "dishes": dish_names, "actual_gl": total_gl,
-            "planned_gl": round(planned_gl, 1) if planned_gl is not None else None,
-            "sent_at": sent_at, "status": "Pending",
-            "response_status": _RESPONSE_STATUS["possibly_incomplete_meal"],
-            "energy_kcal": slot_energy_kcal, "carbs_g": slot_carbs_g, "fibre_g": slot_fibre_g,
-        }
-        return [message], history_entry, []
+        # No user-facing message for this -- per explicit instruction to stop
+        # sending plain/no-insight acks after a log (participant feedback),
+        # this templated "that alone may not make a complete meal" nudge is
+        # being dropped the same way logged_success_generic/logged_unidentified
+        # already were. History still banks the (likely incomplete) total so
+        # later personal-best/same-base comparisons aren't skewed by this
+        # being silently excluded.
+        return [], history_entry, []
 
     # Nutrition (macro/sodium) variance vs the plan for this slot — computed
     # BEFORE the GL message below so each branch can weave it into the SAME
@@ -835,14 +827,14 @@ def score_logged_occasion(
             msg = f"Great choice! Your {slot} met the planned GL target{nut_clause}. {action}"
 
     if msg_type is None:
-        msg_type = "logged_no_insight"
-        if nutrient_good:
-            extra = f", and gave you {nutrient_good[0]}"
-        elif nutrient_bad_fact:
-            extra = f" — it had {nutrient_bad_fact}"
-        else:
-            extra = ""
-        msg = f"Logged: {dish_names}{extra}. Thanks for keeping track!"
+        # No plan existed for this slot/day to compare against (the only way
+        # to reach here -- every case where planned_gl is set is handled by
+        # the branches above), so there's nothing evaluative to say -- just a
+        # bare "Logged: X, Y, Z. Thanks for keeping track!" ack. Per explicit
+        # instruction to stop sending plain/no-insight acks after a log,
+        # dropped the same way possibly_incomplete_meal/logged_success_generic
+        # were. History still banks the total for future comparisons.
+        return [], history_entry, []
 
     messages = [{
         **base_row, "message_type": msg_type + nutrient_type_suffix, "message": msg, "meal_source": meal_source,
