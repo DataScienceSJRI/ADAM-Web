@@ -1,0 +1,10 @@
+[Unit]
+Description=ADAM WAHA session watchdog (one-shot check + auto-recovery)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=datascience
+WorkingDirectory=/home/datascience/ADAM-Web/backend
+ExecStart=/home/datascience/ADAM-Web/.adam/bin/python -m services.waha_watchdog
+TimeoutStartSec=60
