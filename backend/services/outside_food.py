@@ -38,10 +38,19 @@ def _week_outside_count(sb, user_id: str, week_start_date: str) -> int:
     return resp.count or 0
 
 
-def list_eligible_dishes(user_id: str) -> list[OutsideFoodDish]:
+def list_cuisine_types() -> list[str]:
+    sb = get_supabase()
+    rows = sb.table("cuisine_dishes").select("cuisine_type").execute().data or []
+    return sorted({str(r["cuisine_type"]).strip() for r in rows if r.get("cuisine_type")})
+
+
+def list_eligible_dishes(user_id: str, cuisine_type: str | None = None) -> list[OutsideFoodDish]:
     sb = get_supabase()
 
-    dishes = sb.table("cuisine_dishes").select("recipe_code, recipe_name, cuisine_type").execute().data or []
+    query = sb.table("cuisine_dishes").select("recipe_code, recipe_name, cuisine_type")
+    if cuisine_type:
+        query = query.ilike("cuisine_type", cuisine_type.strip())
+    dishes = query.execute().data or []
     if not dishes:
         return []
 
@@ -95,7 +104,15 @@ def swap_to_outside_food(
     if not plan_week:
         return OutsideFoodSwapResponse(possible=False, reason="no_active_plan", week_count=0)
 
+    # meal_date is client-supplied -- without this check a request could
+    # target a Recommendation row from a past/future week while still being
+    # counted against the CURRENT week's cap below, which would be wrong on
+    # both sides (swapping a date nobody asked about, miscounting the cap).
     week_start_date = plan_week["start_date"]
+    week_end_date = plan_week["end_date"]
+    if not week_start_date or not (week_start_date <= meal_date <= week_end_date):
+        return OutsideFoodSwapResponse(possible=False, reason="not_current_week", week_count=0)
+
     week_count_so_far = _week_outside_count(sb, user_id, week_start_date)
     if week_count_so_far >= WEEKLY_LIMIT:
         logger.info("Outside-food swap blocked for user_id=%s: already at %d/%d this week", user_id, week_count_so_far, WEEKLY_LIMIT)
