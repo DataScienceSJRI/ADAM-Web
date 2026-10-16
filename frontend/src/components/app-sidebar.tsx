@@ -21,6 +21,7 @@ import {
   Heart,
   Utensils,
   Activity,
+  Flag,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -33,6 +34,7 @@ const participantItems = [
 const logItems = [
   { title: "Diet Logs", href: "/dashboard/logs/food", icon: Utensils },
   { title: "Image Review", href: "/dashboard/feedback", icon: Heart },
+  { title: "Outside Food", href: "/dashboard/outside-food", icon: Flag },
   { title: "Session History", href: "/dashboard/sessions", icon: History },
 ];
 

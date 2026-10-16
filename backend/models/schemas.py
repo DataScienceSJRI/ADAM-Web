@@ -162,6 +162,32 @@ class OnDemandReplacementResponse(BaseModel):
     combination: Optional[List[RecipeWithQty]] = None
 
 
+class OutsideFoodDish(BaseModel):
+    recipe_code: str
+    recipe_name: str
+    cuisine_type: Optional[str] = None
+    unit: str = "serving"
+
+
+class OutsideFoodSwapRequest(BaseModel):
+    date: str
+    meal_slot: MealSlot
+    recipe_code: str
+    quantity: float
+    original_recipe_codes: Optional[List[str]] = None  # recipes being replaced; if omitted, replaces the whole slot
+
+    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "lunch", "recipe_code": "A001745", "quantity": 1.0}}}
+
+
+class OutsideFoodSwapResponse(BaseModel):
+    possible: bool
+    reason: Optional[str] = None  # e.g. "weekly_limit_reached" when possible=False
+    week_count: int
+    week_limit: int = 5
+    gl: Optional[float] = None
+    energy_kcal: Optional[float] = None
+
+
 class RegisterTokenRequest(BaseModel):
     device_token: str
     platform: str
