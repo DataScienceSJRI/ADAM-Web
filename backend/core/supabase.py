@@ -9,16 +9,98 @@ load_dotenv()
 _SUPABASE_URL = os.environ["SUPABASE_URL"]
 _SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
+
+def _disable_http2_on_subclients() -> None:
+    """supabase-py's postgrest/gotrue/storage3 sub-clients each hardcode
+    http2=True for their own internal httpx session, with no option exposed
+    through create_client()/ClientOptions to turn it off. That matters here
+    because of an unresolved httpx/httpcore bug: when a pooled HTTP/2
+    connection is closed by the SERVER while idle, the next request on it
+    raises httpx.RemoteProtocolError("... ConnectionTerminated ...") instead
+    of transparently reconnecting
+    (https://github.com/encode/httpx/issues -- httpcore's HTTP/2 path does
+    not retry past this the way its HTTP/1.1 path does).
+
+    PostgREST's Warp HTTP server idle-closes connections after ~30s by
+    default (logged on Supabase's side as "Warp server error: Thread killed
+    by timeout manager") -- so ANY pooled/reused client that goes idle for
+    more than ~30s hits this exact bug on its next call, surfacing as a 500.
+    This was true of a long-lived singleton (which is why get_supabase() was
+    originally fresh-per-call), and it's equally true of this module's own
+    TTL-rotated singleton below for any gap between calls shorter than the
+    TTL but longer than ~30s.
+
+    httpx's HTTP/1.1 path doesn't have this bug -- its connection pool
+    already proactively expires and transparently replaces idle connections
+    (keepalive_expiry defaults to 5s) and reliably detects a server-closed
+    connection before reusing it. Forcing http2=False moves onto that
+    well-tested path, which is what actually makes a pooled/reused client
+    safe here -- the TTL below is just a loose hygiene bound on top of it,
+    not the mechanism preventing staleness.
+
+    Patches the one `http2=True` call site in each of the three libraries'
+    installed versions (postgrest 0.17.2, gotrue, storage3) rather than
+    vendoring them. If a future upgrade changes those internals, this
+    silently stops taking effect rather than crashing -- re-verify after
+    bumping either package."""
+    import httpx
+
+    try:
+        from postgrest._sync.client import SyncPostgrestClient
+        from postgrest.utils import SyncClient as _PostgrestSyncClient
+
+        def _postgrest_create_session(self, base_url, headers, timeout, verify=True, proxy=None):
+            return _PostgrestSyncClient(
+                base_url=base_url, headers=headers, timeout=timeout,
+                verify=verify, proxy=proxy, follow_redirects=True, http2=False,
+            )
+
+        SyncPostgrestClient.create_session = _postgrest_create_session
+    except Exception:
+        pass
+
+    try:
+        from gotrue._sync.gotrue_base_api import SyncGoTrueBaseAPI
+        from gotrue.http_clients import SyncClient as _GotrueSyncClient
+
+        _orig_gotrue_init = SyncGoTrueBaseAPI.__init__
+
+        def _gotrue_init(self, *, url, headers, http_client=None, verify=True, proxy=None):
+            http_client = http_client or _GotrueSyncClient(
+                verify=bool(verify), proxy=proxy, follow_redirects=True, http2=False,
+            )
+            _orig_gotrue_init(self, url=url, headers=headers, http_client=http_client, verify=verify, proxy=proxy)
+
+        SyncGoTrueBaseAPI.__init__ = _gotrue_init
+    except Exception:
+        pass
+
+    try:
+        from storage3._sync.client import SyncStorageClient
+        from storage3.utils import SyncClient as _StorageSyncClient
+
+        def _storage_create_session(self, base_url, headers, timeout, verify=True, proxy=None):
+            return _StorageSyncClient(
+                base_url=base_url, headers=headers, timeout=timeout,
+                proxy=proxy, verify=bool(verify), follow_redirects=True, http2=False,
+            )
+
+        SyncStorageClient._create_session = _storage_create_session
+    except Exception:
+        pass
+
+
+_disable_http2_on_subclients()
+
 # get_supabase() used to create a brand-new client (and a brand-new TLS
 # connection) on EVERY call. With ~90 call sites across the backend plus
 # several always-on RQ workers, that meant a fresh connection opened per
-# query instead of the normal HTTP/2 pattern of multiplexing many requests
-# over one, which was pushing the Supabase project into "Unhealthy" in the
-# dashboard under load. It's now a process-wide singleton, rebuilt every
-# _CLIENT_TTL_SECONDS so any one connection is never pooled for more than
-# that long -- the fresh-per-call behaviour was originally added to dodge a
-# stale-HTTP/2-connection error from a long-lived (multi-day) client, and
-# this bounds that same exposure instead of removing pooling altogether.
+# query instead of the normal HTTP/1.1 keep-alive pattern of reusing one,
+# which was pushing the Supabase project into "Unhealthy" in the dashboard
+# under load. It's now a process-wide singleton. _CLIENT_TTL_SECONDS below
+# is just a loose hygiene bound (periodic recycling), not what makes reuse
+# safe -- see _disable_http2_on_subclients() for the actual fix for stale
+# pooled connections.
 _CLIENT_TTL_SECONDS = 600
 
 _client_lock = threading.Lock()
