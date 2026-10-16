@@ -804,7 +804,9 @@ export function ImageReviewModal({
         <div className="flex items-center justify-between px-5 py-3 border-b shrink-0">
           <div>
             <p className="font-semibold text-sm">{slotLabel}</p>
-            <p className="text-xs text-muted-foreground">{dateLabel}</p>
+            <p className="text-xs text-muted-foreground">
+              {dateLabel} · uploaded {formatIST(review.created_at, { hour: "2-digit", minute: "2-digit" })}
+            </p>
           </div>
           <div className="flex items-center gap-2">
             {reviews.length > 1 && (

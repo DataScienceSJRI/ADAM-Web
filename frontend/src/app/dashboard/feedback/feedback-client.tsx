@@ -679,9 +679,16 @@ export function FeedbackClient({
                                   </td>
                                 )}
                                 <td className="px-4 py-3" onClick={() => openModal(g)}>
-                                  {g.meal_slot
-                                    ? <MealSlotBadge slot={g.meal_slot} />
-                                    : <span className="text-xs text-muted-foreground">—</span>}
+                                  {g.meal_slot ? (
+                                    <div className="flex flex-col items-start gap-1">
+                                      <MealSlotBadge slot={g.meal_slot} />
+                                      <span className="text-[10px] text-muted-foreground tabular-nums">
+                                        {formatIST(g.date, { hour: "2-digit", minute: "2-digit" })}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground">—</span>
+                                  )}
                                 </td>
                                 <td className="px-4 py-3" onClick={() => openModal(g)}>
                                   <div className="flex items-center gap-1.5">
