@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from core.auth import get_current_user, oauth2_scheme
 from core.retry import call_with_retry
-from core.supabase import get_supabase
+from core.supabase import get_supabase, get_isolated_supabase
 from models.schemas import LoginRequest, LoginResponse, RefreshRequest
 
 logger = logging.getLogger("backend.routers.auth")
@@ -24,7 +24,11 @@ def _clean_user_id(email: str | None) -> str:
 
 
 def _supabase_login(email: str, password: str) -> LoginResponse:
-    sb = get_supabase()
+    # Must be an isolated client, not the shared get_supabase() singleton --
+    # sign_in_with_password mutates the client's Authorization header in
+    # place, which would otherwise leak this user's session into every
+    # other concurrent request sharing the pooled client.
+    sb = get_isolated_supabase()
     if "@" not in email:
         email = f"{email}@adam.participant"
     try:
