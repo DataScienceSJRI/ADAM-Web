@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
-import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle, Copy, Check, X, Plus, MoreHorizontal } from "lucide-react";
+import { CheckCircle, Clock, AlertCircle, Users, Search, MessageCircle, Copy, Check, X, Plus, MoreHorizontal, Trash2, Download } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -164,6 +164,10 @@ export function UsersClient({
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [confirmParticipant, setConfirmParticipant] = useState<Participant | null>(null);
+  const [deleteParticipant, setDeleteParticipant] = useState<Participant | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletedBackup, setDeletedBackup] = useState<{ label: string; url: string | null } | null>(null);
 
   function copyActivationLink(key: string) {
     if (!ACTIVATION_LINK) return;
@@ -284,6 +288,36 @@ export function UsersClient({
     } finally {
       setTogglingId(null);
     }
+  }
+
+  async function confirmDelete() {
+    if (!deleteParticipant) return;
+    const participant = deleteParticipant;
+    setDeletingId(participant.user_id);
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(participant.user_id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail ?? "Failed to delete participant");
+      }
+      setDeleteParticipant(null);
+      setDeleteConfirmText("");
+      setDeletedBackup({
+        label: participant.display_name ?? participant.participant_id,
+        url: typeof data.backup_url === "string" ? data.backup_url : null,
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete participant");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
+  function closeDeleteModal() {
+    if (deletingId !== null) return;
+    setDeleteParticipant(null);
+    setDeleteConfirmText("");
   }
 
   function closeWaModal() {
@@ -603,6 +637,16 @@ export function UsersClient({
                               {p.is_active ? <X className="h-4 w-4" /> : <Check className="h-4 w-4" />}
                               {togglingId === p.user_id ? "Updating..." : p.is_active ? "Disable participant" : "Re-enable participant"}
                             </DropdownMenuItem>
+                            {!p.is_active && (
+                              <DropdownMenuItem
+                                variant="destructive"
+                                disabled={deletingId === p.user_id}
+                                onSelect={() => setDeleteParticipant(p)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                                {deletingId === p.user_id ? "Deleting..." : "Delete permanently"}
+                              </DropdownMenuItem>
+                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </div>
@@ -857,6 +901,105 @@ export function UsersClient({
                 Cancel
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {deleteParticipant && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) closeDeleteModal(); }}
+        >
+          <div className="relative w-full max-w-sm rounded-xl border bg-background p-6 shadow-lg space-y-4">
+            <button
+              onClick={closeDeleteModal}
+              disabled={deletingId !== null}
+              className="absolute top-3 right-3 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+            <div className="space-y-1.5">
+              <p className="text-base font-semibold text-destructive">
+                Permanently delete {deleteParticipant.display_name ?? deleteParticipant.participant_id}?
+              </p>
+              <p className="text-xs text-muted-foreground">
+                This removes every row of their data — plan, diet logs, weight, activity, WhatsApp link — and
+                their login, for good. This can&apos;t be undone.
+              </p>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium">
+                Type <span className="font-mono font-semibold">{deleteParticipant.participant_id}</span> to confirm
+              </label>
+              <input
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                autoFocus
+                disabled={deletingId !== null}
+                className="w-full rounded-lg border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-destructive/40 disabled:opacity-50"
+              />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={confirmDelete}
+                disabled={deletingId !== null || deleteConfirmText.trim() !== deleteParticipant.participant_id}
+                className="flex-1 rounded-lg bg-destructive px-3 py-2 text-xs font-medium text-white hover:bg-destructive/90 disabled:opacity-50 transition-colors"
+              >
+                {deletingId !== null ? "Deleting…" : "Delete permanently"}
+              </button>
+              <button
+                type="button"
+                onClick={closeDeleteModal}
+                disabled={deletingId !== null}
+                className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {deletedBackup && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+          onClick={(e) => { if (e.target === e.currentTarget) setDeletedBackup(null); }}
+        >
+          <div className="relative w-full max-w-sm rounded-xl border bg-background p-6 shadow-lg space-y-4">
+            <button
+              onClick={() => setDeletedBackup(null)}
+              className="absolute top-3 right-3 rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+            <div className="space-y-1.5">
+              <p className="text-base font-semibold">{deletedBackup.label} deleted</p>
+              <p className="text-xs text-muted-foreground">
+                {deletedBackup.url
+                  ? "A backup of everything that was deleted was saved. The link below expires in 30 days — download it now if you want to keep a copy."
+                  : "Deleted, but no backup download link came back — check the backend logs if that's unexpected."}
+              </p>
+            </div>
+            {deletedBackup.url && (
+              <a
+                href={deletedBackup.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                download
+                className="flex items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download backup
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={() => setDeletedBackup(null)}
+              className="w-full rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors"
+            >
+              Done
+            </button>
           </div>
         </div>
       )}

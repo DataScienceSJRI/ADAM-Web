@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from core.auth import get_current_user
 from core.roles import get_current_role, require_coordinator
 from core.supabase import get_supabase, fetch_all_rows
+from services.user_admin import delete_participant_data
 
 logger = logging.getLogger("backend.routers.users")
 router = APIRouter(prefix="/users", tags=["users"])
@@ -228,6 +229,52 @@ def set_participant_active(
         "Participant %s set to is_active=%s by %s", user_id, body.is_active, coordinator_id,
     )
     return {"status": "ok", "user_id": user_id, "is_active": body.is_active}
+
+
+@router.delete("/{user_id}")
+def delete_participant(
+    user_id: str,
+    coordinator_id: str = Depends(get_current_user),
+    role: str = Depends(require_coordinator),
+):
+    """Permanently delete a participant and every row of their data
+    (Recommendation, FinalSummary, DietRecall, etc.) plus their Supabase
+    Auth account. Irreversible -- the participant must already be disabled
+    (PATCH .../active with is_active=false) before this is allowed, as a
+    safety rail against deleting someone still in active use. Admins can
+    delete any participant; coordinators only their own."""
+    sb = get_supabase()
+    query = sb.table("UserRoles").select("user_id, coordinator_id, is_active, participant_id, display_name").eq("user_id", user_id).eq("role", "participant")
+    existing = query.limit(1).execute().data
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"Participant {user_id} not found")
+    row = existing[0]
+    if role == "coordinator" and row.get("coordinator_id") != coordinator_id:
+        raise HTTPException(status_code=403, detail="Not your participant")
+    if row.get("is_active") is not False:
+        raise HTTPException(status_code=400, detail="Disable the participant before deleting")
+
+    # Real participants (participant_id starting "A", same convention as
+    # services/plan_retry_sweep.py etc.) get backed up before deletion;
+    # test/P-accounts don't -- their data has no retention value, so skip
+    # the Storage upload and metadata row entirely.
+    participant_id = row.get("participant_id") or ""
+    is_real_participant = participant_id.strip().upper().startswith("A")
+
+    deleted, backup_url = delete_participant_data(
+        sb, user_id,
+        participant_id=participant_id,
+        display_name=row.get("display_name"),
+        deleted_by=coordinator_id,
+        backup=is_real_participant,
+    )
+    if is_real_participant and not deleted:
+        # The pre-delete snapshot didn't save -- abort before touching any
+        # real data rather than delete something with no backup on file.
+        raise HTTPException(status_code=500, detail="Could not save a backup before deleting -- nothing was deleted. Try again or check Storage/DeletedParticipantsBackup access.")
+
+    logger.warning("Participant %s permanently deleted by %s (backed up=%s) -- rows removed: %s", user_id, coordinator_id, is_real_participant, deleted)
+    return {"status": "ok", "user_id": user_id, "deleted": deleted, "backup_url": backup_url}
 
 
 @router.get("/me/role")
