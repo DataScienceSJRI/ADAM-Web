@@ -37,6 +37,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 from core.supabase import get_supabase
+from services.data_loader import _fetch_main_code
 from services.recall import fetch_base_gl_map, fetch_portion_map, gl_for_quantity
 from services.reminders import IST, DEFAULT_MEAL_TIMES, time_to_minutes
 from services.wh_messages import mark_error, mark_sent
@@ -966,7 +967,7 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
             if gl is not None:
                 planned_gl_by_date[d_str] += gl
 
-    mapping_rows = sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+    mapping_rows = _fetch_main_code().fillna("").to_dict("records")
 
     occasions_by_date: dict[str, list[dict]] = defaultdict(list)
     for r in recall_rows:
@@ -1263,7 +1264,12 @@ def check_missed_slots(
     ) or []
     recipe_info = {str(r["Recipe_Code"]).strip(): r for r in recipe_rows}
     recipe_category = {code: info.get("Recipe_Category") for code, info in recipe_info.items()}
-    mapping_rows = sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+    # fillna(""): a cached DataFrame round-trip turns blank Main2_Code/
+    # Main3_Code/Optional cells into NaN (not None) once the column also has
+    # real values elsewhere, and `NaN or ""` evaluates to NaN (truthy) in the
+    # str(row.get(col) or "") checks below -- without this they'd silently
+    # see the literal string "nan" instead of "".
+    mapping_rows = _fetch_main_code().fillna("").to_dict("records")
 
     existing_rows = (
         sb.table("WH_Messages")
@@ -1712,7 +1718,12 @@ def build_backtest(days: int) -> pd.DataFrame:
             if gl is not None:
                 planned_gl_by_occasion[key] += gl
 
-    mapping_rows = sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
+    # fillna(""): a cached DataFrame round-trip turns blank Main2_Code/
+    # Main3_Code/Optional cells into NaN (not None) once the column also has
+    # real values elsewhere, and `NaN or ""` evaluates to NaN (truthy) in the
+    # str(row.get(col) or "") checks below -- without this they'd silently
+    # see the literal string "nan" instead of "".
+    mapping_rows = _fetch_main_code().fillna("").to_dict("records")
 
     occasions: dict[tuple, list[dict]] = defaultdict(list)
     for r in recall_rows:

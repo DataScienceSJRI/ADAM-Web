@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { DASHBOARD_PASSWORD, SESSION_KEY } from "@/lib/status-auth";
 import { PasswordGate } from "@/components/status/status-password-gate";
@@ -48,7 +48,16 @@ export default function RecipeIssuesPage() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  const loadIssues = useCallback(async () => {
+  const issuesInFlight = useRef(false);
+
+  const loadIssues = useCallback(async (opts?: { skipIfHidden?: boolean }) => {
+    // skipIfHidden is only set on the periodic tick, not on the initial load
+    // or the post-action refresh below -- no point polling a tab nobody is
+    // looking at. The in-flight guard applies to every call, to avoid
+    // overlapping requests piling up against the same endpoint.
+    if (opts?.skipIfHidden && document.visibilityState === "hidden") return;
+    if (issuesInFlight.current) return;
+    issuesInFlight.current = true;
     try {
       const res = await fetch(`/api/status/recipe-issues?token=${encodeURIComponent(DASHBOARD_PASSWORD)}`);
       if (!res.ok) {
@@ -59,13 +68,15 @@ export default function RecipeIssuesPage() {
       setData((await res.json()) as RecipeIssuesResponse);
     } catch {
       setLoadError("Could not reach the server.");
+    } finally {
+      issuesInFlight.current = false;
     }
   }, []);
 
   useEffect(() => {
     if (!unlocked) return;
     loadIssues();
-    const interval = setInterval(loadIssues, REFRESH_MS);
+    const interval = setInterval(() => loadIssues({ skipIfHidden: true }), REFRESH_MS);
     return () => clearInterval(interval);
   }, [unlocked, loadIssues]);
 

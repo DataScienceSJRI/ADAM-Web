@@ -1113,9 +1113,13 @@ export default function StatusDashboardPage() {
   useEffect(() => {
     if (!unlocked) return;
     let cancelled = false;
+    let inFlight = false;
 
     function load(isFirst: boolean) {
+      // Skip a tick entirely while the tab is hidden or a previous poll 
+      if (!isFirst && (document.visibilityState === "hidden" || inFlight)) return;
       if (isFirst) setLoading(true);
+      inFlight = true;
       fetch(`/api/status/overview/${DASHBOARD_PASSWORD}`)
         .then(async (res) => {
           if (cancelled) return;
@@ -1134,6 +1138,7 @@ export default function StatusDashboardPage() {
           if (!cancelled) setError("Could not reach the server.");
         })
         .finally(() => {
+          inFlight = false;
           if (!cancelled && isFirst) setLoading(false);
         });
     }

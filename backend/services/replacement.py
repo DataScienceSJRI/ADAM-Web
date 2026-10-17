@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
-from services.data_loader import apply_combination_table_overrides, get_recipes_excluded_by_nonveg_types
+from services.data_loader import _fetch_main_code, get_recipes_excluded_by_nonveg_types
 from services.profile_builder import build_profile
 
 VALID_QUANTITIES: list[float] = [0.5, 1.0, 1.5, 2.0]
@@ -630,9 +630,12 @@ def _new_mapping_subcategories(sb, target_subcat: str, companion_subcats: set[st
     it's a loose "goes with almost anything" bucket, so a companion only found
     there isn't a real pairing signal either.
     """
-    mapping_rows = apply_combination_table_overrides(
-        sb.table("Main1_Main2_Mapping Subcategory").select("*").execute().data or []
-    )
+    # fillna("") before to_dict: a cached DataFrame round-trip turns blank
+    # Main2_Code/Main3_Code/Optional cells into NaN (not None) wherever the
+    # column also has real values elsewhere -- and `NaN or ""` evaluates to
+    # NaN (truthy), so str(row.get(col) or "") below would silently produce
+    # the literal string "nan" instead of "" without this.
+    mapping_rows = _fetch_main_code().fillna("").to_dict("records")
     role = _find_column_role(mapping_rows, target_subcat)
     if role is None or not companion_subcats:
         return set()

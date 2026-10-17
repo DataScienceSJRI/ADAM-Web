@@ -6,6 +6,8 @@ from functools import lru_cache
 
 import httpx
 
+from core.retry import retry_http
+
 logger = logging.getLogger("backend.services.whatsapp_gateway")
 
 _SKIP_SUFFIXES = ("@g.us", "@broadcast", "@newsletter")
@@ -78,13 +80,17 @@ class WAHAGateway(WhatsAppGateway):
             # mark_sent() right after a clean return, so a silent no-op here
             # would get logged as a successful send that never actually went out.
             raise RuntimeError("WAHA_BASE_URL not configured — cannot send WhatsApp message")
-        resp = httpx.post(
-            f"{self._base_url}/api/sendText",
-            json={"session": self._session, "chatId": f"{phone}@c.us", "text": text},
-            headers={"X-Api-Key": self._api_key, "Content-Type": "application/json"},
-            timeout=10,
-        )
-        resp.raise_for_status()
+        def _send():
+            resp = httpx.post(
+                f"{self._base_url}/api/sendText",
+                json={"session": self._session, "chatId": f"{phone}@c.us", "text": text},
+                headers={"X-Api-Key": self._api_key, "Content-Type": "application/json"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return resp
+
+        retry_http(_send, what=f"WAHA send to {phone}")
 
 
 @lru_cache(maxsize=1)

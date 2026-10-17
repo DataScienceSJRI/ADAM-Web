@@ -6,6 +6,7 @@ import {
   ExternalLink, ChevronLeft, ChevronRight, Search, Plus, Trash2,
 } from "lucide-react";
 import { formatIST } from "@/lib/utils";
+import { invalidateReviews } from "@/lib/use-reviews";
 
 const PROCESSING = "__processing__";
 const FAILED = "__failed__";
@@ -727,37 +728,37 @@ export function ImageReviewModal({
     setReview(u);
     setPickers(initialPickers(u));
     onUpdated(u);
+    invalidateReviews();
   }, [onUpdated]);
 
+  // Single poll loop covers both the pre- and post-meal AI jobs instead of
+  // two independent setIntervals hitting the same /reviews/:id endpoint at
+  // once whenever both are "processing" simultaneously. Also skips a tick
+  // entirely while the tab is hidden -- no point polling a review nobody is
+  // looking at right now; the next visible tick picks up wherever it's at.
   useEffect(() => {
-    if (parsed.status !== "processing") return;
-    const t = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/feedback/reviews/${review.id}`, {
-          headers: authHeaders(token),
-        });
-        if (!res.ok) return;
-        const u = (await res.json()) as MealImageReview;
-        if (u.tracked_foods_by_ai !== PROCESSING) { clearInterval(t); handlePoll(u); }
-      } catch { /* ignore */ }
-    }, 5000);
-    return () => clearInterval(t);
-  }, [review.id, parsed.status, token, handlePoll]);
+    const prePending = parsed.status === "processing";
+    const postPending = parsedPost.status === "processing";
+    if (!prePending && !postPending) return;
 
-  useEffect(() => {
-    if (parsedPost.status !== "processing") return;
     const t = setInterval(async () => {
+      if (document.visibilityState === "hidden") return;
       try {
         const res = await fetch(`/api/feedback/reviews/${review.id}`, {
           headers: authHeaders(token),
         });
         if (!res.ok) return;
         const u = (await res.json()) as MealImageReview;
-        if (u.tracked_foods_by_ai_post !== PROCESSING) { clearInterval(t); handlePoll(u); }
+        const prePendingNow = u.tracked_foods_by_ai === PROCESSING;
+        const postPendingNow = u.tracked_foods_by_ai_post === PROCESSING;
+        if ((prePending && !prePendingNow) || (postPending && !postPendingNow)) {
+          clearInterval(t);
+          handlePoll(u);
+        }
       } catch { /* ignore */ }
     }, 5000);
     return () => clearInterval(t);
-  }, [review.id, parsedPost.status, token, handlePoll]);
+  }, [review.id, parsed.status, parsedPost.status, token, handlePoll]);
 
   async function doAction(act: string, extra: Record<string, unknown> = {}, busyKey: string = act) {
     setBusy(busyKey); setError(null);
@@ -770,6 +771,10 @@ export function ImageReviewModal({
       const data = (await res.json()) as MealImageReview & { detail?: string };
       if (!res.ok) throw new Error(data.detail ?? "Action failed");
       setReview(data); onUpdated(data);
+      // Keep the shared reviews list (food-logs-client.tsx, etc.) in sync --
+      // without this, any action taken here was invisible to other pages/
+      // tabs reading from the same /api/feedback/reviews cache.
+      invalidateReviews();
       if (act === "identify" || act === "check_consumption") setPickers(initialPickers(data));
       if (act === "approve" || act === "reject") onClose();
     } catch (e) {

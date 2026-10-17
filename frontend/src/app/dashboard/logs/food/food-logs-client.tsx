@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { type MealImageReview } from "@/components/image-review-modal";
 import { formatIST } from "@/lib/utils";
+import { useReviewsMap } from "@/lib/use-reviews";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -679,7 +680,8 @@ export function FoodLogsClient({
   const [loadingData, setLoadingData] = useState(false);
   const [dateIndex, setDateIndex] = useState(() => defaultDateIndex(initialParticipantData?.dates ?? []));
   const [editState, setEditState] = useState<EditState | null>(null);
-  const [reviewsMap, setReviewsMap] = useState<Record<string, MealImageReview>>(initialReviewsMap);
+  const { map: fetchedReviewsMap } = useReviewsMap();
+  const reviewsMap = Object.keys(fetchedReviewsMap).length > 0 ? fetchedReviewsMap : initialReviewsMap;
   const [loadError] = useState(initialError);
 
   useEffect(() => {
@@ -725,22 +727,10 @@ export function FoodLogsClient({
     })).filter((s) => s.planItems.length > 0 || s.logItems.length > 0);
   }, [participantData, currentDate]);
 
-  // Load all image reviews for coordinator's participants
-  useEffect(() => {
-    if (Object.keys(initialReviewsMap).length > 0) return;
-    fetch("/api/feedback/reviews")
-      .then((r) => r.ok ? r.json() : [])
-      .then((groups: { reviews: MealImageReview[] }[]) => {
-        const map: Record<string, MealImageReview> = {};
-        for (const g of groups) {
-          for (const r of g.reviews ?? []) {
-            if (r.diet_recall_id) map[r.diet_recall_id] = r;
-          }
-        }
-        setReviewsMap(map);
-      })
-      .catch(() => {});
-  }, [initialReviewsMap]);
+  // Image reviews now come from the shared SWR cache (useReviewsMap above)
+  // instead of a one-shot fetch into local state -- this keeps them in sync
+  // with actions taken from the /dashboard/feedback page's review modal,
+  // which previously had no way to reach this page's copy of the data.
 
   const actualParticipants = useMemo(
     () => participants.filter((p) => isActualParticipant(p.participant_id)),

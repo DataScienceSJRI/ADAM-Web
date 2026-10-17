@@ -141,15 +141,17 @@ def get_supabase() -> Client:
     now = time.monotonic()
     if _client is not None and (now - _client_created_at) < _CLIENT_TTL_SECONDS:
         return _client
+    stale = None
     with _client_lock:
         now = time.monotonic()
         if _client is None or (now - _client_created_at) >= _CLIENT_TTL_SECONDS:
             stale = _client
             _client = _new_client()
             _client_created_at = now
-            if stale is not None:
-                _close_client(stale)
-        return _client
+        current = _client
+    if stale is not None:
+        _close_client(stale)
+    return current
 
 
 def get_isolated_supabase() -> Client:

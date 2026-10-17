@@ -344,10 +344,12 @@ def list_coordinator_participants(
 @router.get("/coordinator/{participant_id}")
 def get_participant_recall_logs(
     participant_id: str,
+    days: int = Query(90, ge=7, le=730),
     user_id: str = Depends(get_current_user),
     role: str = Depends(require_coordinator),
 ):
-    """Return DietRecall and Recommendation data for a specific participant (coordinator-only)."""
+    """Return DietRecall and Recommendation data for a specific participant
+    (coordinator-only)."""
     sb = get_supabase()
 
     q = (
@@ -365,12 +367,14 @@ def get_participant_recall_logs(
 
     email = f"{participant_id}@adam.participant"
     user_filter = [participant_id, email]
+    cutoff = str(date_type.today() - timedelta(days=days))
 
     def fetch_logs():
         rows = (
             sb.table("DietRecall")
             .select("*")
             .in_("user_id", user_filter)
+            .gte("Date", cutoff)
             .order("Date", desc=True)
             .limit(500)
             .execute()
@@ -383,6 +387,7 @@ def get_participant_recall_logs(
             sb.table("Recommendation")
             .select("Pkey, Date, Timings, Food_Name, Food_Name_desc, Food_Qty, R_desc, Energy_kcal, user_id")
             .in_("user_id", user_filter)
+            .gte("Date", cutoff)
             .order("Date", desc=True)
             .limit(500)
             .execute()

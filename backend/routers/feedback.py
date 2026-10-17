@@ -1,9 +1,9 @@
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from core.auth import get_current_user
@@ -95,10 +95,14 @@ def _notify_participant_review_result(sb, review: dict, action: str, meal_slot: 
 
 @router.get("/reviews")
 def list_reviews(
+    days: int = Query(30, ge=1, le=365),
     user_id: str = Depends(get_current_user),
     role: str = Depends(require_coordinator),
 ):
-    """Return MealImageReview entries grouped by participant."""
+    """Return MealImageReview entries grouped by participant.
+
+    Only includes reviews that are either pending or created within the last 
+    """
     sb = get_supabase()
 
     q = sb.table("UserRoles").select("user_id, participant_id, display_name").eq("role", "participant")
@@ -120,14 +124,32 @@ def list_reviews(
         participant_map[email] = p
         lookup_ids.extend([pid, email])
 
-    reviews = (
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    pending_reviews = (
         sb.table("MealImageReview")
         .select("*")
         .in_("user_id", lookup_ids)
+        .eq("review_status", "pending")
         .order("created_at", desc=True)
         .execute()
         .data
     ) or []
+    recent_reviews = (
+        sb.table("MealImageReview")
+        .select("*")
+        .in_("user_id", lookup_ids)
+        .gte("created_at", cutoff)
+        .order("created_at", desc=True)
+        .execute()
+        .data
+    ) or []
+    seen_ids: set = set()
+    reviews: list = []
+    for r in pending_reviews + recent_reviews:
+        if r["id"] in seen_ids:
+            continue
+        seen_ids.add(r["id"])
+        reviews.append(r)
 
     # Enrich with meal_slot from DietRecall
     recall_ids = [r["diet_recall_id"] for r in reviews if r.get("diet_recall_id")]

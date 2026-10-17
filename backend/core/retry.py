@@ -42,3 +42,27 @@ def call_with_retry(fn: Callable[[], T], *, retries: int = 3, base_delay: float 
                     what, attempt, retries, exc,
                 )
     raise last_exc
+
+_RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
+
+
+def retry_http(fn: Callable[[], T], *, retries: int = 3, base_delay: float = 2.0, what: str = "request") -> T:
+    """Call fn(), retrying on transient network/SSL errors and HTTP 429/5xx"""
+    last_exc: Exception = RuntimeError(f"{what}: no attempts made")
+    for attempt in range(1, retries + 1):
+        try:
+            return fn()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _RETRYABLE_HTTP_STATUS:
+                raise
+            last_exc = exc
+        except _TRANSIENT_EXCEPTIONS as exc:
+            last_exc = exc
+        if attempt < retries:
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "Retrying %s (attempt %d/%d) after: %s — in %.1fs",
+                what, attempt, retries, last_exc, delay,
+            )
+            time.sleep(delay)
+    raise last_exc

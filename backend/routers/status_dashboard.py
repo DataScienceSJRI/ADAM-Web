@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import date as date_type, datetime, timedelta, timezone
 from typing import Optional
 
@@ -43,6 +44,28 @@ def _format_slot_list(slots: list[str]) -> str:
 def _check_token(token: str) -> None:
     if not _STATUS_TOKEN or token != _STATUS_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid or missing status dashboard token")
+
+
+# This dashboard is public (token-gated, not Supabase-auth-gated) and both
+# endpoints below are polled every 60s by every open tab -- with no cache,
+# each poll from every viewer recomputes the full participant/date summary
+# from scratch. 30s is short enough that the dashboard still feels live
+# (well under the 60s poll interval) while collapsing concurrent/rapid polls
+# from multiple viewers onto one computation. Keyed by the varying params
+# only -- the token itself doesn't change the result for a given param set,
+# and _check_token() already runs before this on every request regardless.
+_SUMMARY_CACHE_TTL = 30.0
+_summary_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+def _cached_summary(key: tuple, compute) -> dict:
+    now = time.monotonic()
+    cached = _summary_cache.get(key)
+    if cached is not None and now - cached[0] < _SUMMARY_CACHE_TTL:
+        return cached[1]
+    result = compute()
+    _summary_cache[key] = (now, result)
+    return result
 
 
 def _weighted_avg_gl(day_gl: dict[str, float], day_energy: dict[str, float]) -> Optional[float]:
@@ -239,6 +262,10 @@ def _empty_overview() -> dict:
 @router.get("/overview/{token}")
 def status_overview(token: str, days: int = Query(120, ge=7, le=371)):
     _check_token(token)
+    return _cached_summary(("overview", days), lambda: _compute_status_overview(days))
+
+
+def _compute_status_overview(days: int) -> dict:
     sb = get_supabase()
 
     participants = (
@@ -790,6 +817,10 @@ def _coordinator_name(sb, user_id: str) -> str:
 @router.get("/recipe-issues/{token}")
 def recipe_issues(token: str):
     _check_token(token)
+    return _cached_summary(("recipe_issues",), _compute_recipe_issues)
+
+
+def _compute_recipe_issues() -> dict:
     sb = get_supabase()
 
     open_rows = _fetch_all(lambda: (

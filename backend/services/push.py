@@ -1,6 +1,7 @@
 import os
 import logging
 import httpx
+from core.retry import retry_http
 from core.supabase import get_supabase
 
 logger = logging.getLogger("backend.services.push")
@@ -26,13 +27,17 @@ def _post_notification(player_ids: list[str], title: str, body: str, data: dict 
     }
     if data:
         payload["data"] = data
-    resp = httpx.post(
-        _ONESIGNAL_URL,
-        json=payload,
-        headers={"Authorization": f"Basic {ONESIGNAL_REST_KEY}", "Content-Type": "application/json"},
-        timeout=10,
-    )
-    resp.raise_for_status()
+    def _send():
+        resp = httpx.post(
+            _ONESIGNAL_URL,
+            json=payload,
+            headers={"Authorization": f"Basic {ONESIGNAL_REST_KEY}", "Content-Type": "application/json"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp
+
+    retry_http(_send, what="OneSignal push")
     return len(player_ids)
 
 

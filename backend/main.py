@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 from dotenv import load_dotenv
 from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env", override=True)
@@ -9,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications, kpi, users, feedback, weight, preferences, whatsapp_router, status_dashboard, outside_food
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler()]
@@ -126,8 +128,50 @@ class RequestTimingMiddleware(BaseHTTPMiddleware):
         logger.info("%s %s %s [%.2fs]", request.method, request.url.path, response.status_code, time.time() - t0)
         return response
 
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    WINDOW_SECONDS = 60
+    DEFAULT_LIMIT = 300       # generous: normal use across several open dashboard tabs stays well under this
+    STATUS_LIMIT = 60         # /status/* is public (token-gated only, no Supabase auth) -- tighter
+    _MAX_TRACKED_KEYS = 20_000  # opportunistic cleanup threshold, not a hard cap
+
+    def __init__(self, app):
+        super().__init__(app)
+        self._lock = threading.Lock()
+        self._counts: dict[tuple[str, str, int], int] = {}
+
+    def _bucket_for(self, path: str) -> tuple[str, int]:
+        if path == f"{V1}/status" or path.startswith(f"{V1}/status/"):
+            return "status", self.STATUS_LIMIT
+        return "default", self.DEFAULT_LIMIT
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        client_ip = request.client.host if request.client else "unknown"
+        window = int(time.time() // self.WINDOW_SECONDS)
+        bucket, limit = self._bucket_for(request.url.path)
+        key = (client_ip, bucket, window)
+
+        with self._lock:
+            if len(self._counts) > self._MAX_TRACKED_KEYS:
+                self._counts = {k: v for k, v in self._counts.items() if k[2] >= window - 1}
+            count = self._counts.get(key, 0) + 1
+            self._counts[key] = count
+
+        if count > limit:
+            return JSONResponse(
+                {"detail": "Rate limit exceeded. Please slow down."},
+                status_code=429,
+                headers={"Retry-After": str(self.WINDOW_SECONDS)},
+            )
+        return await call_next(request)
+
+
 app.add_middleware(PrivateNetworkAccessMiddleware)
 app.add_middleware(RequestTimingMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 V1 = "/api/v1"
 
