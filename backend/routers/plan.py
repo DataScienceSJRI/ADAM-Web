@@ -1072,9 +1072,57 @@ def generate_plan(
 ):
     """Queue a 7-day personalised meal plan generation. Poll /plan/status for completion."""
     effective_user_id = body.target_user_id if body.target_user_id else user_id
+
+    
+    if body.target_user_id and body.target_user_id != user_id:
+        from core.roles import get_current_role
+        from core.supabase import get_supabase as _get_sb
+        caller_role = get_current_role(user_id)
+        if caller_role not in ("coordinator", "admin"):
+            raise HTTPException(status_code=403, detail="Coordinator or admin access required")
+        if caller_role == "coordinator":
+            target_row = (
+                _get_sb().table("UserRoles")
+                .select("coordinator_id").eq("user_id", effective_user_id).eq("role", "participant")
+                .limit(1).execute().data
+            )
+            if not target_row or target_row[0].get("coordinator_id") != user_id:
+                raise HTTPException(status_code=403, detail="Not your participant")
+
     from core.roles import is_user_active
     if not is_user_active(effective_user_id):
         raise HTTPException(status_code=403, detail=f"Participant {effective_user_id} is disabled — re-enable them first to generate a plan.")
+
+    
+    from core.supabase import get_supabase as _get_sb2
+    _IN_PROGRESS_EXACT = {"generating", "saving"}
+    existing_session = (
+        _get_sb2().table("BE_Onboarding_Sessions")
+        .select("plan_status, updated_at")
+        .eq("user_id", effective_user_id)
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute().data
+    )
+    if existing_session:
+        existing_status = existing_session[0].get("plan_status") or ""
+        in_progress = existing_status in _IN_PROGRESS_EXACT or existing_status.startswith("optimizing")
+        if in_progress:
+            is_stale = True
+            updated_at_raw = existing_session[0].get("updated_at")
+            if updated_at_raw:
+                try:
+                    updated_dt = datetime.fromisoformat(str(updated_at_raw).replace("Z", "+00:00"))
+                    if updated_dt.tzinfo is None:
+                        updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+                    is_stale = (datetime.now(timezone.utc) - updated_dt) > timedelta(seconds=PLAN_JOB_TIMEOUT_SECONDS)
+                except ValueError:
+                    is_stale = False  # unparseable timestamp -- be conservative, don't assume stale
+            if not is_stale:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"A plan is already being generated for this participant (status: {existing_status}). Please wait for it to finish.",
+                )
 
     profile = build_profile(effective_user_id, onboarding_id=body.onboarding_id)
     if profile is None:
