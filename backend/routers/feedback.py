@@ -96,19 +96,51 @@ def _notify_participant_review_result(sb, review: dict, action: str, meal_slot: 
 @router.get("/reviews")
 def list_reviews(
     days: int = Query(30, ge=1, le=365),
+    participant_user_id: Optional[str] = Query(
+        None, description="Scope to exactly this participant instead of the whole cohort"
+    ),
+    summary_only: bool = Query(
+        False, description="Skip fetching full review rows -- just participant_id/display_name/pending_count"
+    ),
     user_id: str = Depends(get_current_user),
     role: str = Depends(require_coordinator),
 ):
     """Return MealImageReview entries grouped by participant.
 
-    Only includes reviews that are either pending or created within the last 
+    Only includes reviews that are either pending or created within the last
+    `days` days.
+
+    participant_user_id / summary_only exist because the default (whole
+    cohort, full review rows including embedded AI results) was being
+    fetched in full on every /dashboard/feedback page load just to render
+    a sidebar list and pick a default selection, and again by Diet Logs
+    just to look up one participant's review status -- neither needed
+    every OTHER participant's full review payload. summary_only serves the
+    sidebar-list case (cheap, no review bodies at all); participant_user_id
+    serves "I only need one participant's full reviews" (Diet Logs, and
+    Feedback's on-demand fetch when switching the selected participant).
     """
     sb = get_supabase()
 
-    q = sb.table("UserRoles").select("user_id, participant_id, display_name").eq("role", "participant")
-    if role == "coordinator":
-        q = q.eq("coordinator_id", user_id).ilike("participant_id", "A%")
-    participants = (q.execute().data) or []
+    if participant_user_id:
+        # Scoped to exactly one participant -- verify ownership first,
+        # same pattern as routers/plan.py's generate_plan target_user_id check.
+        target = (
+            sb.table("UserRoles")
+            .select("user_id, participant_id, display_name, coordinator_id")
+            .eq("user_id", participant_user_id).eq("role", "participant")
+            .limit(1).execute().data
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="Participant not found")
+        if role == "coordinator" and target[0].get("coordinator_id") != user_id:
+            raise HTTPException(status_code=403, detail="Not your participant")
+        participants = [{k: v for k, v in target[0].items() if k != "coordinator_id"}]
+    else:
+        q = sb.table("UserRoles").select("user_id, participant_id, display_name").eq("role", "participant")
+        if role == "coordinator":
+            q = q.eq("coordinator_id", user_id).ilike("participant_id", "A%")
+        participants = (q.execute().data) or []
 
     if not participants:
         return []
@@ -123,6 +155,66 @@ def list_reviews(
         participant_map[pid] = p
         participant_map[email] = p
         lookup_ids.extend([pid, email])
+
+    if summary_only:
+        # Lightweight: selects only the columns needed to group rows into
+        # occasions (pre+post pairs share one "meal", exactly matching the
+        # frontend's own groupReviews()/groupStatus() in feedback-client.tsx)
+        # and count total/reviewed/pending per participant for the sidebar's
+        # progress bar -- excludes the heavy AI-result JSON blobs
+        # (tracked_foods_by_ai, tracked_foods_by_ai_post, consumption_result)
+        # that made the cohort-wide payload large in the first place.
+        # meal_slot is NOT a column on MealImageReview itself -- same as the
+        # full-fetch branch below, it only exists on DietRecall and has to
+        # be joined in via diet_recall_id. Only needed here for the rare
+        # fallback occasion-key case (no diet_recall_id at all); skipped
+        # entirely when every row has one, which is the normal case.
+        light_rows = (
+            sb.table("MealImageReview")
+            .select("user_id, diet_recall_id, review_status, created_at")
+            .in_("user_id", lookup_ids)
+            .execute().data
+        ) or []
+
+        meal_slot_map: dict = {}
+        recall_ids = [r["diet_recall_id"] for r in light_rows if r.get("diet_recall_id")]
+        if recall_ids:
+            for i in range(0, len(recall_ids), 100):
+                batch = recall_ids[i:i + 100]
+                recall_data = (
+                    sb.table("DietRecall").select("ID, meal_slot").in_("ID", batch).execute().data
+                ) or []
+                meal_slot_map.update({r["ID"]: r.get("meal_slot") for r in recall_data})
+
+        # canonical participant user_id -> occasion key -> whether any row
+        # in that occasion is still pending (mirrors groupStatus: an
+        # occasion counts as "pending" if EITHER its pre or post row is).
+        occasions: dict[str, dict[str, bool]] = {}
+        for r in light_rows:
+            row_uid = r.get("user_id") or ""
+            p = participant_map.get(row_uid) or participant_map.get(row_uid.split("@")[0])
+            if not p:
+                continue
+            canonical = p["user_id"]
+            date_key = str(r.get("created_at") or "")[:10]
+            slot_key = str(meal_slot_map.get(r.get("diet_recall_id")) or "").lower()
+            # Same fallback key shape as groupReviews() -- including using
+            # the RAW row user_id (not the canonical one) to match exactly.
+            occasion_key = r.get("diet_recall_id") or f"{date_key}_{slot_key}_{row_uid}"
+            bucket = occasions.setdefault(canonical, {})
+            bucket[occasion_key] = bucket.get(occasion_key, False) or (r.get("review_status") == "pending")
+
+        return [
+            {
+                "user_id": p["user_id"],
+                "participant_id": p.get("participant_id"),
+                "display_name": p.get("display_name"),
+                "pending_count": sum(1 for is_pending in occasions.get(p["user_id"], {}).values() if is_pending),
+                "total_count": len(occasions.get(p["user_id"], {})),
+                "reviewed_count": sum(1 for is_pending in occasions.get(p["user_id"], {}).values() if not is_pending),
+            }
+            for p in participants
+        ]
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     pending_reviews = (

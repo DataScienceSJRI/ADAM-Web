@@ -680,7 +680,7 @@ export function FoodLogsClient({
   const [loadingData, setLoadingData] = useState(false);
   const [dateIndex, setDateIndex] = useState(() => defaultDateIndex(initialParticipantData?.dates ?? []));
   const [editState, setEditState] = useState<EditState | null>(null);
-  const { map: fetchedReviewsMap } = useReviewsMap();
+  const { map: fetchedReviewsMap } = useReviewsMap(selectedId);
   const reviewsMap = Object.keys(fetchedReviewsMap).length > 0 ? fetchedReviewsMap : initialReviewsMap;
   const [loadError] = useState(initialError);
 

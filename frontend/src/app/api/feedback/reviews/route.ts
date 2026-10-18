@@ -4,8 +4,9 @@ import { BACKEND_URL, getBackendAccessToken } from "@/lib/backend";
 export async function GET(req: NextRequest) {
   const token = await getBackendAccessToken();
   const auth = req.headers.get("authorization") ?? (token ? `Bearer ${token}` : null);
+  const qs = req.nextUrl.search;
   try {
-    const res = await fetch(`${BACKEND_URL}/api/v1/feedback/reviews`, {
+    const res = await fetch(`${BACKEND_URL}/api/v1/feedback/reviews${qs}`, {
       headers: { ...(auth ? { Authorization: auth } : {}) },
     });
     const text = await res.text();

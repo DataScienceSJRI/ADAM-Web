@@ -4,6 +4,14 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { AlertTriangle, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
 import { formatIST } from "@/lib/utils";
+import {
+  useReviews,
+  useReviewsSummary,
+  patchReviewsLocally,
+  patchSummaryCounts,
+  type ReviewGroup,
+  type ReviewSummary,
+} from "@/lib/use-reviews";
 
 type Review = {
   id: string;
@@ -20,16 +28,6 @@ type Review = {
   meal_slot: string | null;
   participant_note: string | null;
 };
-
-type ParticipantGroup = {
-  user_id: string;
-  participant_id: string | null;
-  display_name: string | null;
-  pending_count: number;
-  reviews: Review[];
-};
-
-export type FeedbackParticipantGroup = ParticipantGroup;
 
 type CohortFilter = "actual" | "test";
 
@@ -146,7 +144,7 @@ function FeedbackParticipantRail({
   actualCount,
   testCount,
 }: {
-  participants: ParticipantGroup[];
+  participants: ReviewSummary[];
   selectedId: string | null;
   onSelect: (id: string) => void;
   showCohortSwitch: boolean;
@@ -206,9 +204,11 @@ function FeedbackParticipantRail({
           <p className="rounded-xl border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">No participants found</p>
         )}
         {filtered.map(pg => {
-          const mgs = groupReviews(pg.reviews);
-          const total = mgs.length;
-          const reviewed = mgs.filter(g => groupStatus(g) !== "pending").length;
+          // total_count/reviewed_count come straight from the lightweight
+          // summary endpoint now -- no need to hold every participant's
+          // full review list just to compute this progress bar.
+          const total = pg.total_count;
+          const reviewed = pg.reviewed_count;
           const pct = total > 0 ? Math.round((reviewed / total) * 100) : 0;
           const active = pg.user_id === selectedId;
           return (
@@ -257,17 +257,18 @@ function FeedbackParticipantRail({
 }
 
 export function FeedbackClient({
-  initialParticipants,
+  initialSummary,
+  initialSelectedGroup,
   initialIsAdmin,
   initialSelectedId,
   initialError = false,
 }: {
-  initialParticipants: ParticipantGroup[];
+  initialSummary: ReviewSummary[];
+  initialSelectedGroup: ReviewGroup | null;
   initialIsAdmin: boolean;
   initialSelectedId: string | null;
   initialError?: boolean;
 }) {
-  const [participants, setParticipants] = useState<ParticipantGroup[]>(initialParticipants);
   const [isAdmin] = useState(initialIsAdmin);
   const [cohortFilter, setCohortFilter] = useState<CohortFilter>("actual");
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
@@ -281,32 +282,46 @@ export function FeedbackClient({
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const [pendingBulkAction, setPendingBulkAction] = useState<"approve" | "reject" | null>(null);
 
+  // Cohort-wide but lightweight (no review bodies) -- drives the sidebar.
+  const { data: summaryData } = useReviewsSummary(initialSummary);
+  const summary = summaryData ?? initialSummary;
+
+  // Full reviews for ONLY the selected participant. The initial selection's
+  // data is seeded from SSR (no refetch on first paint); switching to a
+  // DIFFERENT participant has no fallback for that new key, so it fetches
+  // for real -- see the loading state below.
+  const selectedFallback = selectedId === initialSelectedId && initialSelectedGroup ? [initialSelectedGroup] : undefined;
+  const { data: selectedGroups, isLoading: selectedLoading } = useReviews(selectedId, selectedFallback);
+  const selected: ReviewGroup | null = selectedGroups?.[0] ?? null;
+
   const handleBulkUpdated = useCallback((updates: Review[]) => {
-    setParticipants(prev =>
-      prev.map(pg => {
-        const relevant = updates.filter(u => pg.reviews.some(r => r.id === u.id));
-        if (relevant.length === 0) return pg;
-        const reviews = pg.reviews.map(r => relevant.find(u => u.id === r.id) ?? r);
-        const pending_count = groupReviews(reviews).filter(g => groupStatus(g) === "pending").length;
-        return { ...pg, reviews, pending_count };
-      })
-    );
-  }, []);
+    if (!selectedId || !selected) return;
+    const newReviews = selected.reviews.map(r => {
+      const match = updates.find(u => u.id === r.id);
+      return (match ?? r) as unknown as MealImageReview;
+    });
+    const newGroups = groupReviews(newReviews as unknown as Review[]);
+    const pending_count = newGroups.filter(g => groupStatus(g) === "pending").length;
+    const total_count = newGroups.length;
+    const reviewed_count = total_count - pending_count;
+    patchReviewsLocally(selectedId, () => newReviews);
+    patchSummaryCounts(selectedId, { pending_count, total_count, reviewed_count });
+  }, [selectedId, selected]);
 
   const handleSingleUpdated = useCallback((updated: MealImageReview) => {
     handleBulkUpdated([updated as unknown as Review]);
   }, [handleBulkUpdated]);
 
   const handleGroupDeleted = useCallback((reviewIds: string[]) => {
-    setParticipants(prev =>
-      prev.map(pg => {
-        if (!pg.reviews.some(r => reviewIds.includes(r.id))) return pg;
-        const reviews = pg.reviews.filter(r => !reviewIds.includes(r.id));
-        const pending_count = groupReviews(reviews).filter(g => groupStatus(g) === "pending").length;
-        return { ...pg, reviews, pending_count };
-      })
-    );
-  }, []);
+    if (!selectedId || !selected) return;
+    const newReviews = selected.reviews.filter(r => !reviewIds.includes((r as unknown as Review).id));
+    const newGroups = groupReviews(newReviews as unknown as Review[]);
+    const pending_count = newGroups.filter(g => groupStatus(g) === "pending").length;
+    const total_count = newGroups.length;
+    const reviewed_count = total_count - pending_count;
+    patchReviewsLocally(selectedId, () => newReviews);
+    patchSummaryCounts(selectedId, { pending_count, total_count, reviewed_count });
+  }, [selectedId, selected]);
 
   async function deleteGroup(g: MealGroup) {
     setDeletingKey(g.key);
@@ -336,12 +351,12 @@ export function FeedbackClient({
   }
 
   const actualParticipants = useMemo(
-    () => participants.filter((p) => isActualParticipant(p.participant_id)),
-    [participants]
+    () => summary.filter((p) => isActualParticipant(p.participant_id)),
+    [summary]
   );
   const testParticipants = useMemo(
-    () => participants.filter((p) => isTestParticipant(p.participant_id)),
-    [participants]
+    () => summary.filter((p) => isTestParticipant(p.participant_id)),
+    [summary]
   );
   const visibleParticipants = isAdmin && cohortFilter === "test" ? testParticipants : actualParticipants;
 
@@ -364,8 +379,10 @@ export function FeedbackClient({
     [visibleParticipants]
   );
 
-  const selected = visibleParticipants.find(g => g.user_id === selectedId);
-  const mealGroups = useMemo(() => groupReviews(selected?.reviews ?? []), [selected]);
+  const mealGroups = useMemo(
+    () => groupReviews((selected?.reviews ?? []) as unknown as Review[]),
+    [selected]
+  );
 
   // Unique dates newest-first (index 0 = most recent)
   const uniqueDates = useMemo(() => {
@@ -543,7 +560,7 @@ export function FeedbackClient({
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
             Failed to load image reviews.
           </div>
-        ) : participants.length === 0 ? (
+        ) : summary.length === 0 ? (
           <div className="flex flex-col items-center justify-center rounded-xl border border-dashed py-24 text-center">
             <p className="text-base font-medium">No meal images yet</p>
             <p className="mt-1 text-sm text-muted-foreground">Images submitted by participants will appear here.</p>
@@ -563,7 +580,11 @@ export function FeedbackClient({
 
             {/* Table panel */}
             <div className="min-w-0 space-y-3">
-              {selected && (
+              {selectedLoading && !selected ? (
+                <div className="flex items-center justify-center rounded-xl border border-dashed py-24">
+                  <p className="text-sm text-muted-foreground">Loading reviews…</p>
+                </div>
+              ) : selected && (
                 <>
                   {/* Participant heading + controls */}
                   <div className="flex items-start justify-between gap-4 flex-wrap">

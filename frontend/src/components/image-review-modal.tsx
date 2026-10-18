@@ -728,7 +728,7 @@ export function ImageReviewModal({
     setReview(u);
     setPickers(initialPickers(u));
     onUpdated(u);
-    invalidateReviews();
+    invalidateReviews(u.user_id);
   }, [onUpdated]);
 
   // Single poll loop covers both the pre- and post-meal AI jobs instead of
@@ -774,7 +774,7 @@ export function ImageReviewModal({
       // Keep the shared reviews list (food-logs-client.tsx, etc.) in sync --
       // without this, any action taken here was invisible to other pages/
       // tabs reading from the same /api/feedback/reviews cache.
-      invalidateReviews();
+      invalidateReviews(data.user_id);
       if (act === "identify" || act === "check_consumption") setPickers(initialPickers(data));
       if (act === "approve" || act === "reject") onClose();
     } catch (e) {
