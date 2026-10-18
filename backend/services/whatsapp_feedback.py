@@ -1090,46 +1090,99 @@ def handle_diet_recall_entry(user_id: str, meal_slot: str, occasion_date: str) -
 _PENDING_FEEDBACK_LOOKBACK_HOURS = 24
 
 
+# Per-occasion "already fully resolved, nothing changed since" cache, keyed
+# by (user_id, meal_slot, date) -> the latest dish's created_at we last saw
+# for it. Module-level so it persists for the life of the reminder-worker
+# process (not per-call) and resets naturally on worker restart.
+#
+# Without this, send_pending_meal_feedback re-ran handle_diet_recall_entry's
+# ENTIRE ~8-query scoring pipeline (RecommendationsBackup, RecipeTagging,
+# Recipe, the Main1_Main2_Mapping Subcategory lookup, and score_logged_
+# occasion for every day in the 14-day lookback) for EVERY occasion in a
+# rolling 24h window, on EVERY poll (every 60-90s) -- even for occasions
+# that were fully resolved minutes or hours ago with no new dish since.
+# Confirmed in production (2026-10-18, ~16:00-17:30 IST) as the dominant
+# cause of a sustained ~1.5hr window of Postgres statement timeouts: the
+# reminder worker's own log showed this exact query sequence repeating
+# every ~60s continuously, all day -- not something specific to that time
+# window, just where it finally tipped Postgres over into visible timeouts.
+#
+# Safe because this only short-circuits the POLLER's redundant re-checks --
+# it does not touch handle_diet_recall_entry itself, so both of its direct,
+# event-triggered callers (services/recall.py's fresh-log and image-review-
+# approval paths) are completely unaffected and always run the full logic,
+# same as before. Only cached once debounce has already elapsed (see the
+# check below) -- an occasion still within its debounce window is never
+# cached, so it's correctly re-checked on the next tick regardless.
+_resolved_occasion_cache: dict[tuple[str, str, str], datetime] = {}
+
+
 def send_pending_meal_feedback() -> int:
     """Poller: finds every (user, meal_slot, date) occasion with a DietRecall
     row created in the last _PENDING_FEEDBACK_LOOKBACK_HOURS and re-invokes
-    handle_diet_recall_entry for each. That function is what actually decides
-    whether the debounce window (_FEEDBACK_DEBOUNCE_MINUTES) has elapsed since
-    the occasion's last dish and whether anything's already been sent for it
-    — this poller doesn't duplicate that logic, it just supplies the "check
-    again" tick that a purely insert-triggered design can't provide on its
-    own (an occasion whose last dish arrived 5 minutes ago has nothing left
-    to trigger it, since no NEW row is inserted while it waits).
+    handle_diet_recall_entry for each one whose latest dish has changed since
+    the last time this poller checked it (see _resolved_occasion_cache).
+    handle_diet_recall_entry is what actually decides whether the debounce
+    window (_FEEDBACK_DEBOUNCE_MINUTES) has elapsed since the occasion's last
+    dish and whether anything's already been sent for it — this poller
+    doesn't duplicate that logic, it just supplies the "check again" tick
+    that a purely insert-triggered design can't provide on its own (an
+    occasion whose last dish arrived 5 minutes ago has nothing left to
+    trigger it, since no NEW row is inserted while it waits).
 
     Meant to be called on a short interval (e.g. every 60-90s) from
     services/reminder_worker.py, which already runs independently of the
     plan-generation queue for exactly this kind of time-sensitive check.
     Returns how many new WH_Messages rows were sent this tick."""
     sb = get_supabase()
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=_PENDING_FEEDBACK_LOOKBACK_HOURS)).isoformat()
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=_PENDING_FEEDBACK_LOOKBACK_HOURS)
     recent_rows = (
         sb.table("DietRecall")
         .select("user_id, meal_slot, Date, created_at")
-        .gte("created_at", cutoff)
+        .gte("created_at", cutoff_dt.isoformat())
         .execute().data
     ) or []
 
-    occasions = {
-        (r["user_id"], r["meal_slot"], _norm_date(r["Date"]))
-        for r in recent_rows
-        if r.get("user_id") and r.get("meal_slot") and r.get("Date")
-    }
+    occasion_latest: dict[tuple[str, str, str], datetime] = {}
+    for r in recent_rows:
+        if not (r.get("user_id") and r.get("meal_slot") and r.get("Date") and r.get("created_at")):
+            continue
+        key = (r["user_id"], r["meal_slot"], _norm_date(r["Date"]))
+        ts = datetime.fromisoformat(str(r["created_at"]).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if key not in occasion_latest or ts > occasion_latest[key]:
+            occasion_latest[key] = ts
 
+    now = datetime.now(timezone.utc)
     sent = 0
-    for user_id, meal_slot, occasion_date in occasions:
+    for key, latest_ts in occasion_latest.items():
+        user_id, meal_slot, occasion_date = key
+        if _resolved_occasion_cache.get(key) == latest_ts:
+            continue  # nothing new since we last fully resolved this occasion
         try:
             ids = handle_diet_recall_entry(user_id, meal_slot, occasion_date)
             sent += len(ids)
+            # Only cache once debounce is guaranteed to have already elapsed
+            # for this exact dish timestamp -- otherwise an occasion still
+            # inside its debounce window (which legitimately returns [] for
+            # a different reason -- "not yet", not "already handled") would
+            # get wrongly skipped on the very next tick, right when the
+            # debounce window actually clears.
+            if now - latest_ts > timedelta(minutes=_FEEDBACK_DEBOUNCE_MINUTES + 1):
+                _resolved_occasion_cache[key] = latest_ts
         except Exception:
             logger.exception(
                 "Pending meal feedback check failed for user_id=%s meal_slot=%s date=%s",
                 user_id, meal_slot, occasion_date,
             )
+
+    # Bound memory: drop cache entries for occasions that have aged out of
+    # the lookback window entirely.
+    stale_keys = _resolved_occasion_cache.keys() - occasion_latest.keys()
+    for key in stale_keys:
+        del _resolved_occasion_cache[key]
+
     return sent
 
 
