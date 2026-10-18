@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from datetime import date as date_type, datetime, timedelta, timezone
 from typing import Optional
@@ -56,6 +57,17 @@ def _check_token(token: str) -> None:
 # and _check_token() already runs before this on every request regardless.
 _SUMMARY_CACHE_TTL = 30.0
 _summary_cache: dict[tuple, tuple[float, dict]] = {}
+_summary_cache_locks: dict[tuple, threading.Lock] = {}
+_summary_cache_locks_guard = threading.Lock()  # protects creating a new per-key lock
+
+
+def _lock_for(key: tuple) -> threading.Lock:
+    with _summary_cache_locks_guard:
+        lock = _summary_cache_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _summary_cache_locks[key] = lock
+        return lock
 
 
 def _cached_summary(key: tuple, compute) -> dict:
@@ -63,9 +75,18 @@ def _cached_summary(key: tuple, compute) -> dict:
     cached = _summary_cache.get(key)
     if cached is not None and now - cached[0] < _SUMMARY_CACHE_TTL:
         return cached[1]
-    result = compute()
-    _summary_cache[key] = (now, result)
-    return result
+
+    with _lock_for(key):
+        # Re-check after acquiring the lock -- another thread may have
+        # already computed and cached this exact key while we were
+        # waiting for it, in which case there's nothing left to do.
+        now = time.monotonic()
+        cached = _summary_cache.get(key)
+        if cached is not None and now - cached[0] < _SUMMARY_CACHE_TTL:
+            return cached[1]
+        result = compute()
+        _summary_cache[key] = (time.monotonic(), result)
+        return result
 
 
 def _weighted_avg_gl(day_gl: dict[str, float], day_energy: dict[str, float]) -> Optional[float]:
