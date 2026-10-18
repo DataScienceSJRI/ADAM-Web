@@ -112,20 +112,6 @@ def _new_client() -> Client:
     return create_client(_SUPABASE_URL, _SUPABASE_KEY)
 
 
-def _close_client(client: Client) -> None:
-    """Best-effort close of each sub-client's underlying HTTP session.
-    Only called on TTL rotation (every few minutes), never on the hot path."""
-    for closer in (
-        lambda: client.postgrest.aclose(),
-        lambda: client.auth.close(),
-        lambda: client.storage.aclose(),
-    ):
-        try:
-            closer()
-        except Exception:
-            pass
-
-
 def get_supabase() -> Client:
     """Shared, process-wide Supabase client using the service-role key.
 
@@ -136,22 +122,20 @@ def get_supabase() -> Client:
     which would leak one user's session into every other concurrent request
     sharing this client. Use get_isolated_supabase() for any flow that signs
     in as an end user -- see routers/auth.py.
+
+    On TTL rotation, the old client is simply dropped, not explicitly
+    closed. 
     """
     global _client, _client_created_at
     now = time.monotonic()
     if _client is not None and (now - _client_created_at) < _CLIENT_TTL_SECONDS:
         return _client
-    stale = None
     with _client_lock:
         now = time.monotonic()
         if _client is None or (now - _client_created_at) >= _CLIENT_TTL_SECONDS:
-            stale = _client
             _client = _new_client()
             _client_created_at = now
-        current = _client
-    if stale is not None:
-        _close_client(stale)
-    return current
+        return _client
 
 
 def get_isolated_supabase() -> Client:
