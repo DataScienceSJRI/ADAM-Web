@@ -8,7 +8,7 @@ import time
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
-from core.supabase import get_supabase
+from core.supabase import get_supabase, fetch_all_rows
 
 logger = logging.getLogger("backend.data_loader")
 
@@ -390,15 +390,54 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     ds["preferences"] = prefs
 
     # Fetch Rec_ADAM_yes_no and subset recipes/recipe_tag to only "ADAM_Recipes"
+    # PLUS anything this user has ever actually logged in DietRecall -- a
+    # diet-recall-flagged recipe should always be a real candidate the model
+    # can choose, even when it isn't in the curated ADAM-eligible set.
+    # Confirmed for real on A003_ANISH: USDA008914 ("Egg bread") is his
+    # single most-logged breakfast item (12x) and has full nutrient data in
+    # the Recipe table, but ADAM_Recipes=0/absent for it -- the ADAM-only
+    # filter silently excluded it from ever being choosable, no matter how
+    # strongly diet recall favored it. The diet-type (veg/non-veg/egg)
+    # filter further below is untouched -- this only widens the ADAM-only
+    # gate, not the user's own declared dietary restriction.
+    # dietrecall_logged_pairs: exact (meal_time, code) pairs this user has
+    # actually logged -- ground truth for which meal_time a food is real for
+    # THIS user, independent of RecipeTagging's generic Breakfast/Lunch/
+    # Dinner/Snack applicability flags. Used by _inject_liked_recipes to
+    # place a diet-recall-sourced recipe at the meal_time it was really
+    # eaten at, rather than whatever meal_times the tagging file happens to
+    # allow for it in general.
+    recall_codes: set = set()
+    dietrecall_logged_pairs: set = set()
+    try:
+        recall_rows = fetch_all_rows(lambda: (
+            get_supabase().table("DietRecall").select("meal_slot,Food_Name_desc").eq("user_id", user_id)
+        ))
+        for r in recall_rows:
+            if not r.get("Food_Name_desc"):
+                continue
+            code = str(r["Food_Name_desc"]).strip().upper()
+            recall_codes.add(code)
+            mt = str(r.get("meal_slot") or "").strip().title()
+            if mt:
+                dietrecall_logged_pairs.add((mt, code))
+    except Exception:
+        logger.exception(
+            "Could not fetch DietRecall codes for user_id=%s -- ADAM-only filtering left unchanged",
+            user_id,
+        )
+    ds["dietrecall_logged_pairs"] = dietrecall_logged_pairs
+
     user_df = static.get("Rec_ADAM_yes_no", pd.DataFrame())
     ds["Rec_ADAM_yes_no"] = user_df
     if not user_df.empty and "ADAM_Recipes" in user_df.columns:
-        # it can be "0" or int(0)    
+        # it can be "0" or int(0)
         user_df = user_df[(user_df["ADAM_Recipes"] == "1") | (user_df["ADAM_Recipes"] == 1)].copy()
         if not user_df.empty:
             code_col = next((c for c in ["Recipe_Code"] if c in user_df.columns), None)
             if code_col:
                 user_codes = set(user_df[code_col].astype(str).str.strip().str.upper())
+                user_codes |= recall_codes
                 if user_codes:
                     # subset recipes
                     if "Recipe_Code" in ds.get("recipes", pd.DataFrame()).columns:
@@ -607,6 +646,7 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
         # eligibility-filtered) keeps only codes usable as recipe candidates,
         # regardless of prefix.
         dietrecall_logged = _fetch("DietRecall", {"user_id": user_id})
+        dietrecall_standalone_companions: dict = {}
         if not dietrecall_logged.empty and "Food_Name_desc" in dietrecall_logged.columns:
             logged_codes = set(
                 dietrecall_logged["Food_Name_desc"].dropna().astype(str).str.strip().str.upper().unique()
@@ -616,6 +656,49 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
                 ds["recipes"]["Recipe_Code"].dropna().astype(str).str.strip().str.upper().unique()
             )
             liked_codes.update(logged_codes & known_recipe_codes)
+
+            # Real same-sitting companions for EVERY logged code, with no
+            # minimum count -- unlike compute_adaptive_main_combinations
+            # (which only registers a pairing at >= ADAPTIVE_COMBINATION_
+            # MIN_COUNT, 2 occurrences). Needed specifically for a code
+            # that only cleared the plain "ever logged" bar above and gets
+            # injected as a brand-new STANDALONE Main slot (no existing
+            # combo wants its subcategory) -- without this, that one-off
+            # Main would be injected completely alone, free to win on raw
+            # GL-cheapness with nothing to anchor it to what was actually
+            # eaten alongside it. Confirmed necessary for real on
+            # A001_MAHENDRA: "Chicken fry" (A001002) was logged exactly
+            # once at Dinner -- one occurrence, nowhere near the combo
+            # threshold -- yet still became a standalone Main candidate and
+            # won outright on GL alone, with no companion at all.
+            if "meal_slot" in dietrecall_logged.columns and "Date" in dietrecall_logged.columns:
+                sittings: dict = {}
+                for _, row in dietrecall_logged.iterrows():
+                    code = str(row.get("Food_Name_desc") or "").strip().upper()
+                    if not code:
+                        continue
+                    mt = str(row.get("meal_slot") or "").strip().title()
+                    date = row.get("Date")
+                    if not mt or date is None:
+                        continue
+                    sittings.setdefault((date, mt), set()).add(code)
+
+                recipe_tag_for_companions = ds.get("recipe_tag", pd.DataFrame())
+                code_to_subcat_map = {}
+                if not recipe_tag_for_companions.empty and "Recipe_Code" in recipe_tag_for_companions.columns:
+                    code_to_subcat_map = dict(zip(
+                        recipe_tag_for_companions["Recipe_Code"].astype(str).str.strip().str.upper(),
+                        recipe_tag_for_companions.get("Subcategories", pd.Series(dtype=str)).astype(str).str.strip().str.upper(),
+                    ))
+                for (date, mt), codes_here in sittings.items():
+                    for main_code in codes_here:
+                        for companion_code in codes_here - {main_code}:
+                            companion_subcat = code_to_subcat_map.get(companion_code)
+                            if not companion_subcat:
+                                continue
+                            key = (mt, main_code)
+                            dietrecall_standalone_companions.setdefault(key, set()).add(companion_subcat)
+        ds["dietrecall_standalone_companions"] = dietrecall_standalone_companions
 
         # Millet-based recipes are always treated as liked for every user
         # (not tied to any actual reaction), so _inject_liked_recipes gives
@@ -647,6 +730,9 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
     try:
         from services.adaptive_preferences import (
             compute_dietrecall_dominant_preferences,
+            compute_dietrecall_staple_preferences,
+            compute_dietrecall_subcategory_bonus,
+            compute_dietrecall_diettag_floor,
             compute_adaptive_main_combinations,
         )
 
@@ -682,16 +768,95 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
         ds["liked_recipe_codes"] = liked_codes
         ds["dietrecall_dominant_bonus"] = dietrecall_dominant_bonus
 
+        # Soft-only counterpart to the dominant bonus above -- a much lower
+        # bar (see compute_dietrecall_staple_preferences), no candidate-pool
+        # widening and no cap-relaxation, just a smaller discount so the
+        # objective leans toward a person's real staples without ever
+        # forcing them.
+        staple_rows = compute_dietrecall_staple_preferences(user_id)
+        dietrecall_staple_bonus: dict = {}
+        for row in staple_rows:
+            key = (row["meal_time"], row["recipe_code"])
+            dietrecall_staple_bonus[key] = dietrecall_staple_bonus.get(key, 0.0) + float(row["count"])
+        ds["dietrecall_staple_bonus"] = dietrecall_staple_bonus
+
+        # Category-wide counterpart to the exact-recipe bonuses above --
+        # nudges toward a frequently-eaten SUBCATEGORY as a whole (see
+        # compute_dietrecall_subcategory_bonus), not one specific dish.
+        subcat_rows = compute_dietrecall_subcategory_bonus(user_id)
+        dietrecall_subcat_bonus: dict = {}
+        dietrecall_subcat_floor_proportion: dict = {}
+        for row in subcat_rows:
+            # Keyed by (meal_time, subcategory, diet_tag) -- not just
+            # (meal_time, subcategory) -- so a mixed subcategory (some egg
+            # items, some plain-veg items both logged) targets the SAME
+            # egg-or-not profile he actually eats, not the subcategory as a
+            # whole. See compute_dietrecall_subcategory_bonus's docstring.
+            key = (row["meal_time"], row["sub_category_code"], row.get("diet_tag", "other"))
+            dietrecall_subcat_bonus[key] = dietrecall_subcat_bonus.get(key, 0.0) + float(row["count"])
+            # Share of that meal_time's total logged entries this exact
+            # (subcategory, diet_tag) pair accounts for -- drives a
+            # proportional, mandated day-count floor in lp_optimizer.py
+            # (e.g. "9 of his 99 logged breakfasts were egg-G1C" -> roughly
+            # that same share of the new week's breakfasts), same idea as
+            # dietrecall_diettag_floor below but scoped to one subcategory
+            # rather than the whole meal_time's egg/veg/non-veg split.
+            dietrecall_subcat_floor_proportion[key] = float(row.get("proportion", 0.0))
+            # Unlike the exact-recipe staple bonus, this IS widened to the
+            # subcategory's full ADAM-catalog sibling set -- confirmed for
+            # real on A003_ANISH that a flagged subcategory (I1F, "Egg and
+            # omelettes") can have zero candidates at all if it was never a
+            # declared preference, leaving the bonus nothing to act on (5
+            # eligible recipes existed in the catalog the whole time, just
+            # never surfaced as candidates).
+            subcat = row.get("sub_category_code")
+            if subcat and not recipe_tag_df.empty and "Subcategories" in recipe_tag_df.columns:
+                sibling_codes = recipe_tag_df.loc[
+                    recipe_tag_df["Subcategories"].astype(str).str.strip().str.upper() == subcat,
+                    "Recipe_Code",
+                ]
+                liked_codes.update(sibling_codes.dropna().astype(str).str.strip().str.upper().unique())
+        ds["liked_recipe_codes"] = liked_codes
+        ds["dietrecall_subcat_bonus"] = dietrecall_subcat_bonus
+        ds["dietrecall_subcat_floor_proportion"] = dietrecall_subcat_floor_proportion
+
+        # Meal_time-wide diet-tag composition target (e.g. "half his logged
+        # breakfasts are egg-based, across any subcategory") -- a different
+        # signal from the subcategory-specific bonus above, driving a
+        # separate day-count floor in lp_optimizer.py keyed by (meal_time,
+        # diet_tag) alone, not tied to one subcategory.
+        diettag_rows = compute_dietrecall_diettag_floor(user_id)
+        dietrecall_diettag_floor: dict = {}
+        for row in diettag_rows:
+            key = (row["meal_time"], row["diet_tag"])
+            dietrecall_diettag_floor[key] = row["proportion"]
+        ds["dietrecall_diettag_floor"] = dietrecall_diettag_floor
+
         combo_rows = compute_adaptive_main_combinations(user_id)
         dietrecall_combo_bonus: dict = {}
+        dietrecall_combo_pairs: dict = {}
         for row in combo_rows:
             key = (row["meal_time"], row["companion_subcategory_code"])
             dietrecall_combo_bonus[key] = dietrecall_combo_bonus.get(key, 0.0) + float(row["co_occurrence_count"])
+            # Keeps the main_subcategory_code dimension the bonus above
+            # drops -- "bread toast + boiled egg together" is a real,
+            # specific pairing (confirmed for real on A003_ANISH: logged
+            # together 5x), but the flat bonus above pushes the egg
+            # companion at Breakfast regardless of which Main actually got
+            # picked, so a non-egg Main day paid no real cost for skipping
+            # the pairing. This drives a genuine same-day conditional
+            # constraint in lp_optimizer.py instead: Main subcat chosen on
+            # day d -> companion subcat required that same day.
+            pair_key = (row["meal_time"], row["main_subcategory_code"], row["companion_subcategory_code"])
+            dietrecall_combo_pairs[pair_key] = dietrecall_combo_pairs.get(pair_key, 0.0) + float(row["co_occurrence_count"])
         ds["dietrecall_combo_bonus"] = dietrecall_combo_bonus
+        ds["dietrecall_combo_pairs"] = dietrecall_combo_pairs
     except Exception:
         logger.exception("Diet-recall weighting signals failed for user_id=%s — skipping extra bonus", user_id)
         ds["dietrecall_dominant_bonus"] = {}
+        ds["dietrecall_staple_bonus"] = {}
         ds["dietrecall_combo_bonus"] = {}
+        ds["dietrecall_combo_pairs"] = {}
 
     # Only computed when it can actually matter: non-veg diet with more than
     # one selected meat type. Feeds services/lp_optimizer.py's non-veg-type

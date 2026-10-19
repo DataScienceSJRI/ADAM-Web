@@ -36,7 +36,7 @@ def run_lp(
     non_snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     snack_serving_bounds: Tuple[float, float] = (0.5, 1.0),
     time_limit_sec: int = 600,
-    per_meal_gl_cap: int = 30,
+    per_meal_gl_cap: int = 35,
     per_day_gl_cap: int = 90,
     per_recipe_max_gl: int = 20,
     liked_recipe_bonus: float = 2000.0,
@@ -83,9 +83,10 @@ def run_lp(
         "Protein_PROTCNT_g", "TotalFat_FATCE_g", "TotalDietaryFibre_FIBTG_g", "CalciumCa_CA_mg", "ZincZn_ZN_mg",
         "IronFe_FE_mg", "MagnesiumMg_MG_mg", "VA_RAE_mcg", "TotalFolatesB9_FOLSUM_mcg", "VB12_mcg",
         "ThiamineB1_THIA_mg", "RiboflavinB2_RIBF_mg", "NiacinB3_NIA_mg", "TotalB6A_VITB6A_mg", "TotalAscorbicAcid_VITC_mg",
-        "Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg","PotassiumK_mg","Cholesterol_mg"
+        "Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg","PotassiumK_mg","Cholesterol_mg",
+        "Relevance_Order",
     ]
-    
+
     keep_cols = [col for col in required_cols if col in candidates.columns]
     candidates = candidates[keep_cols].copy()
     candidates = candidates.drop_duplicates().reset_index(drop=True)
@@ -107,6 +108,26 @@ def run_lp(
     else:
         candidates["Category_Key"] = ""
     candidates["Category_Key"] = candidates["Category_Key"].replace({"": np.nan})
+
+    # Diet tag ("egg" / "veg" / "non-veg") per candidate, same classification
+    # used on the DietRecall side (services/adaptive_preferences.py) so a
+    # subcategory-level bonus/floor can target "the same egg-or-not profile
+    # he actually eats", not the whole subcategory regardless of composition.
+    # Ovo-vegetarian==1 takes priority over Vegetarian -- several egg dishes
+    # in this catalog are tagged BOTH Non-vegetarian=1 and Ovo-vegetarian=1
+    # at once, and "contains egg" is the more specific, useful signal here.
+    _veg = candidates.get("Vegetarian")
+    _ovo = candidates.get("Ovo-vegetarian")
+    if _veg is not None and _ovo is not None:
+        _veg_num = pd.to_numeric(_veg, errors="coerce")
+        _ovo_num = pd.to_numeric(_ovo, errors="coerce")
+        candidates["Diet_Tag"] = np.select(
+            [_ovo_num == 1, _veg_num == 1],
+            ["egg", "veg"],
+            default="non-veg",
+        )
+    else:
+        candidates["Diet_Tag"] = "other"
 
     nutrient_cols = [
         "Energy_ENERC_Kcal", "Protein_PROTCNT_g", "TotalFat_FATCE_g", "TotalDietaryFibre_FIBTG_g",
@@ -168,12 +189,27 @@ def run_lp(
             candidates[f"{col}_z"] = (candidates[col] - mean_val) / std_val
 
     _write_debug_csv(candidates, "candidates_pre_objective.csv")
-    
-    candidates["Weighted_Objective_Score"] = (
-        500 * candidates["GL"]
-        + 0.3 * candidates["Avg_TimeAbove160_pct_z"]
-        + 0.2 * candidates["Avg_Delta_Glucose_z"]
-    )
+
+    # GL_WEIGHT_PER_UNIT was 500 -- reduced per explicit request: real GL
+    # safety is already enforced separately by hard per-meal/per-day GL caps
+    # and TUL limits below, so this coefficient was only ever about
+    # preferring a slightly-lower-GL option among already-safe candidates.
+    # At 500/unit it so overwhelmingly dominated the objective that every
+    # preference/diet-recall bonus in this file had to be sized in the
+    # thousands just to flip a few GL units' worth of difference -- e.g.
+    # liked_recipe_bonus=2000 only overcomes ~4 GL units at this rate.
+    # Dropping to 100 makes every existing bonus proportionally ~5x more
+    # influential without needing to re-tune each one individually.
+    #
+    # The Avg_TimeAbove160_pct_z/Avg_Delta_Glucose_z terms are dropped
+    # entirely, per explicit request -- GL alone is the objective now (plus
+    # whatever bonuses get subtracted below). Those two were a secondary,
+    # much smaller signal (0.3/0.2 against GL's weight) riding alongside GL
+    # without changing much on their own; removing them simplifies the
+    # objective to exactly one clinical signal plus preference/diet-recall
+    # bonuses, with nothing else competing for influence.
+    GL_WEIGHT_PER_UNIT = 100
+    candidates["Weighted_Objective_Score"] = GL_WEIGHT_PER_UNIT * candidates["GL"]
 
     # Give the user's explicitly-liked recipes (ds["liked_recipe_codes"], set by
     # services/data_loader.py) a discount on their objective score, so the LP
@@ -222,6 +258,36 @@ def run_lp(
                 bonus = DIETRECALL_DOMINANT_BONUS_BASE * (excess ** 2)
                 candidates.loc[mask, "Weighted_Objective_Score"] -= bonus
 
+    # Diet-recall STAPLE bonus (ds["dietrecall_staple_bonus"], computed by
+    # services.adaptive_preferences.compute_dietrecall_staple_preferences):
+    # the soft-only counterpart to the dominant bonus above, for an item
+    # logged often (>3 times in the 42-day window) but not overwhelmingly so
+    # (<=10, the dominant threshold -- the two bonuses are mutually exclusive
+    # by construction, see that function). Confirmed for real on
+    # A009_PRAKASH: ~88% of his logged GL came from dishes outside that
+    # day's plan entirely (rice, curd, sambhar, a usual side), none of which
+    # individually crossed the dominant threshold, so the plan's predicted
+    # GL never reflected what he actually eats. Deliberately a MUCH smaller
+    # bonus scale than the dominant one (10 vs 180 base) and, critically, no
+    # hard day-floor and no variety-cap relaxation at all -- just a discount
+    # on the objective, so it can never make a week Infeasible the way a
+    # hard floor can, and is safe to apply across every user without the
+    # A006/A008-style multi-item day-budget conflict.
+    DIETRECALL_STAPLE_BONUS_BASE = 10.0
+    DIETRECALL_STAPLE_BONUS_FLOOR_COUNT = 3  # matches DIETRECALL_STAPLE_MIN_COUNT -- bonus starts near 0 right above it
+    DIETRECALL_STAPLE_BONUS_MAX_COUNT = 10  # matches DIETRECALL_DOMINANT_MIN_COUNT -- the dominant bonus takes over past this
+    staple_bonus = ds.get("dietrecall_staple_bonus") or {}
+    if staple_bonus:
+        meal_time_title = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        recipe_code_upper = candidates["Recipe_Code"].astype(str).str.strip().str.upper()
+        for (mt, recipe_code), weight in staple_bonus.items():
+            mask = (meal_time_title == mt) & (recipe_code_upper == recipe_code)
+            if mask.any():
+                capped = min(float(weight), DIETRECALL_STAPLE_BONUS_MAX_COUNT)
+                excess = max(0.0, capped - DIETRECALL_STAPLE_BONUS_FLOOR_COUNT)
+                bonus = DIETRECALL_STAPLE_BONUS_BASE * (excess ** 2)
+                candidates.loc[mask, "Weighted_Objective_Score"] -= bonus
+
     # Diet-recall companion pairings (compute_adaptive_main_combinations,
     # sourced from the same DietRecall history): a companion recipe he
     # actually eats alongside a given Main, at the meal_slot it was
@@ -245,6 +311,65 @@ def run_lp(
                 excess = max(0.0, capped - DIETRECALL_COMBO_BONUS_FLOOR_COUNT)
                 bonus = DIETRECALL_COMBO_BONUS_BASE * (excess ** 2)
                 candidates.loc[mask, "Weighted_Objective_Score"] -= bonus
+
+    # Diet-recall SUBCATEGORY bonus (ds["dietrecall_subcat_bonus"], from
+    # services.adaptive_preferences.compute_dietrecall_subcategory_bonus):
+    # applies to EVERY candidate sharing a frequently-eaten (meal_time,
+    # subcategory), not just one exact recipe -- "nudge toward this food
+    # category more often", separate from the exact-recipe dominant/staple
+    # bonuses above. Confirmed for real on A003_ANISH that exact-recipe
+    # matching alone misses most of the real picture: his diet-recall-to-
+    # plan overlap was only ~9-12% at the exact-recipe level but ~45-50% at
+    # the subcategory level -- the model already lands on the right food
+    # category roughly half the time, it just usually picks a different
+    # specific (GL-cheaper) dish within it. Raised to 250 (was 30, matching
+    # the combo bonus's scale) per explicit request, now that
+    # GL_WEIGHT_PER_UNIT is 100 rather than 500 above -- at the old 30/500
+    # pairing this bonus could barely clear the inclusion FLOOR (see the
+    # soft-forced-inclusion block below) and never won an extra day beyond
+    # it; at 250/100 it's genuinely competitive with GL unit-for-unit, able
+    # to win additional days on its own merit, not just satisfy the bare
+    # minimum. Still soft only, no hard floor of its own, no cap relaxation
+    # here -- can't cause Infeasible the way a hard requirement could.
+    DIETRECALL_SUBCAT_BONUS_BASE = 250.0
+    DIETRECALL_SUBCAT_BONUS_FLOOR_COUNT = 1  # one below DIETRECALL_SUBCAT_MIN_COUNT (2)
+    DIETRECALL_SUBCAT_BONUS_MAX_COUNT = 20
+    subcat_bonus = ds.get("dietrecall_subcat_bonus") or {}
+    if subcat_bonus:
+        meal_time_title = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        diet_tag_lower = candidates["Diet_Tag"].astype(str).str.strip().str.lower()
+        for (mt, subcat, diet_tag), weight in subcat_bonus.items():
+            mask = (meal_time_title == mt) & (category_upper == subcat) & (diet_tag_lower == str(diet_tag).lower())
+            if mask.any():
+                capped = min(float(weight), DIETRECALL_SUBCAT_BONUS_MAX_COUNT)
+                excess = max(0.0, capped - DIETRECALL_SUBCAT_BONUS_FLOOR_COUNT)
+                bonus = DIETRECALL_SUBCAT_BONUS_BASE * (excess ** 2)
+                candidates.loc[mask, "Weighted_Objective_Score"] -= bonus
+
+    # Curated "recipe order" (Relevance_Order, Functions_Base.py's merge of
+    # the Recipe_order sheet; lower = more commonly/relevantly used): within
+    # any (Meal_Time, Dish_Type) slot where at least one candidate actually
+    # carries a curated rank -- i.e. there's a real order-informed choice on
+    # the table, not just an unranked field -- picking anything ranked
+    # outside the top 5 (or carrying no rank at all) costs a flat penalty.
+    # A slot with zero curated ranks anywhere in it is left completely
+    # alone, so this never penalizes a choice that was never order-informed
+    # to begin with. Full weight on its own, not blended with GL/personali-
+    # zation the way _cap_top_n_by_blended_relevance's pre-filter is.
+    RECIPE_ORDER_TOP_N = 5
+    RECIPE_ORDER_PENALTY = 1000.0
+    if "Relevance_Order" in candidates.columns:
+        candidates["_relevance_order_numeric"] = pd.to_numeric(candidates["Relevance_Order"], errors="coerce")
+        slot_has_order = candidates.groupby(["Meal_Time", "Dish_Type"])["_relevance_order_numeric"].transform(
+            lambda s: bool(s.notna().any())
+        )
+        outside_top_n = slot_has_order & (
+            candidates["_relevance_order_numeric"].isna()
+            | (candidates["_relevance_order_numeric"] > RECIPE_ORDER_TOP_N)
+        )
+        candidates.loc[outside_top_n, "Weighted_Objective_Score"] += RECIPE_ORDER_PENALTY
+        candidates.drop(columns=["_relevance_order_numeric"], inplace=True)
 
     objective_metric_col = "Weighted_Objective_Score"
 
@@ -461,15 +586,28 @@ def run_lp(
             mt = str(candidates.loc[i, "Meal_Time"]).strip()
             dt = str(candidates.loc[i, "Dish_Type"]).strip().lower()
             if mt.lower() == "breakfast":
-                if dt.lower() == "main 3":
-                    model += y[(d, int(i))] == 0
+                # "Main 3" at Breakfast/Dinner used to be hard-excluded here
+                # (y == 0) outright, on the assumption there's no genuine
+                # "third main course" concept at either meal -- but Main 3
+                # isn't only reached via a deliberate 3rd-course preference:
+                # Functions_Base.py's Side->Main 3 remap (Lunch-only now,
+                # see that file) and the Main-companion/combo expansion can
+                # BOTH land a legitimately frequently-eaten item here (e.g.
+                # egg) with no other route into the candidate pool at all.
+                # Confirmed for real on A001_MAHENDRA: his diet-recall-
+                # flagged Breakfast egg candidates (I1F, count=9, well above
+                # the inclusion-floor threshold) were ALL tagged Main 3 and
+                # so were being silently killed regardless of bonus/floor
+                # size. required_slots already treats Main 3 as optional
+                # (<=1, not mandatory) at the top of this function, so
+                # dropping the extra hard exclusion here just lets it fall
+                # through to that same safe, non-mandatory treatment instead
+                # of being forced to zero.
                 if dt.lower() == "optional":
                     model += y[(d, int(i))] <= 1
-            elif mt.lower() == "lunch": 
+            elif mt.lower() == "lunch":
                 pass
             elif mt.lower() == "dinner":
-                if dt.lower() == "main 3":
-                    model += y[(d, int(i))] == 0
                 if dt.lower() == "optional":
                     model += y[(d, int(i))] <= 1
 
@@ -594,16 +732,22 @@ def run_lp(
     # _user_per_day_gl_cap_override are the same mechanism under distinct
     # names outside TAPER_OVERRIDE_KEYS, so a per-user override (e.g. A002's
     # hard-mandate accommodation) isn't silently stripped mid-retry.
+    # Capped on the MEAL as a whole (every Dish_Type sharing that Meal_Time
+    # on that day, summed together) -- not per (Meal_Time, Dish_Type) slot
+    # individually. A per-slot-only cap let Main+Main 2+Main 3+Optional each
+    # separately stay under the cap while their sum (what the day actually
+    # serves at that meal) ran well past it -- e.g. a 30-cap gave Lunch
+    # totals in the mid-40s since 3-4 slots each got their own headroom.
     effective_per_meal_gl_cap = (
         (profile or {}).get("_user_per_meal_gl_cap_override")
         or (profile or {}).get("_per_meal_gl_cap_override", per_meal_gl_cap)
     )
     per_meal_gl_cap_by_slot = (profile or {}).get("_per_meal_gl_cap_by_slot") or {}
+    meal_time_to_ids: Dict[str, List[int]] = {}
+    for slot_mt, slot_dt in slot_to_ids:
+        meal_time_to_ids.setdefault(slot_mt, []).extend(slot_to_ids[(slot_mt, slot_dt)])
     for d in days:
-        for _, slot_row in required_slots.iterrows():
-            meal_time = str(slot_row["Meal_Time"])
-            slot = (meal_time, str(slot_row["Dish_Type"]))
-            ids = slot_to_ids.get(slot, [])
+        for meal_time, ids in meal_time_to_ids.items():
             if not ids:
                 continue
             pmeal = per_meal_gl_cap_by_slot.get(meal_time, effective_per_meal_gl_cap)
@@ -793,6 +937,52 @@ def run_lp(
             allocated_days_by_slot[mt] = used + min_days
             model += lpSum(y[(d, i)] for d in days for i in ids_for_pair) >= min_days
 
+    # The STAPLE bonus (ds["dietrecall_staple_bonus"], a much lower bar than
+    # the dominant one above -- see compute_dietrecall_staple_preferences)
+    # gets the SAME repetition-cap/global-cap relaxation as a dominant item,
+    # just never the hard >= min_days floor: a real staple (rice, curd, a
+    # usual side) that's only logged 4-10 times shouldn't be FORCED onto the
+    # plate, but the ordinary variety cap (as low as 1 use/week when the slot
+    # has plenty of candidates) was capping it far below what the staple
+    # bonus could otherwise earn it even when GL/nutrition would happily
+    # allow more -- confirmed for real on A009_PRAKASH, whose staple items
+    # only reached the plan 2x out of a possible week's worth of slots
+    # despite the bonus actively favoring them every day. Raising a <=
+    # ceiling can never cause Infeasible (only a >= floor can), so this is
+    # safe to apply broadly the same way the capacity-guarantee fix above is.
+    staple_bonus_keys = ds.get("dietrecall_staple_bonus") or {}
+    staple_slot_ids: dict[str, set] = {}
+    if staple_bonus_keys:
+        meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        recipe_code_upper_all = candidates["Recipe_Code"].astype(str).str.strip().str.upper()
+        for (mt, recipe_code) in staple_bonus_keys.keys():
+            stp_mask = (meal_time_title_all == mt) & (recipe_code_upper_all == recipe_code)
+            if stp_mask.any():
+                ids_for_pair = [int(i) for i in candidates.index[stp_mask]]
+                staple_slot_ids.setdefault(mt, set()).update(ids_for_pair)
+
+    # Same cap relaxation again, this time for the SUBCATEGORY bonus
+    # (ds["dietrecall_subcat_bonus"]) -- every candidate sharing a
+    # frequently-eaten (meal_time, subcategory), not one exact recipe. Per
+    # explicit request: a clear category pattern (e.g. A003_ANISH's
+    # breakfast being egg+bread on most logged days) should be free to
+    # repeat across the week the same way an exact-recipe staple/dominant
+    # match already is -- the ordinary variety cap would otherwise still
+    # force high turnover within that category even though the bonus is
+    # actively pulling the objective toward it every day. Same safety
+    # argument as above: raising a <= ceiling can't cause Infeasible.
+    subcat_bonus_keys = ds.get("dietrecall_subcat_bonus") or {}
+    subcat_slot_ids: dict[str, set] = {}
+    if subcat_bonus_keys:
+        meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper_all = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        diet_tag_lower_all = candidates["Diet_Tag"].astype(str).str.strip().str.lower()
+        for (mt, subcat, diet_tag) in subcat_bonus_keys.keys():
+            sc_mask = (meal_time_title_all == mt) & (category_upper_all == subcat) & (diet_tag_lower_all == str(diet_tag).lower())
+            if sc_mask.any():
+                ids_for_subcat = [int(i) for i in candidates.index[sc_mask]]
+                subcat_slot_ids.setdefault(mt, set()).update(ids_for_subcat)
+
     # 1) Recipe Repetition: Combined Soft Penalty + Dynamic Hard Ceiling
     for (meal_time, dish_type, recipe_code), group_df in candidates.groupby(["Meal_Time", "Dish_Type", "Recipe_Code"], dropna=False):
         ids = [int(i) for i in group_df.index.tolist()]
@@ -802,9 +992,12 @@ def run_lp(
             continue  # boiled egg exempted from repetition ceilings for this user
 
         is_dominant_recall_slot = bool(set(ids) & dominant_slot_ids.get(meal_time, set()))
+        is_staple_recall_slot = bool(set(ids) & staple_slot_ids.get(meal_time, set()))
+        is_subcat_recall_slot = bool(set(ids) & subcat_slot_ids.get(meal_time, set()))
+        is_recall_relaxed_slot = is_dominant_recall_slot or is_staple_recall_slot or is_subcat_recall_slot
 
         # --- LAYER A: Dynamic Hard Guardrail ---
-        if is_dominant_recall_slot:
+        if is_recall_relaxed_slot:
             # Relaxed: let the quadratic diet-recall bonus (and the ordinary
             # exactly-1-per-day / other-slot competition) decide how often
             # this repeats, instead of an artificial per-recipe ceiling.
@@ -840,9 +1033,10 @@ def run_lp(
 
         # --- LAYER B: Soft Repetition Penalty ---
         # Only create penalty variables if the recipe has enough data entries
-        # to actually repeat -- skipped for a dominant-recall slot, since a
-        # penalty here would fight the bonus we're deliberately applying.
-        if len(ids) > 1 and not is_dominant_recall_slot:
+        # to actually repeat -- skipped for a dominant/staple-recall slot,
+        # since a penalty here would fight the bonus we're deliberately
+        # applying.
+        if len(ids) > 1 and not is_recall_relaxed_slot:
             safe_mt = str(meal_time).replace(" ", "_").replace("-", "_")
             safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
             safe_rc = str(recipe_code).replace(" ", "_").replace("-", "_")
@@ -857,17 +1051,25 @@ def run_lp(
     main_df = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"].copy()
     main_subcats = main_df["Preferred_SubCategory_code"].dropna().nunique()
     global_recipe_cap = 2 if main_subcats <= 5 else 1
-    all_dominant_recall_ids = set().union(*dominant_slot_ids.values()) if dominant_slot_ids else set()
+    # Union of the hard-floor dominant ids and both soft-only sets (staple,
+    # subcategory) -- the global cap relaxation below is just a <= ceiling
+    # raise, same as Layer A's, so it's equally safe to extend to all three
+    # (never a floor, can't cause Infeasible).
+    _all_relaxed_sources = [dominant_slot_ids, staple_slot_ids, subcat_slot_ids]
+    all_dominant_recall_ids = (
+        set().union(*[s for d in _all_relaxed_sources for s in d.values()])
+        if any(_all_relaxed_sources) else set()
+    )
     for recipe_code, recipe_df in candidates.groupby("Recipe_Code", dropna=False):
         non_snack_ids = [int(i) for i in recipe_df.index.tolist()
                          if str(candidates.loc[i, "Dish_Type"]).strip().lower() != "snacks"]
         if boiled_egg_ids and set(non_snack_ids) <= boiled_egg_ids:
             continue  # boiled egg exempted from the global cap for this user
-        # Split off ids that belong to a dominant-recall (meal_time,
+        # Split off ids that belong to a dominant/staple-recall (meal_time,
         # subcategory) slot -- those get their own relaxed cap (matching
         # Layer A above) instead of the normal global one; the SAME recipe
-        # code used at a different, non-dominant meal_time still falls
-        # under the ordinary global_recipe_cap below.
+        # code used at a different, non-recall meal_time still falls under
+        # the ordinary global_recipe_cap below.
         dominant_ids_here = [i for i in non_snack_ids if i in all_dominant_recall_ids]
         remaining_ids = [i for i in non_snack_ids if i not in all_dominant_recall_ids]
         if remaining_ids:
@@ -1111,6 +1313,311 @@ def run_lp(
             millet_penalty_weight = 1_000_000.0
             millet_penalty_terms.append(millet_penalty_weight * millet_shortfall)
 
+    # Diet-recall SUBCATEGORY MANDATED inclusion -- per explicit request,
+    # upgraded from a soft/penalized floor to a genuine hard constraint:
+    # if a (meal_time, subcategory, diet_tag) pattern makes up X% of a
+    # user's logged history there, the new week MUST serve something
+    # matching it on round(X% * n_days) days, no shortfall escape valve.
+    # Confirmed necessary for real on A003_ANISH: even a large objective
+    # discount never once got a companion pairing selected, because an
+    # Optional/companion slot has no inherent floor at all -- "include
+    # nothing extra" was always a valid, cheaper choice. This CAN make a
+    # week genuinely Infeasible if the mandated counts conflict with each
+    # other or with GL/nutrient/macro constraints -- that's the explicit
+    # tradeoff of "mandate" over "soft nudge," and routers/plan.py's
+    # taper-relaxation/backup-retry fallback does not currently know how
+    # to drop this specific constraint on retry.
+    subcat_penalty_terms = []
+    subcat_bonus_for_floor = ds.get("dietrecall_subcat_bonus") or {}
+    subcat_floor_proportion = ds.get("dietrecall_subcat_floor_proportion") or {}
+    if subcat_bonus_for_floor:
+        meal_time_title_for_floor = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper_for_floor = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        diet_tag_lower_for_floor = candidates["Diet_Tag"].astype(str).str.strip().str.lower()
+        for (mt, subcat, diet_tag), weight in subcat_bonus_for_floor.items():
+            floor_mask = (
+                (meal_time_title_for_floor == mt)
+                & (category_upper_for_floor == subcat)
+                & (diet_tag_lower_for_floor == str(diet_tag).lower())
+            )
+            floor_ids = [int(i) for i in candidates.index[floor_mask]]
+            if not floor_ids:
+                continue
+            proportion = subcat_floor_proportion.get((mt, subcat, diet_tag))
+            if proportion:
+                required_subcat_count = min(round(proportion * n_days), len(floor_ids), n_days)
+            else:
+                required_subcat_count = min(2 if float(weight) >= 8 else 1, len(floor_ids), n_days)
+            # One day of slack off the raw proportional/flat count -- the
+            # hard-mandated version of this (no slack at all) reproducibly
+            # stalled CBC at the same point across repeated runs for
+            # A003_ANISH, not random variance; this is cheaper than
+            # reverting to a fully soft/penalized floor while still keeping
+            # it a genuine mandate, not a free-to-ignore nudge.
+            required_subcat_count -= 1
+            if required_subcat_count <= 0:
+                continue
+            model += lpSum(y[(d, i)] for d in days for i in floor_ids) >= required_subcat_count
+
+    # Meal_time-wide diet-tag composition MANDATE (ds["dietrecall_diettag_
+    # floor"], from compute_dietrecall_diettag_floor) -- same upgrade to a
+    # hard constraint: if e.g. half of a user's logged breakfasts are
+    # egg-based (across ANY subcategory, not one specific dish), the new
+    # week's days serving something egg-tagged at that meal_time MUST
+    # reach roughly that same share, no shortfall escape valve. Applies
+    # uniformly to every meal_time the recall data supports, Snacks
+    # included -- whichever meal_times clear compute_dietrecall_diettag_
+    # floor's min_meal_total end up here, there's nothing breakfast/lunch/
+    # dinner-specific about this block. Same Infeasible tradeoff noted
+    # above applies here too.
+    diettag_penalty_terms = []
+    diettag_floor = ds.get("dietrecall_diettag_floor") or {}
+    if diettag_floor:
+        meal_time_title_dt = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        diet_tag_lower_dt = candidates["Diet_Tag"].astype(str).str.strip().str.lower()
+        for (mt, diet_tag), proportion in diettag_floor.items():
+            dt_mask = (meal_time_title_dt == mt) & (diet_tag_lower_dt == str(diet_tag).lower())
+            dt_ids = [int(i) for i in candidates.index[dt_mask]]
+            if not dt_ids:
+                continue
+            required_dt_count = min(round(float(proportion) * n_days), len(dt_ids), n_days)
+            # Same one-day slack as the subcategory mandate above, and for
+            # the same reason -- the raw count reproducibly stalled CBC.
+            required_dt_count -= 1
+            if required_dt_count <= 0:
+                continue
+            model += lpSum(y[(d, i)] for d in days for i in dt_ids) >= required_dt_count
+
+    # SAME-DAY companion pairing (ds["dietrecall_combo_pairs"], from
+    # compute_adaptive_main_combinations): a genuine conditional link, not
+    # just another flat subcategory bonus -- "if the day's Main is X
+    # (meal_time, main_subcategory), a Y-subcategory companion must appear
+    # that SAME day" when the user has actually eaten X and Y together at
+    # least ADAPTIVE_COMBINATION_MIN_COUNT times. Confirmed necessary for
+    # real on A003_ANISH: "Bread toast" (G1C) and "Boiled egg" (G2T) are
+    # logged together 5x at Breakfast, but the existing dietrecall_combo_
+    # bonus drops which Main the companion was paired with when it's built
+    # (collapses to (meal_time, companion_subcategory) only), so it nudges
+    # egg at Breakfast regardless of which Main got chosen -- a non-egg
+    # Breakfast day never actually paid for skipping the pairing, and the
+    # model picked Bread toast with no egg alongside it. Soft (penalized
+    # slack per day), not hard: this is a NEW per-day conditional
+    # constraint on top of everything else already in this model, and a
+    # hard version of a similarly-shaped mandate already reproducibly
+    # stalled CBC for this same user earlier.
+    # Re-enabled (2026-10-19) with a much smaller penalty weight. A soft
+    # constraint with an unbounded continuous slack can never cause true
+    # integer infeasibility by itself -- the slack can always absorb any
+    # violation. A004_RAJAT/A006_RAJENDRA still going Infeasible with this
+    # active (even after fixing the "require ALL companions" bug to
+    # "require just one") pointed to a numerical issue instead: this
+    # objective already stacks a LOT of 1,000,000-weighted penalty terms
+    # (millet, non-veg, egg, meal-balance, sodium, cholesterol, salt,
+    # recipe-order, standalone-pair, general-cap-overage); adding yet
+    # another set of huge-magnitude terms pushed CBC's solver tolerances
+    # past where it could reliably tell a huge-but-valid objective from a
+    # genuinely infeasible one. Using a far smaller weight here (still a
+    # strong deterrent relative to GL's ~100/unit scale) resolved it on
+    # direct retest while preserving the actual intent: the pairing stays
+    # soft, so a day where it can't be satisfied just skips that diet-
+    # recall Main entirely (picks something else) rather than forcing a
+    # violation -- preference-driven Mains are untouched, still governed
+    # by the existing registry-based Main/Main2 pairing elsewhere in this
+    # file.
+    combo_pair_penalty_weight = 10_000.0
+    # Grouped by (meal_time, main_subcat) FIRST, not applied per companion
+    # independently -- a Main with several learned companions (common:
+    # A004_RAJAT's Lunch/C1A has 5, A006_RAJENDRA's Lunch/G2A has 8) was
+    # getting one INDEPENDENT constraint per companion, each demanding that
+    # exact companion appear the same day -- i.e. choosing that Main
+    # required ALL of its companions simultaneously, not just one of them.
+    # With only 2-3 non-Main slots (Main2/Main3/Optional) per meal, "all 5
+    # companions at once" is physically impossible -- confirmed as one of
+    # two independent root causes of A004_RAJAT/A006_RAJENDRA going
+    # Infeasible. Fixed to require AT LEAST ONE companion (any of them),
+    # matching what "paired with something he actually ate alongside it"
+    # actually means.
+    combo_pair_penalty_terms = []
+    combo_pairs = ds.get("dietrecall_combo_pairs") or {}
+    if combo_pairs:
+        meal_time_title_cp = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper_cp = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        companions_by_main: dict = {}
+        for (mt, main_subcat, companion_subcat), count in combo_pairs.items():
+            companions_by_main.setdefault((mt, main_subcat), set()).add(str(companion_subcat).upper())
+        for (mt, main_subcat), companion_subcats in companions_by_main.items():
+            main_mask = (meal_time_title_cp == mt) & (category_upper_cp == str(main_subcat).upper())
+            companion_mask = (meal_time_title_cp == mt) & (category_upper_cp.isin(companion_subcats))
+            main_ids = [int(i) for i in candidates.index[main_mask]]
+            companion_ids = [int(i) for i in candidates.index[companion_mask]]
+            if not main_ids or not companion_ids:
+                continue
+            safe_mt = str(mt).replace(" ", "_").replace("-", "_")
+            safe_main = str(main_subcat).replace(" ", "_").replace("-", "_")
+            for d in days:
+                pair_slack = LpVariable(f"combo_pair_slack_{safe_mt}_{safe_main}_{d}", lowBound=0)
+                model += (
+                    lpSum(y[(d, i)] for i in main_ids)
+                    <= lpSum(y[(d, i)] for i in companion_ids) + pair_slack
+                )
+                combo_pair_penalty_terms.append(combo_pair_penalty_weight * pair_slack)
+
+    # Standalone one-off companion MANDATE (ds["dietrecall_standalone_
+    # valid_main1"], built in Functions_Base.py's _inject_liked_recipes):
+    # same conditional-link idea as the combo_pairs block above, but for an
+    # EXACT one-off recall code placed as Main2/Main3 by the default
+    # combination registry's own reverse lookup, rather than a learned
+    # subcategory-level pattern. If this exact code is chosen as that
+    # day's Main2/Main3, that day's actual Main1 must come from the
+    # registry's own hosts for it, unioned with whatever Main1-shaped
+    # subcategory it was really logged alongside -- not just any Main1.
+    # Confirmed necessary for real on A001_MAHENDRA: "Chicken fry" (D2E)
+    # is registered Main3 for Main1 in {A1A, C1A, C1B, E2G}, and he
+    # actually logged it with Chapathi (C1A) -- without this, nothing
+    # stopped it from pairing with whichever Main1 happened to be
+    # cheapest that day, unrelated to how he actually ate it.
+    standalone_pair_penalty_terms = []
+    standalone_valid_main1 = ds.get("dietrecall_standalone_valid_main1") or {}
+    if standalone_valid_main1:
+        meal_time_title_sp = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper_sp = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        recipe_code_upper_sp = candidates["Recipe_Code"].astype(str).str.strip().str.upper()
+        dish_type_sp = candidates["Dish_Type"].astype(str).str.strip()
+        for (mt, main_code), valid_main1s in standalone_valid_main1.items():
+            code_mask = (meal_time_title_sp == mt) & (recipe_code_upper_sp == str(main_code).upper())
+            main1_mask = (
+                (meal_time_title_sp == mt)
+                & (dish_type_sp == "Main")
+                & (category_upper_sp.isin({str(s).upper() for s in valid_main1s}))
+            )
+            code_ids = [int(i) for i in candidates.index[code_mask]]
+            main1_ids = [int(i) for i in candidates.index[main1_mask]]
+            if not code_ids or not main1_ids:
+                continue
+            safe_mt = str(mt).replace(" ", "_").replace("-", "_")
+            safe_code = str(main_code).replace(" ", "_").replace("-", "_")
+            for d in days:
+                sp_slack = LpVariable(f"standalone_pair_slack_{safe_mt}_{safe_code}_{d}", lowBound=0)
+                model += (
+                    lpSum(y[(d, i)] for i in code_ids)
+                    <= lpSum(y[(d, i)] for i in main1_ids) + sp_slack
+                )
+                standalone_pair_penalty_weight = 1_000_000.0
+                standalone_pair_penalty_terms.append(standalone_pair_penalty_weight * sp_slack)
+
+    # Day-budget CEILING on top of the same-day pairing above -- without
+    # this, once a combo's companion link is satisfiable, nothing stops
+    # GL-minimization from leaning on the single cheapest-to-satisfy combo
+    # for the whole week (confirmed for real on A001_MAHENDRA: one combo
+    # dominated 5 of 7 breakfasts once the pairing constraint made it
+    # "free" to repeat). Per explicit request: rank each meal_time's combo
+    # Main subcategories by strength and cap rank 1 to DAY_BUDGET_BY_RANK[0]
+    # days, rank 2 to DAY_BUDGET_BY_RANK[1], and leave every lower-ranked
+    # (or unflagged) Main completely unrestricted -- so the next-strongest
+    # real pattern gets genuine room, and whatever's left over is free to
+    # be anything, not tied to recall at all. Soft (penalized overage), not
+    # hard -- same reasoning as the general Main-subcategory cap above:
+    # this ranked ceiling targets the SAME subcategories a hard subcat
+    # floor elsewhere can mandate a minimum count for, and a hard ceiling
+    # there has no escape valve if that floor ever asks for more days than
+    # this allows.
+    day_budget_penalty_terms = []
+    if combo_pairs:
+        meal_time_title_ceil = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        category_upper_ceil = candidates["Category_Key"].astype(str).str.strip().str.upper()
+        main_strength: dict[tuple, float] = {}
+        for (mt, main_subcat, companion_subcat), count in combo_pairs.items():
+            key = (mt, main_subcat)
+            main_strength[key] = max(main_strength.get(key, 0.0), float(count))
+        mains_by_meal_time: dict[str, list] = {}
+        for (mt, main_subcat), strength in main_strength.items():
+            mains_by_meal_time.setdefault(mt, []).append((main_subcat, strength))
+        DAY_BUDGET_BY_RANK = [3, 2]
+        for mt, mains in mains_by_meal_time.items():
+            ranked = sorted(mains, key=lambda t: -t[1])
+            for rank, (main_subcat, strength) in enumerate(ranked):
+                if rank >= len(DAY_BUDGET_BY_RANK):
+                    break
+                budget = DAY_BUDGET_BY_RANK[rank]
+                main_mask = (meal_time_title_ceil == mt) & (category_upper_ceil == str(main_subcat).upper())
+                main_ids = [int(i) for i in candidates.index[main_mask]]
+                if not main_ids:
+                    continue
+                safe_mt_db = str(mt).replace(" ", "_").replace("-", "_")
+                safe_main_db = str(main_subcat).replace(" ", "_").replace("-", "_")
+                day_budget_overage = LpVariable(f"day_budget_overage_{safe_mt_db}_{safe_main_db}", lowBound=0)
+                model += lpSum(y[(d, i)] for d in days for i in main_ids) <= budget + day_budget_overage
+                day_budget_penalty_terms.append(10_000.0 * day_budget_overage)
+
+    # General Main-subcategory day cap, independent of the recall-flagged
+    # ranking above -- without this, GL-minimization can find an escape
+    # hatch entirely OUTSIDE the recall signal (confirmed for real on
+    # A001_MAHENDRA: "C1B" was never flagged as a Breakfast combo Main at
+    # all -- that pattern only showed up at Dinner for him -- yet it still
+    # ended up as the Main on all 7 Breakfast days once it was simply the
+    # cheapest GL option with no implication constraint to trigger). Caps
+    # EVERY Main-dish_type subcategory at a flat ceiling, already-budgeted
+    # ones included (redundant there, harmless) -- so nothing, flagged or
+    # not, can quietly dominate the whole week.
+    #
+    # Soft (penalized overage), not hard -- confirmed as the second of two
+    # independent root causes of A004_RAJAT/A006_RAJENDRA going Infeasible.
+    # The ceiling-division guarantee below protects against the simple
+    # "too few unique subcategories, period" case, but not against a
+    # subcategory that's only realistically choosable on fewer days than
+    # its paper allocation assumes once diet-type/GL/macro filtering is
+    # also in play -- a hard cap there has no escape valve. An overage
+    # slack keeps the same strong pressure against domination without
+    # being able to make a week Infeasible on its own.
+    general_main_cap_penalty_terms = []
+    GENERAL_MAIN_SUBCAT_DAY_CAP = 3
+    main_dish_candidates = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"]
+    if not main_dish_candidates.empty:
+        # Same ceiling-division capacity guarantee used elsewhere in this
+        # file for recipe-repetition caps: if a meal_time genuinely has
+        # fewer distinct Main subcategories available than n_days / cap
+        # would require, every day's mandatory Main slot could never be
+        # filled at all. Loosen the cap for that meal_time only as far as
+        # actually needed, never below the flat default -- belt-and-
+        # suspenders alongside the overage slack above, not a substitute
+        # for it.
+        unique_subcats_per_meal = main_dish_candidates.groupby("Meal_Time")["Category_Key"].nunique()
+        for (mt, subcat), group_df in main_dish_candidates.groupby(["Meal_Time", "Category_Key"], dropna=True):
+            ids = [int(i) for i in group_df.index]
+            if not ids:
+                continue
+            unique_here = int(unique_subcats_per_meal.get(mt, 1)) or 1
+            effective_cap = max(GENERAL_MAIN_SUBCAT_DAY_CAP, -(-n_days // unique_here))
+            safe_mt = str(mt).replace(" ", "_").replace("-", "_")
+            safe_sc = str(subcat).replace(" ", "_").replace("-", "_")
+            cap_overage = LpVariable(f"general_main_cap_overage_{safe_mt}_{safe_sc}", lowBound=0)
+            model += lpSum(y[(d, i)] for d in days for i in ids) <= effective_cap + cap_overage
+            general_main_cap_penalty_weight = 1_000_000.0
+            general_main_cap_penalty_terms.append(general_main_cap_penalty_weight * cap_overage)
+
+    # Curated "recipe order" rank-1 soft-forced inclusion, same pattern as
+    # millet/subcat above: within any (Meal_Time, Dish_Type) slot that has a
+    # rank-1 (most commonly/relevantly used) candidate, require at least one
+    # of them to be picked somewhere across the week, absorbed by a
+    # heavily-penalized slack if that's genuinely impossible alongside every
+    # other constraint -- so "never once serve the #1-ranked option, even
+    # though it's right there" is no longer a free, always-valid choice, but
+    # a week can still solve without it as a last resort.
+    recipe_order_penalty_terms = []
+    if "Relevance_Order" in candidates.columns:
+        order_numeric_for_floor = pd.to_numeric(candidates["Relevance_Order"], errors="coerce")
+        for (mt, dt), group in candidates.groupby(["Meal_Time", "Dish_Type"]):
+            rank1_ids = [int(i) for i in group.index if order_numeric_for_floor.loc[i] == 1]
+            if not rank1_ids:
+                continue
+            safe_mt = str(mt).replace(" ", "_").replace("-", "_")
+            safe_dt = str(dt).replace(" ", "_").replace("-", "_")
+            order_shortfall = LpVariable(f"recipe_order_rank1_shortfall_{safe_mt}_{safe_dt}", lowBound=0)
+            model += (
+                lpSum(y[(d, i)] for d in days for i in rank1_ids) + order_shortfall >= 1
+            )
+            recipe_order_penalty_terms.append(RECIPE_ORDER_PENALTY * order_shortfall)
+
     # Non-veg-days soft-forced inclusion: the user selected specific weekdays
     # they're OK having non-veg on (profile["non_veg_days"], resolved to Day
     # 1-7 numbers in routers/plan.py._run_plan_background — the only place
@@ -1265,6 +1772,20 @@ def run_lp(
         model.objective += lpSum(penalty_terms)
     if millet_penalty_terms:
         model.objective += lpSum(millet_penalty_terms)
+    if subcat_penalty_terms:
+        model.objective += lpSum(subcat_penalty_terms)
+    if diettag_penalty_terms:
+        model.objective += lpSum(diettag_penalty_terms)
+    if combo_pair_penalty_terms:
+        model.objective += lpSum(combo_pair_penalty_terms)
+    if day_budget_penalty_terms:
+        model.objective += lpSum(day_budget_penalty_terms)
+    if standalone_pair_penalty_terms:
+        model.objective += lpSum(standalone_pair_penalty_terms)
+    if general_main_cap_penalty_terms:
+        model.objective += lpSum(general_main_cap_penalty_terms)
+    if recipe_order_penalty_terms:
+        model.objective += lpSum(recipe_order_penalty_terms)
     if nonveg_type_penalty_terms:
         model.objective += lpSum(nonveg_type_penalty_terms)
     if egg_penalty_terms:

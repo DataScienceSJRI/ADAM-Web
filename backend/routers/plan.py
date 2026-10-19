@@ -239,7 +239,7 @@ class ModelOptimiser(ADAMPersonalizationModel):
 
     def optimize_weekly_menu_with_constraints(self, meal_choices, ds, age_group_col, **kwargs):
         kwargs.setdefault("per_recipe_max_gl", 20)
-        kwargs.setdefault("per_meal_gl_cap", 30)
+        kwargs.setdefault("per_meal_gl_cap", 35)
         kwargs.setdefault("per_day_gl_cap", 90)
         return run_lp(self, meal_choices, ds, age_group_col, **kwargs)
 

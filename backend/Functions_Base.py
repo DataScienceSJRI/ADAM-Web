@@ -1593,13 +1593,65 @@ class ADAMPersonalizationModel:
 
 		Recipes no longer present in `scored` (e.g. filtered out upstream by
 		diet-type or the dislike exclusion) are skipped rather than force-added,
-		so this never bypasses those filters."""
+		so this never bypasses those filters.
+
+		A code this user has actually logged in DietRecall (ds["dietrecall_
+		logged_pairs"], a set of (meal_time, code) pairs) is handled
+		differently from an ordinary "liked" code: RecipeTagging's generic
+		Breakfast/Lunch/Dinner/Snack flags are NOT consulted for it at all --
+		the diet recall log itself is ground truth for which meal_time(s)
+		that food is valid at for THIS user, and a slot gets created (or
+		attached to) for every one of those meal_times, independent of what
+		the tagging file says is typically allowed. Confirmed necessary for
+		real on A003_ANISH: "Boiled egg" (B000055) is tagged Lunch=1 and he's
+		logged it at Lunch 3 times, yet it was never even attempted there --
+		the old logic only ever created NEW combos when nothing at all
+		matched that subcategory, so once a Breakfast/G2T combo existed it
+		never tried Lunch too."""
 		liked_codes = ds.get("liked_recipe_codes") or set()
 		if not liked_codes or scored.empty:
 			return top_choices
 
 		recipe_tag = ds.get("recipe_tag", pd.DataFrame())
 		has_tagging = not recipe_tag.empty and "Recipe_Code" in recipe_tag.columns
+
+		dietrecall_pairs = ds.get("dietrecall_logged_pairs") or set()
+		code_to_logged_mts: dict = {}
+		for mt, code in dietrecall_pairs:
+			code_to_logged_mts.setdefault(str(code).strip().upper(), set()).add(str(mt).strip())
+		standalone_companions = ds.get("dietrecall_standalone_companions") or {}
+
+		# Reverse lookup on the DEFAULT combination registry (Main1_Main2_
+		# Mapping): given a companion subcategory, which Main1 subcategories
+		# already register it as a Main2/Main3 companion? Per explicit
+		# request -- a one-off diet-recall code's OWN role (Main1 vs a
+		# Main2/Main3 companion) should come from where the system's own
+		# default combinations already place it, not be assumed to be Main1
+		# just because it's the code that happened to trigger the standalone
+		# fallback. Confirmed for real: D2E ("Chicken fry"'s subcategory) is
+		# registered as Main3 for Main1 in {A1A, C1A, C1B, E2G} and Main2 for
+		# E3A -- Main3 for 4 of 5, so that's its default role -- and C1A
+		# (Chapathi) is both his real logged companion AND already on that
+		# list, a clean match.
+		main1_to_main2_rev, main1_to_main3_rev, _ = self._get_main1_main2_main3_map(ds)
+		main2_hosts: dict = {}
+		main3_hosts: dict = {}
+		for m1, companions in main1_to_main2_rev.items():
+			for c in companions:
+				main2_hosts.setdefault(c, set()).add(m1)
+		for m1, companions in main1_to_main3_rev.items():
+			for c in companions:
+				main3_hosts.setdefault(c, set()).add(m1)
+
+		def _default_role_and_main1s(subcat: str):
+			as_main2 = main2_hosts.get(subcat, set())
+			as_main3 = main3_hosts.get(subcat, set())
+			if not as_main2 and not as_main3:
+				return None, set()
+			role = "Main 3" if len(as_main3) >= len(as_main2) else "Main 2"
+			return role, as_main2 | as_main3
+
+		dietrecall_standalone_valid_main1: dict = {}
 
 		existing_slots: set = set()
 		combos_by_subcat: dict = {}
@@ -1641,16 +1693,25 @@ class ADAMPersonalizationModel:
 				if not tag_rows.empty:
 					tag_row = tag_rows.iloc[0]
 
+			logged_mts = code_to_logged_mts.get(code_u)  # None unless diet-recall-sourced
+
 			matching_combos = combos_by_subcat.get(subcat, [])
+			covered_mts: set = set()
 			if matching_combos:
 				for meal_time, dish_type, pref_row_id in matching_combos:
 					meal_time_s = str(meal_time).strip()
 					dish_type_s = str(dish_type).strip()
-					# Still respect RecipeTagging's own meal-time eligibility where available
-					# (e.g. don't slot a breakfast-only liked recipe into a Dinner combination).
-					col = slot_cols.get(meal_time_s)
-					if tag_row is not None and col is not None and col in tag_row.index and str(tag_row.get(col)).strip() != "1":
-						continue
+					if logged_mts is not None:
+						# Diet-recall-sourced: trust the log, not the tagging
+						# file's generic meal-time flags.
+						if meal_time_s not in logged_mts:
+							continue
+					else:
+						# Still respect RecipeTagging's own meal-time eligibility where available
+						# (e.g. don't slot a breakfast-only liked recipe into a Dinner combination).
+						col = slot_cols.get(meal_time_s)
+						if tag_row is not None and col is not None and col in tag_row.index and str(tag_row.get(col)).strip() != "1":
+							continue
 					if (code_u, meal_time_s, dish_type_s, pref_row_id) in existing_slots:
 						continue
 					new_row = base_row.copy()
@@ -1659,7 +1720,60 @@ class ADAMPersonalizationModel:
 					new_row["Dish_Type"] = dish_type
 					new_row["Preference_Row_ID"] = pref_row_id
 					new_rows.append(new_row)
-				continue  # matched into existing combinations — skip the standalone fallback
+					covered_mts.add(meal_time_s)
+				if logged_mts is None:
+					continue  # matched into existing combinations — skip the standalone fallback
+
+			if logged_mts is not None:
+				# Diet-recall-sourced: create a slot for every meal_time
+				# this user actually logged it at that wasn't already
+				# covered by an existing combo above -- regardless of
+				# whether some OTHER meal_time already had one, and
+				# without consulting RecipeTagging's meal-time flags at
+				# all.
+				for meal_time in logged_mts - covered_mts:
+					default_role, default_main1s = _default_role_and_main1s(subcat)
+					real_companion_subcats = standalone_companions.get((meal_time, code_u), set())
+
+					if default_role is not None:
+						# This code's OWN subcategory already has a
+						# registered role (Main2/Main3) under some Main1
+						# in the default combination system -- place it
+						# there instead of assuming it's a Main1 itself
+						# just because it's the code that triggered this
+						# fallback. Confirmed for real on A001_MAHENDRA:
+						# "Chicken fry" (D2E) is registered Main3 for
+						# Main1 in {A1A, C1A, C1B, E2G} -- and he actually
+						# logged it alongside Chapathi (C1A), a clean
+						# match -- not as a standalone Main on its own.
+						# The valid-Main1 set for the same-day mandate
+						# below unions the registry's own hosts with
+						# whatever Main1-shaped subcategory this exact
+						# code was really logged alongside (a genuine
+						# match not yet in the registry still counts).
+						dish_type = default_role
+						valid_main1s = set(default_main1s) | real_companion_subcats
+					else:
+						# No registered role anywhere in the default
+						# combination system -- fall back to the original
+						# behavior, treating it as a standalone Main1.
+						dish_type = "Snacks" if meal_time == "Snacks" else "Main"
+						valid_main1s = set()
+
+					if (code_u, meal_time, dish_type, next_pref_row_id) in existing_slots:
+						continue
+					new_row = base_row.copy()
+					new_row["Preferred_SubCategory_code"] = subcat
+					new_row["Dish_Type"] = dish_type
+					new_row["Meal_Time"] = meal_time
+					new_row["Preference_Row_ID"] = next_pref_row_id
+					new_rows.append(new_row)
+
+					if valid_main1s:
+						dietrecall_standalone_valid_main1[(meal_time, code_u)] = valid_main1s
+
+					next_pref_row_id += 1
+				continue  # fully handled above for a diet-recall-sourced code
 
 			if tag_row is None:
 				continue  # no existing combo wants this subcategory, and no tagging to place it standalone either
@@ -1677,6 +1791,11 @@ class ADAMPersonalizationModel:
 				new_row["Preference_Row_ID"] = next_pref_row_id
 				next_pref_row_id += 1
 				new_rows.append(new_row)
+
+		# Consumed by lp_optimizer.py's same-day mandate: if a standalone
+		# one-off code (now placed as Main2/Main3 above) is chosen on a
+		# day, that day's actual Main1 must come from this set.
+		ds["dietrecall_standalone_valid_main1"] = dietrecall_standalone_valid_main1
 
 		if not new_rows:
 			return top_choices
@@ -1765,7 +1884,24 @@ class ADAMPersonalizationModel:
 			print(main1_to_optional)
 			scored.to_csv("scored_debug.csv", index=False)
 			prefs.to_csv("prefs_debug.csv", index=False)
-			prefs.loc[prefs["dish_type"] == "Side", "dish_type"] = "Main 3"
+			# "Side" -> "Main 3" only for Lunch, where Main 3 is a real,
+			# selectable dish type. For Breakfast and Dinner,
+			# services/lp_optimizer.py hard-forces every Main 3 candidate to
+			# y==0 (no breakfast/dinner "third main course" concept) -- a
+			# Side preference remapped to Main 3 there was silently dead on
+			# arrival, never once selectable, regardless of how strongly it
+			# was preferred or how often it showed up in diet recall.
+			# Confirmed for real on A003_ANISH: his own declared Breakfast
+			# Side=Egg (G2T) preference could never appear via this path at
+			# all; the only egg that ever showed up came from an unrelated
+			# Main-companion expansion, not his stated preference. Remapped
+			# to "Optional" for Breakfast/Dinner instead -- not mandatory,
+			# but at least genuinely selectable.
+			is_side = prefs["dish_type"] == "Side"
+			meal_time_norm = prefs["meal_time"].astype(str).str.strip().str.title()
+			is_breakfast_or_dinner = meal_time_norm.isin(["Breakfast", "Dinner"])
+			prefs.loc[is_side & is_breakfast_or_dinner, "dish_type"] = "Optional"
+			prefs.loc[is_side & ~is_breakfast_or_dinner, "dish_type"] = "Main 3"
 
 			prefs.to_csv("prefs_debug_new.csv", index=False)
 			for _, pref in prefs.iterrows():
@@ -1925,7 +2061,8 @@ class ADAMPersonalizationModel:
 
 		# Include extended nutrient columns so they are preserved in top_choices and flow through to outputs
 		extended_nutrients = [
-			"Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg", "PotassiumK_mg", "Cholesterol_mg"
+			"Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg", "PotassiumK_mg", "Cholesterol_mg",
+			"Relevance_Order",
 		]
 		for c in extended_nutrients:
 			if c not in required_cols:
