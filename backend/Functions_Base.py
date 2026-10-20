@@ -2131,8 +2131,12 @@ class ADAMPersonalizationModel:
 							if (subcat_code and str(subcat_code).startswith(k)) or (code_cooc and str(code_cooc).startswith(k)):
 								mapped_main2_keys |= set(vals)
 						# Expand mapped keys like 'D1/D2' into individual codes
+						adaptive_companion_mealtimes = ds.get("_adaptive_companion_mealtimes") or {}
 						for key in mapped_main2_keys:
 							for main2 in [m.strip().upper() for m in str(key).split('/') if m.strip()]:
+								allowed_mts = adaptive_companion_mealtimes.get((subcat_code, main2))
+								if allowed_mts and meal_time not in allowed_mts:
+									continue
 								main2_mask = pd.Series(False, index=scored.index)
 								for col in ["Code_cooccurence", "MainCategoryCode", "Subcategories"]:
 									if col in scored.columns:
@@ -2158,6 +2162,9 @@ class ADAMPersonalizationModel:
 								mapped_main3_keys |= set(vals)
 						for key in mapped_main3_keys:
 							for main3 in [m.strip().upper() for m in str(key).split('/') if m.strip()]:
+								allowed_mts = adaptive_companion_mealtimes.get((subcat_code, main3))
+								if allowed_mts and meal_time not in allowed_mts:
+									continue
 								main3_mask = pd.Series(False, index=scored.index)
 								for col in ["Code_cooccurence", "MainCategoryCode", "Subcategories"]:
 									if col in scored.columns:
@@ -2185,6 +2192,9 @@ class ADAMPersonalizationModel:
 								mapped_opt_keys |= set(vals)
 						for key in mapped_opt_keys:
 							for opt in [m.strip().upper() for m in str(key).split('/') if m.strip()]:
+								allowed_mts = adaptive_companion_mealtimes.get((subcat_code, opt))
+								if allowed_mts and meal_time not in allowed_mts:
+									continue
 								opt_mask = pd.Series(False, index=scored.index)
 								for col in ["Code_cooccurence", "MainCategoryCode", "Subcategories"]:
 									if col in scored.columns:

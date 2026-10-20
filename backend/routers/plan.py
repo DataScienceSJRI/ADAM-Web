@@ -212,29 +212,55 @@ class ModelOptimiser(ADAMPersonalizationModel):
         # in the same generated breakfast, something he never once actually
         # did (he drinks one or the other, never both). Putting the learned
         # beverage in Optional too means it now shares that same real cap.
+        #
+        # compute_adaptive_main_combinations returns each pairing's own
+        # meal_time (it's learned per meal time), but main1_to_main2/
+        # main1_to_optional are flat, meal-time-agnostic dicts reused by
+        # Functions_Base.py for every meal time's candidate construction --
+        # blending a pairing in here made it available at EVERY meal time,
+        # not just the one it was actually learned at. Confirmed for real on
+        # A001_MAHENDRA: salad+chutney/dal-curry, learned only from his
+        # Breakfast history, was leaking into his Lunch salad group too,
+        # alongside the one pairing (salad+grilled chicken) genuinely learned
+        # at Lunch. _adaptive_companion_mealtimes records which meal_time(s)
+        # justify each pairing that ISN'T already in the static registry (the
+        # registry itself has no meal_time concept and stays available at
+        # every meal time, same as before) -- Functions_Base.py's candidate
+        # construction consults it to restrict a companion to the meal
+        # time(s) it was actually learned at.
         if rows:
+            static_main2_snapshot = {k: set(v) for k, v in main1_to_main2.items()}
+            static_optional_snapshot = {k: set(v) for k, v in main1_to_optional.items()}
             optional_universe = {c for companions in main1_to_optional.values() for c in companions}
+            adaptive_mealtimes: dict[tuple[str, str], set] = {}
             added_main2 = 0
             added_optional = 0
             for r in rows:
                 main_code = str(r.get("main_subcategory_code") or "").strip().upper()
                 companion_code = str(r.get("companion_subcategory_code") or "").strip().upper()
+                row_meal_time = str(r.get("meal_time") or "").strip().title()
                 if not main_code or not companion_code:
                     continue
-                target = main1_to_optional if companion_code in optional_universe else main1_to_main2
+                is_optional = companion_code in optional_universe
+                target = main1_to_optional if is_optional else main1_to_main2
+                static_snapshot = static_optional_snapshot if is_optional else static_main2_snapshot
+                already_static = companion_code in static_snapshot.get(main_code, set())
                 existing = target.setdefault(main_code, set())
                 if companion_code not in existing:
                     existing.add(companion_code)
-                    if target is main1_to_optional:
+                    if is_optional:
                         added_optional += 1
                     else:
                         added_main2 += 1
+                if not already_static and row_meal_time:
+                    adaptive_mealtimes.setdefault((main_code, companion_code), set()).add(row_meal_time)
             if added_main2 or added_optional:
                 logger.info(
                     "Adaptive: blended %d learned Main->companion pairing(s) into main1_to_main2 "
                     "and %d into main1_to_optional for uid=%s",
                     added_main2, added_optional, self._user_id,
                 )
+            ds["_adaptive_companion_mealtimes"] = adaptive_mealtimes
         return main1_to_main2, main1_to_main3, main1_to_optional
 
     def optimize_weekly_menu_with_constraints(self, meal_choices, ds, age_group_col, **kwargs):
