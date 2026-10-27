@@ -15,9 +15,13 @@ export async function getBackendAccessToken() {
 
 // Keeps a single flaky Vercel->VM round trip from surfacing as a hard error
 // banner: a short per-attempt timeout (well under Vercel's own function
-// timeout) plus one retry for idempotent GETs. Non-GET requests are never
-// retried -- a slow-but-successful write must not be resent.
-const FETCH_TIMEOUT_MS = 6_000;
+// timeout) plus bounded retries with backoff+jitter -- for idempotent GETs
+// only. Non-GET requests get exactly one attempt, never retried: a
+// slow-but-actually-successful write must not be resent, and this backend
+
+const FETCH_TIMEOUT_MS = 4_000;
+const MAX_ATTEMPTS = 2; // 1 initial + 1 retry, GET only.
+const RETRYABLE_STATUS = new Set([502, 503, 504]); // upstream-unavailable, not an application error
 
 async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
@@ -27,6 +31,14 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   } finally {
     clearTimeout(timer);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function backoffDelayMs(retryIndex: number): number {
+  return 300 * 2 ** retryIndex + Math.random() * 150;
 }
 
 export async function backendJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -40,16 +52,27 @@ export async function backendJson<T>(path: string, init?: RequestInit): Promise<
   }
 
   const method = (init?.method ?? "GET").toUpperCase();
+  const retryable = method === "GET";
   const url = `${BACKEND_URL}${path}`;
   const fetchInit: RequestInit = { ...init, headers, cache: "no-store" };
 
-  let res: Response;
-  try {
-    res = await fetchWithTimeout(url, fetchInit, FETCH_TIMEOUT_MS);
-  } catch (err) {
-    if (method !== "GET") throw err;
-    res = await fetchWithTimeout(url, fetchInit, FETCH_TIMEOUT_MS);
+  const attempts = retryable ? MAX_ATTEMPTS : 1;
+  let res: Response | null = null;
+  let lastErr: unknown = null;
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await sleep(backoffDelayMs(attempt - 1));
+    try {
+      res = await fetchWithTimeout(url, fetchInit, FETCH_TIMEOUT_MS);
+    } catch (err) {
+      lastErr = err;
+      res = null;
+      continue;
+    }
+    if (res.ok || !RETRYABLE_STATUS.has(res.status) || attempt === attempts - 1) break;
   }
+
+  if (!res) throw lastErr instanceof Error ? lastErr : new Error("Request failed");
 
   const text = await res.text();
   let json: unknown;
