@@ -301,8 +301,9 @@ def _schedule_next_week_job(user_id: str, onboarding_id: str | None, week_no: in
             "Scheduled auto-generation of week %d for onboarding_id=%s at %s IST (job=%s)",
             next_week_no, onboarding_id, trigger_at_ist.isoformat(), job.id,
         )
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to schedule next-week auto generation for onboarding_id=%s", onboarding_id)
+        _write_plan_status(onboarding_id, f"error scheduling next week: {str(e)[:200]}")
 
 
 def _schedule_day4_checkin(user_id: str, start_date: date) -> None:

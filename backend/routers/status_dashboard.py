@@ -24,6 +24,7 @@ _AT_RISK_DAYS = 3
 _SNACK_DUE_AFTER_SLOT = "dinner"
 _GL_COMPLIANCE_TOLERANCE = 0.20
 _GL_COMPLIANCE_FLOOR = 1.0
+_ID_FILTER_BATCH_SIZE = 150
 
 # See core.supabase.fetch_all_rows -- every _fetch_all(...) call below pages
 # through .range() instead of trusting a single large .limit() call, which
@@ -401,11 +402,19 @@ def _compute_status_overview(days: int) -> dict:
 
     review_recall_map: dict[str, dict] = {}
     if review_recall_ids:
-        dr_rows = _fetch_all(lambda: (
-            sb.table("DietRecall")
-            .select("ID, Date, meal_slot")
-            .in_("ID", review_recall_ids)
-        ))
+        # .in_() inlines every id into the request URL -- with enough pending/
+        # approved MealImageReview rows (688 and climbing, confirmed live) that
+        # URL crosses Supabase's gateway length limit and the whole endpoint
+        # 500s on a plain-text "Bad Request" the postgrest client can't parse
+        # as JSON. Chunking keeps each request's id list well under that limit.
+        dr_rows = []
+        for i in range(0, len(review_recall_ids), _ID_FILTER_BATCH_SIZE):
+            batch = review_recall_ids[i : i + _ID_FILTER_BATCH_SIZE]
+            dr_rows.extend(_fetch_all(lambda batch=batch: (
+                sb.table("DietRecall")
+                .select("ID, Date, meal_slot")
+                .in_("ID", batch)
+            )))
         review_recall_map = {r["ID"]: r for r in dr_rows}
 
     slot_review_statuses: dict[str, dict[str, dict[str, list[str]]]] = {}
