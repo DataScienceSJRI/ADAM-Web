@@ -100,6 +100,12 @@ def swap_to_outside_food(
     if not allowed:
         return OutsideFoodSwapResponse(possible=False, reason="not_an_outside_food", week_count=0)
 
+    profile = build_profile(user_id)
+    diet_type = (profile.get("diet_type") if profile else None) or ""
+    diet_allowed = _fetch_diet_allowed_codes(sb, diet_type)
+    if diet_allowed is not None and recipe_code.strip().upper() not in diet_allowed:
+        return OutsideFoodSwapResponse(possible=False, reason="not_diet_compatible", week_count=0)
+
     plan_week = _current_plan_week(user_id)
     if not plan_week:
         return OutsideFoodSwapResponse(possible=False, reason="no_active_plan", week_count=0)
