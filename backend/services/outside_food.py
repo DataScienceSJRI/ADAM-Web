@@ -159,15 +159,27 @@ def swap_to_outside_food(
     existing_week_no = all_slot_rows[0].get("WeekNo") if all_slot_rows else plan_week.get("week_no")
     existing_onboarding_id = all_slot_rows[0].get("onboarding_id") if all_slot_rows else plan_week.get("onboarding_id")
 
-    replaced_set = set(original_recipe_codes) if original_recipe_codes else {
-        str(r.get("Food_Name_desc") or "") for r in all_slot_rows if r.get("Food_Name_desc")
-    }
+    existing_codes_in_slot = {str(r.get("Food_Name_desc") or "") for r in all_slot_rows if r.get("Food_Name_desc")}
+    outside_codes_in_slot: set[str] = set()
+    if existing_codes_in_slot:
+        outside_rows = (
+            sb.table("cuisine_dishes")
+            .select("recipe_code")
+            .in_("recipe_code", list(existing_codes_in_slot))
+            .execute()
+            .data or []
+        )
+        outside_codes_in_slot = {str(r["recipe_code"]) for r in outside_rows if r.get("recipe_code")}
+
+    replaced_set = set(original_recipe_codes) if original_recipe_codes else (
+        existing_codes_in_slot - outside_codes_in_slot
+    )
 
     try:
-        if original_recipe_codes:
-            pkeys_to_delete = [r["Pkey"] for r in all_slot_rows if r.get("Food_Name_desc") in original_recipe_codes]
-        else:
-            pkeys_to_delete = [r["Pkey"] for r in all_slot_rows]
+        pkeys_to_delete = [
+            r["Pkey"] for r in all_slot_rows
+            if str(r.get("Food_Name_desc") or "") in replaced_set
+        ]
         if pkeys_to_delete:
             sb.table("Recommendation").delete().in_("Pkey", pkeys_to_delete).execute()
 
@@ -189,11 +201,12 @@ def swap_to_outside_food(
 
     try:
         if existing_plan_id:
-            sb.table("FinalSummary").delete().eq("user_id", user_id).eq(
-                "plan_id", existing_plan_id
-            ).eq("Date", meal_date).eq("Meal_Time", timings).in_(
-                "Recipe_Code", list(replaced_set)
-            ).execute()
+            if replaced_set:
+                sb.table("FinalSummary").delete().eq("user_id", user_id).eq(
+                    "plan_id", existing_plan_id
+                ).eq("Date", meal_date).eq("Meal_Time", timings).in_(
+                    "Recipe_Code", list(replaced_set)
+                ).execute()
 
             sb.table("FinalSummary").insert({
                 "plan_id": existing_plan_id,
@@ -258,6 +271,19 @@ def swap_to_outside_food(
         }).execute()
     except Exception:
         logger.exception("Could not write OutsideFoodLog audit row for user_id=%s", user_id)
+
+    try:
+        from services.recall import log_recall
+        log_recall(
+            user_id=user_id,
+            plan_id=existing_plan_id,
+            meal_slot=meal_slot,
+            date=meal_date,
+            recipe_codes=[recipe_code],
+            actual_quantities=[str(quantity)],
+        )
+    except Exception:
+        logger.exception("Could not write DietRecall entry for outside-food swap, user_id=%s", user_id)
 
     return OutsideFoodSwapResponse(possible=True, week_count=new_week_count, week_limit=WEEKLY_LIMIT, gl=gl, energy_kcal=energy_kcal)
 
