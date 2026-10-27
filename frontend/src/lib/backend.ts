@@ -13,6 +13,22 @@ export async function getBackendAccessToken() {
   return session?.access_token ?? null;
 }
 
+// Keeps a single flaky Vercel->VM round trip from surfacing as a hard error
+// banner: a short per-attempt timeout (well under Vercel's own function
+// timeout) plus one retry for idempotent GETs. Non-GET requests are never
+// retried -- a slow-but-successful write must not be resent.
+const FETCH_TIMEOUT_MS = 6_000;
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function backendJson<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
 
@@ -23,11 +39,17 @@ export async function backendJson<T>(path: string, init?: RequestInit): Promise<
     }
   }
 
-  const res = await fetch(`${BACKEND_URL}${path}`, {
-    ...init,
-    headers,
-    cache: "no-store",
-  });
+  const method = (init?.method ?? "GET").toUpperCase();
+  const url = `${BACKEND_URL}${path}`;
+  const fetchInit: RequestInit = { ...init, headers, cache: "no-store" };
+
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(url, fetchInit, FETCH_TIMEOUT_MS);
+  } catch (err) {
+    if (method !== "GET") throw err;
+    res = await fetchWithTimeout(url, fetchInit, FETCH_TIMEOUT_MS);
+  }
 
   const text = await res.text();
   let json: unknown;
