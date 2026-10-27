@@ -116,6 +116,16 @@ def swap_to_outside_food(
     week_count_so_far = _week_outside_count(sb, user_id, week_start_date)
     if week_count_so_far >= WEEKLY_LIMIT:
         logger.info("Outside-food swap blocked for user_id=%s: already at %d/%d this week", user_id, week_count_so_far, WEEKLY_LIMIT)
+        try:
+            from services.notify import notify
+            notify(
+                user_id=user_id,
+                title="Outside-food limit reached",
+                body=f"You've used all {WEEKLY_LIMIT} outside-food swaps for this week. Your plan continues as usual for the rest of the week.",
+                data={"type": "outside_food_limit_reached", "week_count": week_count_so_far, "week_limit": WEEKLY_LIMIT},
+            )
+        except Exception:
+            logger.exception("Could not notify user_id=%s of outside-food weekly limit", user_id)
         return OutsideFoodSwapResponse(possible=False, reason="weekly_limit_reached", week_count=week_count_so_far, week_limit=WEEKLY_LIMIT)
 
     recipe_resp = (
@@ -284,6 +294,18 @@ def swap_to_outside_food(
         )
     except Exception:
         logger.exception("Could not write DietRecall entry for outside-food swap, user_id=%s", user_id)
+
+    try:
+        from services.notify import notify
+        notify(
+            user_id=user_id,
+            title="Outside food logged",
+            body=f"{recipe_row.get('Recipe_Name') or recipe_code} logged for {meal_slot.value}. "
+                 f"{new_week_count}/{WEEKLY_LIMIT} outside-food swaps used this week.",
+            data={"type": "outside_food_logged", "week_count": new_week_count, "week_limit": WEEKLY_LIMIT},
+        )
+    except Exception:
+        logger.exception("Could not notify user_id=%s of outside-food log", user_id)
 
     return OutsideFoodSwapResponse(possible=True, week_count=new_week_count, week_limit=WEEKLY_LIMIT, gl=gl, energy_kcal=energy_kcal)
 

@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { AlertCircle, RefreshCw, Utensils } from "lucide-react";
 import { formatIST } from "@/lib/utils";
+
+const REFRESH_MS = 60_000;
 
 export type FlaggedParticipant = {
   user_id: string;
@@ -23,23 +25,33 @@ export function OutsideFoodClient({
   const [flagged, setFlagged] = useState<FlaggedParticipant[]>(initialFlagged);
   const [error, setError] = useState<string | null>(initialError);
   const [loading, setLoading] = useState(false);
+  const inFlightRef = useRef(false);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (showSpinner: boolean) => {
+    if (inFlightRef.current || (!showSpinner && document.visibilityState === "hidden")) return;
+    inFlightRef.current = true;
+    if (showSpinner) setLoading(true);
     try {
       const res = await fetch("/api/outside-foods/flagged");
       if (!res.ok) {
         setError("Failed to load flagged participants");
         return;
       }
+      setError(null);
       setFlagged(await res.json());
     } catch {
       setError("Failed to load flagged participants");
     } finally {
-      setLoading(false);
+      inFlightRef.current = false;
+      if (showSpinner) setLoading(false);
     }
   }, []);
+
+  const refresh = useCallback(() => load(true), [load]);
+  useEffect(() => {
+    const interval = setInterval(() => load(false), REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [load]);
 
   return (
     <div className="space-y-6">
