@@ -35,6 +35,8 @@ type PlannedItem = {
   Food_Qty?: number;
   R_desc?: string;
   Energy_kcal?: number;
+  GL?: number | null;
+  Meal_GL?: number | null;
   Timings?: string;
   Date?: string;
 };
@@ -45,6 +47,7 @@ type LoggedItem = {
   Food_Qty?: number | string;
   R_desc?: string;
   Energy_Kcal?: number;
+  GL?: number | null;
   notes?: string;
   meal_slot?: string;
   Date?: string;
@@ -1088,14 +1091,23 @@ export function ImageReviewModal({
                     {p.R_desc && <p className="text-[10px] text-muted-foreground">{p.R_desc}</p>}
                     <div className="flex items-center justify-between pt-0.5">
                       <span className="text-xs tabular-nums">{p.Food_Qty ?? "—"}</span>
-                      {p.Energy_kcal != null && (
-                        <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(p.Energy_kcal)} kcal</span>
-                      )}
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        {p.GL != null && (
+                          <span className="text-[10px] text-blue-600 dark:text-blue-400 tabular-nums">GL {p.GL.toFixed(1)}</span>
+                        )}
+                        {p.Energy_kcal != null && (
+                          <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(p.Energy_kcal)} kcal</span>
+                        )}
+                      </span>
                     </div>
                   </div>
                 ))}
                 <p className="text-[10px] text-muted-foreground text-right pt-1">
                   {Math.round(plannedItems.reduce((s, p) => s + (p.Energy_kcal ?? 0), 0))} kcal planned
+                  {(() => {
+                    const mealGl = plannedItems.find((p) => p.Meal_GL != null)?.Meal_GL;
+                    return mealGl != null ? ` · ${mealGl.toFixed(1)} GL for meal` : "";
+                  })()}
                 </p>
               </>
             )}
@@ -1124,9 +1136,14 @@ export function ImageReviewModal({
                             )}
                             <div className="flex items-center justify-between pt-0.5">
                               <span className="text-xs tabular-nums">{l.Food_Qty ?? "—"} {l.R_desc ?? ""}</span>
-                              {l.Energy_Kcal != null && (
-                                <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(l.Energy_Kcal)} kcal</span>
-                              )}
+                              <span className="flex items-center gap-1.5 shrink-0">
+                                {l.GL != null && (
+                                  <span className="text-[10px] text-blue-600 dark:text-blue-400 tabular-nums">GL {l.GL.toFixed(1)}</span>
+                                )}
+                                {l.Energy_Kcal != null && (
+                                  <span className="text-[10px] text-muted-foreground tabular-nums">{Math.round(l.Energy_Kcal)} kcal</span>
+                                )}
+                              </span>
                             </div>
                           </>
                         )}
@@ -1135,6 +1152,12 @@ export function ImageReviewModal({
                   })}
                   <p className="text-[10px] text-muted-foreground text-right pt-1">
                     {Math.round(loggedItems.reduce((s, l) => s + (l.Energy_Kcal ?? 0), 0))} kcal logged
+                    {(() => {
+                      const glItems = loggedItems.filter((l) => l.GL != null);
+                      if (glItems.length === 0) return "";
+                      const totalGl = glItems.reduce((s, l) => s + (l.GL ?? 0), 0);
+                      return ` · ${totalGl.toFixed(1)} GL logged`;
+                    })()}
                   </p>
                 </>
               )}
