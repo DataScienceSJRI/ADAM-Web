@@ -303,6 +303,30 @@ def get_recipe(recipe_code: str, user_id: str = Depends(get_current_user)):
     return data
 
 
+@router.get("/{recipe_code}/unit")
+def get_recipe_unit(recipe_code: str, user_id: str = Depends(get_current_user)):
+    """Just the RecipeTagging columns needed to show/convert a quantity --
+    Description (the unit label, e.g. "Cup"), Portion, and Portion weight (g)
+    -- without pulling the full Recipe row like GET /{recipe_code} does. Used
+    by pickers that only need the unit, not full recipe detail."""
+    sb = get_supabase()
+    tag_resp = (
+        sb.table("RecipeTagging")
+        .select('Description, Portion, "Portion weight (g)"')
+        .eq("Recipe_Code", recipe_code)
+        .execute()
+    )
+    if not tag_resp.data:
+        raise HTTPException(status_code=404, detail=f"Recipe '{recipe_code}' not found in RecipeTagging")
+
+    row = _clean(tag_resp.data[0])
+    return {
+        "unit": (str(row.get("Description")).strip() if row.get("Description") else None) or "g",
+        "portion": row.get("Portion"),
+        "portion_weight_g": row.get("Portion weight (g)"),
+    }
+
+
 def _set_recipe_reaction(sb, recipe_code: str, user_id: str, interaction: str) -> dict:
     """Upsert into Recipes_LU keyed on (UID, Recipe_Code), so re-reacting overwrites the prior value."""
     sb.table("Recipes_LU").upsert(

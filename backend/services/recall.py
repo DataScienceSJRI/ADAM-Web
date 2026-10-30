@@ -567,6 +567,36 @@ def reject_review_diet_recall(diet_recall_id: str) -> None:
     sb.table("DietRecallBuffer").delete().eq("ID", diet_recall_id).execute()
 
 
+_MEAL_IMAGES_BUCKET = "meal-images"
+
+
+def upload_meal_image(
+    user_id: str,
+    meal_slot: MealSlot,
+    kind: str,
+    content: bytes,
+    content_type: Optional[str],
+    filename: Optional[str],
+) -> str:
+    """Upload a pre/post meal photo's raw bytes to the public `meal-images`
+    Storage bucket and return its public URL -- the URL that
+    POST /recall/image (DietRecallImageRequest.image_url_pre/post) expects.
+    Path is {user_id}/{meal_slot}/{kind}_{uuid}{ext} so a participant's
+    photos stay grouped by slot and never collide with each other."""
+    ext = ""
+    if filename and "." in filename:
+        ext = "." + filename.rsplit(".", 1)[-1].lower()
+    path = f"{user_id}/{meal_slot.value}/{kind}_{uuid.uuid4().hex}{ext}"
+
+    sb = get_supabase()
+    sb.storage.from_(_MEAL_IMAGES_BUCKET).upload(
+        path,
+        content,
+        file_options={"content-type": content_type or "application/octet-stream"},
+    )
+    return sb.storage.from_(_MEAL_IMAGES_BUCKET).get_public_url(path)
+
+
 def log_recall_image(
     user_id: str,
     plan_id: str,

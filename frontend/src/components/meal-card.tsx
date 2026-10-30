@@ -4,7 +4,6 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ThumbsUp, ThumbsDown, UtensilsCrossed } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
 
 export type Recommendation = {
   Pkey: number;
@@ -37,55 +36,23 @@ export function MealCard({ meal }: { meal: Recommendation }) {
   async function handleReaction(value: "liked" | "disliked") {
     const next = reaction === value ? null : value;
     setSaving(true);
-    const supabase = createClient();
 
-    // 1. Update Recommendation.Reaction for display
-    await supabase
-      .from("Recommendation")
-      .update({ Reaction: next })
-      .eq("Pkey", meal.Pkey);
-
-    // 2. Sync feedback to BE_Preference_onboarding so the next plan
-    //    generation respects the user's likes/dislikes.
-    if (meal.user_id && meal.Food_Name_desc && meal.Timings) {
-      // Look up the subcategory code for this recipe from RecipeTagging
-      const { data: tag } = await supabase
-        .from("RecipeTagging")
-        .select("Subcategories")
-        .eq("Recipe_Code", meal.Food_Name_desc)
-        .single();
-      const subCategory = tag?.Subcategories as string | null;
-      if (subCategory) {
-        if (next === "disliked") {
-          // Stamp the user's current onboarding_id so this feedback isn't
-          // orphaned (onboarding_id NULL) and silently invisible to the next
-          // plan generation, which only reads preferences scoped to a
-          // specific onboarding_id.
-          const { data: session } = await supabase
-            .from("BE_Onboarding_Sessions")
-            .select("onboarding_id")
-            .eq("user_id", meal.user_id)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          await supabase.from("BE_Preference_onboarding").insert({
-            user_id: meal.user_id,
-            meal_time: meal.Timings,
-            sub_category: subCategory,
-            dish_type: null,
-            Reaction: "disliked",
-            onboarding_id: session?.onboarding_id ?? null,
-          });
-        } else if (next === null) {
-          // User un-disliked — remove the disliked preference row
-          await supabase
-            .from("BE_Preference_onboarding")
-            .delete()
-            .eq("user_id", meal.user_id)
-            .eq("sub_category", subCategory)
-            .eq("Reaction", "disliked");
-        }
-      }
+    // Updates Recommendation.Reaction for display and syncs the
+    // subcategory-level preference signal server-side (POST /plan/reaction/card) --
+    // this used to write Recommendation + BE_Preference_onboarding directly from
+    // the client, whose unscoped delete could wipe out a legitimate onboarding-time
+    // preference for the same subcategory from a different session or meal time.
+    if (meal.Food_Name_desc && meal.Timings) {
+      await fetch("/api/plan/reaction/card", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recommendation_pkey: meal.Pkey,
+          recipe_code: meal.Food_Name_desc,
+          meal_time: meal.Timings,
+          reaction: next,
+        }),
+      });
     }
 
     setReaction(next);

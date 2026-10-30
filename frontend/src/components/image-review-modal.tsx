@@ -277,17 +277,18 @@ function RecipeSearchPicker({
    * already cleared by the caller and is left alone. */
   async function loadUnit(code: string, pending: PendingConversion) {
     try {
-      const res = await fetch(`/api/recipes/${encodeURIComponent(code)}`, {
+      const res = await fetch(`/api/recipes/${encodeURIComponent(code)}/unit`, {
         headers: authHeaders(token),
       });
       if (!res.ok) { onChange({ unitLoading: false }); return; }
       const data = await res.json() as {
-        tagging?: { Description?: string | null; Portion?: number | string | null; "Portion weight (g)"?: number | string | null } | null;
+        unit?: string | null;
+        portion?: number | string | null;
+        portion_weight_g?: number | string | null;
       };
-      const tag = data.tagging;
-      const unit = (tag?.Description ? String(tag.Description).trim() : "") || "g";
-      const portion = tag?.Portion != null ? parseFloat(String(tag.Portion)) : null;
-      const portionWeightG = tag?.["Portion weight (g)"] != null ? parseFloat(String(tag["Portion weight (g)"])) : null;
+      const unit = (data.unit ? String(data.unit).trim() : "") || "g";
+      const portion = data.portion != null ? parseFloat(String(data.portion)) : null;
+      const portionWeightG = data.portion_weight_g != null ? parseFloat(String(data.portion_weight_g)) : null;
 
       let qty: string | undefined;
       if (pending && portion) {

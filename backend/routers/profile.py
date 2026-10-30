@@ -20,6 +20,8 @@ def get_profile(user_id: str = Depends(get_current_user)):
     b = basic.data[0] if basic.data else {}
     d = details.data[0] if details.data else {}
 
+    health_details = d.get("health_details") or {}
+
     return UserProfileResponse(
         user_id=user_id,
         age=b.get("Age"),
@@ -29,9 +31,12 @@ def get_profile(user_id: str = Depends(get_current_user)):
         hba1c=b.get("Hba1c"),
         activity_level=b.get("Activity_levels"),
         diet_restrictions=d.get("diet_restrictions"),
+        dietary_type=d.get("dietary_type"),
+        millets_preferred=health_details.get("millets_preferred"),
         breakfast_time=_extract_time(d.get("breakfast_time")),
         lunch_time=_extract_time(d.get("lunch_time")),
         dinner_time=_extract_time(d.get("dinner_time")),
+        step_count=d.get("step_count"),
         profile_url=b.get("profile_url"),
     )
 
@@ -81,11 +86,29 @@ def update_profile(body: UserProfileUpdateRequest, user_id: str = Depends(get_cu
 
     detail_fields = {
         "diet_restrictions": body.diet_restrictions,
+        "dietary_type": body.dietary_type,
         "breakfast_time": _to_timestamptz(body.breakfast_time),
         "lunch_time": _to_timestamptz(body.lunch_time),
         "dinner_time": _to_timestamptz(body.dinner_time),
+        "step_count": body.step_count,
     }
     detail_update = {k: v for k, v in detail_fields.items() if v is not None}
+
+    if body.millets_preferred is not None:
+        # health_details is a single jsonb blob holding several onboarding
+        # answers (co_morbidities, medications, allergy_food_codes, smoking,
+        # tobacco, alcohol, millets_preferred) -- an update must merge into
+        # the existing value, never replace it outright, or every other key
+        # in there gets silently wiped.
+        existing = (
+            sb.table("BE_Preference_onboarding_details")
+            .select("health_details")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        current_health = ((existing.data[0].get("health_details") if existing.data else None) or {})
+        detail_update["health_details"] = {**current_health, "millets_preferred": body.millets_preferred}
 
     if basic_update:
         sb.table("BE_Basic_Details").update(basic_update).eq("user_id", user_id).execute()

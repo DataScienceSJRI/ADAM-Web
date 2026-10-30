@@ -4,11 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
 from core.supabase import get_supabase
 from models.schemas import (
-    MealReactionRequest, MealSlot, ReactionResponse, ReactionItem, ReactionsListResponse, SLOT_TO_TIMINGS,
-    WebMealReactionRequest, WebReactionItem, WebReactionsListResponse,
+    MealCardReactionRequest, MealReactionRequest, MealSlot, ReactionResponse, ReactionItem, ReactionsListResponse,
+    SLOT_TO_TIMINGS, WebMealReactionRequest, WebReactionItem, WebReactionsListResponse,
     RecipeReactionRequest,
 )
-from services.reaction import save_reaction, upsert_recipes_lu
+from services.reaction import save_reaction, set_meal_card_reaction, upsert_recipes_lu
 
 logger = logging.getLogger("backend.routers.reaction")
 
@@ -179,6 +179,24 @@ def log_reaction_web(body: WebMealReactionRequest, user_id: str = Depends(get_cu
     if body.timings:
         row["timings"] = body.timings
     sb.table("MealReactions").insert(row).execute()
+    return ReactionResponse(status="ok")
+
+
+@router.post("/reaction/card", response_model=ReactionResponse, tags=["Reactions - Web"])
+def log_reaction_card(body: MealCardReactionRequest, user_id: str = Depends(get_current_user)):
+    """Like/dislike a single recipe from the web dashboard's meal card / plan
+    table (dashboard/recommendations, dashboard/plan). Replaces the old
+    client-side direct-Supabase writes in meal-card.tsx / meal-plan-table.tsx:
+    updates Recommendation.Reaction and syncs BE_Preference_onboarding so the
+    next plan generation respects the dislike -- pass reaction=null to clear
+    both."""
+    set_meal_card_reaction(
+        user_id=user_id,
+        pkey=body.recommendation_pkey,
+        recipe_code=body.recipe_code,
+        meal_time=body.meal_time,
+        reaction=body.reaction.value if body.reaction else None,
+    )
     return ReactionResponse(status="ok")
 
 

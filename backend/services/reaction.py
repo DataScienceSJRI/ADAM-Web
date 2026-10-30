@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Optional
 
 from core.supabase import get_supabase
 from models.schemas import MealSlot, ReactionType, SLOT_TO_TIMINGS
@@ -49,4 +49,68 @@ def save_reaction(
             .in_("Food_Name_desc", recipe_codes).execute()
 
     upsert_recipes_lu(user_id, slot_codes, reaction)
+
+
+def _sync_subcategory_preference(user_id: str, recipe_code: str, meal_time: str, reaction: Optional[str]) -> None:
+    """Keep the subcategory-level dislike signal in BE_Preference_onboarding
+    (read by the next plan generation) in sync with a single recipe's
+    like/dislike from the web dashboard.
+
+    Scopes every delete/insert to this exact (user_id, onboarding_id,
+    meal_time, sub_category) combination -- the client-side version of this
+    (meal-card.tsx / meal-plan-table.tsx, now removed) deleted by just
+    (user_id, sub_category, Reaction="disliked"), which also erased any
+    onboarding-time preference for the same subcategory recorded under a
+    different onboarding session or a different meal_time. No-ops if the
+    recipe has no RecipeTagging.Subcategories."""
+    sb = get_supabase()
+    tag_resp = sb.table("RecipeTagging").select("Subcategories").eq("Recipe_Code", recipe_code).maybe_single().execute()
+    sub_category = (tag_resp.data or {}).get("Subcategories") if tag_resp else None
+    if not sub_category:
+        return
+
+    session_resp = (
+        sb.table("BE_Onboarding_Sessions")
+        .select("onboarding_id")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    onboarding_id = (session_resp.data or {}).get("onboarding_id") if session_resp else None
+
+    scoped_delete = (
+        sb.table("BE_Preference_onboarding")
+        .delete()
+        .eq("user_id", user_id)
+        .eq("sub_category", sub_category)
+        .eq("meal_time", meal_time)
+        .eq("Reaction", "disliked")
+    )
+    scoped_delete = (
+        scoped_delete.eq("onboarding_id", onboarding_id) if onboarding_id
+        else scoped_delete.is_("onboarding_id", "null")
+    )
+    scoped_delete.execute()
+
+    if reaction == "disliked":
+        sb.table("BE_Preference_onboarding").insert({
+            "user_id": user_id,
+            "meal_time": meal_time,
+            "sub_category": sub_category,
+            "dish_type": None,
+            "Reaction": "disliked",
+            "onboarding_id": onboarding_id,
+        }).execute()
+
+
+def set_meal_card_reaction(user_id: str, pkey: int, recipe_code: str, meal_time: str, reaction: Optional[str]) -> None:
+    """Like/dislike a single recipe from the web dashboard's meal card / plan
+    table: updates Recommendation.Reaction for display (scoped to this user's
+    own row) and syncs the BE_Preference_onboarding signal via
+    _sync_subcategory_preference. reaction=None clears both."""
+    sb = get_supabase()
+    sb.table("Recommendation").update({"Reaction": reaction}).eq("Pkey", pkey).eq("user_id", user_id).execute()
+    _sync_subcategory_preference(user_id, recipe_code, meal_time, reaction)
 

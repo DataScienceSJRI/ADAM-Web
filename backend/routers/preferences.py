@@ -3,11 +3,39 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
 from core.supabase import get_supabase
-from models.schemas import PreferenceItem, PreferenceUpdateRequest
+from models.schemas import PreferenceCreateRequest, PreferenceItem, PreferenceUpdateRequest
 
 logger = logging.getLogger("backend.routers.preferences")
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
+
+
+def _latest_onboarding_id(sb, user_id: str) -> Optional[str]:
+    """Most recent onboarding_id for this user, from BE_Onboarding_Sessions --
+    so a preference added from mobile is scoped to a real session rather
+    than left onboarding_id=NULL and invisible to the next plan generation
+    (same lookup services/reaction.py's preference sync uses)."""
+    resp = (
+        sb.table("BE_Onboarding_Sessions")
+        .select("onboarding_id")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .maybe_single()
+        .execute()
+    )
+    return (resp.data or {}).get("onboarding_id") if resp else None
+
+
+def _row_to_item(r: dict) -> PreferenceItem:
+    return PreferenceItem(
+        id=str(r.get("id", "")),
+        meal_time=r.get("meal_time"),
+        dish_type=r.get("dish_type"),
+        sub_category=r.get("sub_category"),
+        reaction=r.get("Reaction"),
+        onboarding_id=r.get("onboarding_id"),
+    )
 
 
 @router.get("", response_model=list[PreferenceItem])
@@ -36,6 +64,57 @@ def get_preferences(
         )
         for r in (resp.data or [])
     ]
+
+
+@router.post("", response_model=PreferenceItem, status_code=201)
+def create_preference(body: PreferenceCreateRequest, user_id: str = Depends(get_current_user)):
+    """Add a new food preference selection -- the mobile 'edit preferences'
+    tab adding to whatever was picked on web during onboarding. Idempotent:
+    if this exact (meal_time, sub_category, dish_type) is already selected
+    for the user's current onboarding session, updates its reaction in place
+    instead of inserting a duplicate row."""
+    sb = get_supabase()
+    onboarding_id = _latest_onboarding_id(sb, user_id)
+
+    existing_q = (
+        sb.table("BE_Preference_onboarding")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("meal_time", body.meal_time)
+        .eq("sub_category", body.sub_category)
+    )
+    existing_q = (
+        existing_q.eq("dish_type", body.dish_type) if body.dish_type is not None
+        else existing_q.is_("dish_type", "null")
+    )
+    existing_q = (
+        existing_q.eq("onboarding_id", onboarding_id) if onboarding_id
+        else existing_q.is_("onboarding_id", "null")
+    )
+    existing = existing_q.limit(1).execute()
+
+    if existing.data:
+        resp = (
+            sb.table("BE_Preference_onboarding")
+            .update({"Reaction": body.reaction})
+            .eq("id", existing.data[0]["id"])
+            .execute()
+        )
+    else:
+        resp = (
+            sb.table("BE_Preference_onboarding")
+            .insert({
+                "user_id": user_id,
+                "meal_time": body.meal_time,
+                "sub_category": body.sub_category,
+                "dish_type": body.dish_type,
+                "Reaction": body.reaction,
+                "onboarding_id": onboarding_id,
+            })
+            .execute()
+        )
+
+    return _row_to_item(resp.data[0])
 
 
 @router.put("/{preference_id}", response_model=PreferenceItem)
@@ -76,12 +155,17 @@ def update_preference(
     )
 
 
-@router.delete("/{preference_id}", status_code=204)
+@router.delete("/{preference_id}", status_code=204, include_in_schema=False)
 def delete_preference(
     preference_id: str,
     user_id: str = Depends(get_current_user),
 ):
-    """Delete a food preference row belonging to the authenticated user."""
+    """Delete a food preference row belonging to the authenticated user.
+    Hidden from Swagger -- the mobile 'remove a preference' flow should use
+    PUT .../{id} with reaction="disliked" instead (same effect on plan
+    generation per data_loader.py's Reaction != "disliked" filter, but keeps
+    a record instead of silently vanishing the row). Kept around, unlisted,
+    for general data cleanup."""
     sb = get_supabase()
     resp = (
         sb.table("BE_Preference_onboarding")

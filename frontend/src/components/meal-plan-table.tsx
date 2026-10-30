@@ -25,13 +25,11 @@ const timingColors: Record<string, string> = {
 function ReactionButtons({
   pkey,
   initial,
-  userId,
   recipeCode,
   mealTiming,
 }: {
   pkey: number;
   initial: "liked" | "disliked" | null;
-  userId: string | null;
   recipeCode: string | null;
   mealTiming: string | null;
 }) {
@@ -41,49 +39,23 @@ function ReactionButtons({
   async function handleReaction(value: "liked" | "disliked") {
     const next = reaction === value ? null : value;
     setSaving(true);
-    const supabase = createClient();
 
-    // 1. Update Recommendation.Reaction for display
-    await supabase.from("Recommendation").update({ Reaction: next }).eq("Pkey", pkey);
-
-    // 2. Sync feedback to BE_Preference_onboarding for next plan generation
-    if (userId && recipeCode && mealTiming) {
-      const { data: tag } = await supabase
-        .from("RecipeTagging")
-        .select("Subcategories")
-        .eq("Recipe_Code", recipeCode)
-        .single();
-      const subCategory = tag?.Subcategories as string | null;
-      if (subCategory) {
-        if (next === "disliked") {
-          // Stamp the user's current onboarding_id so this feedback isn't
-          // orphaned (onboarding_id NULL) and silently invisible to the next
-          // plan generation, which only reads preferences scoped to a
-          // specific onboarding_id.
-          const { data: session } = await supabase
-            .from("BE_Onboarding_Sessions")
-            .select("onboarding_id")
-            .eq("user_id", userId)
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-          await supabase.from("BE_Preference_onboarding").insert({
-            user_id: userId,
-            meal_time: mealTiming,
-            sub_category: subCategory,
-            dish_type: null,
-            Reaction: "disliked",
-            onboarding_id: session?.onboarding_id ?? null,
-          });
-        } else if (next === null) {
-          await supabase
-            .from("BE_Preference_onboarding")
-            .delete()
-            .eq("user_id", userId)
-            .eq("sub_category", subCategory)
-            .eq("Reaction", "disliked");
-        }
-      }
+    // Updates Recommendation.Reaction for display and syncs the
+    // subcategory-level preference signal server-side (POST /plan/reaction/card) --
+    // this used to write Recommendation + BE_Preference_onboarding directly from
+    // the client, whose unscoped delete could wipe out a legitimate onboarding-time
+    // preference for the same subcategory from a different session or meal time.
+    if (recipeCode && mealTiming) {
+      await fetch("/api/plan/reaction/card", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recommendation_pkey: pkey,
+          recipe_code: recipeCode,
+          meal_time: mealTiming,
+          reaction: next,
+        }),
+      });
     }
 
     setReaction(next);
@@ -225,8 +197,7 @@ export function MealPlanTable({
                       <ReactionButtons
                         pkey={meal.Pkey}
                         initial={meal.Reaction}
-                        userId={meal.user_id}
-                        recipeCode={meal.Food_Name}
+                        recipeCode={meal.Food_Name_desc}
                         mealTiming={meal.Timings}
                       />
                     </td>

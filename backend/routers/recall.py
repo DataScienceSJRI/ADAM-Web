@@ -1,7 +1,7 @@
 import logging
 from datetime import date as date_type, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from concurrent.futures import ThreadPoolExecutor
 from core.auth import get_current_user
 from core.roles import require_coordinator
@@ -12,6 +12,7 @@ from models.schemas import (
     DietRecallUpdateRequest,
     IdentifiedFood,
     ImageIdentifyResponse,
+    ImageUploadResponse,
     MealSlot,
     RecallHistoryItem,
     RecallHistoryResponse,
@@ -20,7 +21,13 @@ from models.schemas import (
     RecallPendingItem,
     RecallPendingResponse,
 )
-from services.recall import log_recall, log_recall_image, compute_energy_for_quantity, compute_gl_for_quantity
+from services.recall import (
+    log_recall,
+    log_recall_image,
+    upload_meal_image,
+    compute_energy_for_quantity,
+    compute_gl_for_quantity,
+)
 
 logger = logging.getLogger("backend.routers.recall")
 
@@ -195,6 +202,40 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         note=body.note,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
+
+
+@router.post("/image/upload", response_model=ImageUploadResponse)
+async def upload_recall_image(
+    file: UploadFile = File(...),
+    meal_slot: MealSlot = Form(...),
+    kind: str = Form(..., description="'pre' or 'post'"),
+    user_id: str = Depends(get_current_user),
+):
+    """Upload a meal photo's raw bytes to the `meal-images` Storage bucket and
+    return its public URL. Call this first, then pass the returned url as
+    image_url_pre/image_url_post to POST /recall/image -- this endpoint only
+    stores the file, it doesn't create a DietRecall row."""
+    if kind not in ("pre", "post"):
+        raise HTTPException(status_code=400, detail="kind must be 'pre' or 'post'")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    try:
+        url = upload_meal_image(
+            user_id=user_id,
+            meal_slot=meal_slot,
+            kind=kind,
+            content=content,
+            content_type=file.content_type,
+            filename=file.filename,
+        )
+    except Exception:
+        logger.exception("Meal image upload failed for user=%s meal_slot=%s", user_id, meal_slot)
+        raise HTTPException(status_code=502, detail="Image upload failed")
+
+    return ImageUploadResponse(url=url)
 
 
 @router.post("/{recall_id}/identify", response_model=ImageIdentifyResponse)

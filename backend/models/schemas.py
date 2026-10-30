@@ -216,9 +216,12 @@ class UserProfileResponse(BaseModel):
     hba1c: Optional[float] = None
     activity_level: Optional[str] = None
     diet_restrictions: Optional[str] = None
+    dietary_type: Optional[str] = None
+    millets_preferred: Optional[bool] = None
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+    step_count: Optional[int] = None
     profile_url: Optional[str] = None
 
 
@@ -230,9 +233,12 @@ class UserProfileUpdateRequest(BaseModel):
     hba1c: Optional[float] = None
     activity_level: Optional[str] = None
     diet_restrictions: Optional[str] = None
+    dietary_type: Optional[str] = None
+    millets_preferred: Optional[bool] = None
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
     dinner_time: Optional[str] = None
+    step_count: Optional[int] = None
     profile_url: Optional[str] = None
 
     model_config = {"json_schema_extra": {"example": {
@@ -243,9 +249,12 @@ class UserProfileUpdateRequest(BaseModel):
         "hba1c": 6.5,
         "activity_level": "Sedentary",
         "diet_restrictions": "Gluten Free",
+        "dietary_type": "Vegetarian",
+        "millets_preferred": True,
         "breakfast_time": "08:30:00",
         "lunch_time": "13:00:00",
         "dinner_time": "19:30:00",
+        "step_count": 6000,
     }}}
 
 
@@ -303,6 +312,10 @@ class RecallImageResponse(BaseModel):
     status: str
     recall_id: str
     review_id: str
+
+
+class ImageUploadResponse(BaseModel):
+    url: str
 
 
 class RecallPendingItem(BaseModel):
@@ -416,6 +429,20 @@ class WebMealReactionRequest(BaseModel):
     }}}
 
 
+class MealCardReactionRequest(BaseModel):
+    recommendation_pkey: int
+    recipe_code: str
+    meal_time: str
+    reaction: Optional[WebReactionType] = None
+
+    model_config = {"json_schema_extra": {"example": {
+        "recommendation_pkey": 4821,
+        "recipe_code": "A001745",
+        "meal_time": "Breakfast",
+        "reaction": "disliked",
+    }}}
+
+
 class IdentifiedFood(BaseModel):
     food_id: str
     description: str
@@ -464,13 +491,24 @@ class PreferenceItem(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class PreferenceCreateRequest(BaseModel):
+    meal_time: str
+    sub_category: str
+    dish_type: Optional[str] = None
+    reaction: Literal["liked", "disliked"] = "liked"
+
+    model_config = {"json_schema_extra": {"example": {
+        "meal_time": "Breakfast", "sub_category": "A1A", "dish_type": None, "reaction": "liked",
+    }}}
+
+
 class PreferenceUpdateRequest(BaseModel):
     meal_time: Optional[str] = None
     dish_type: Optional[str] = None
     sub_category: Optional[str] = None
-    reaction: Optional[str] = None
+    reaction: Optional[Literal["liked", "disliked"]] = None
 
-    model_config = {"json_schema_extra": {"example": {"meal_time": "Breakfast", "dish_type": "Main", "sub_category": "A1A", "reaction": "like"}}}
+    model_config = {"json_schema_extra": {"example": {"meal_time": "Breakfast", "dish_type": "Main", "sub_category": "A1A", "reaction": "disliked"}}}
 
 
 class WeightLogRequest(BaseModel):
