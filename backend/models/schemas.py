@@ -314,10 +314,6 @@ class RecallImageResponse(BaseModel):
     review_id: str
 
 
-class ImageUploadResponse(BaseModel):
-    url: str
-
-
 class RecallPendingItem(BaseModel):
     id: Optional[str] = None
     date: Optional[str] = None
