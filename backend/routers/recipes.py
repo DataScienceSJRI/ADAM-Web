@@ -327,6 +327,35 @@ def get_recipe_unit(recipe_code: str, user_id: str = Depends(get_current_user)):
     }
 
 
+@router.get("/{recipe_code}/ingredients")
+def get_recipe_ingredients(recipe_code: str, user_id: str = Depends(get_current_user)):
+    """List of ingredients for a recipe, with quantity in grams (Recipes_ingredient.Ing_raw_amounts_g,
+    stored as text -- parsed to float here). Also includes the original qty+unit (e.g. "2 teaspoons")
+    that grams figure was converted from, for display. A recipe can have more than one row for the
+    same ingredient name (different unit/use within the recipe) -- returned as separate entries, not merged."""
+    sb = get_supabase()
+    resp = (
+        sb.table("Recipes_ingredient")
+        .select("Ingredients, Ing_raw_amounts_g, Qty, Unit")
+        .eq("Recipe_Code", recipe_code)
+        .execute()
+    )
+    items = []
+    for r in resp.data or []:
+        raw_g = r.get("Ing_raw_amounts_g")
+        try:
+            quantity_g = float(raw_g) if raw_g not in (None, "") else None
+        except (TypeError, ValueError):
+            quantity_g = None
+        items.append({
+            "ingredient": r.get("Ingredients"),
+            "quantity_g": quantity_g,
+            "qty": r.get("Qty"),
+            "unit": r.get("Unit"),
+        })
+    return items
+
+
 def _set_recipe_reaction(sb, recipe_code: str, user_id: str, interaction: str) -> dict:
     """Upsert into Recipes_LU keyed on (UID, Recipe_Code), so re-reacting overwrites the prior value."""
     sb.table("Recipes_LU").upsert(

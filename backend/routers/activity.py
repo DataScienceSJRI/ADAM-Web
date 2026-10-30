@@ -41,6 +41,15 @@ def activity_log(body: ActivityLogRequest, user_id: str = Depends(get_current_us
     return ActivityLogResponse(status="ok", activity_id=activity_id)
 
 
+@router.get("/options")
+def get_activity_options(user_id: str = Depends(get_current_user)):
+    """List of physical activity names to pick from when logging an activity
+    (distinct from GET /activity's own log history)."""
+    sb = get_supabase()
+    resp = sb.table("physical_activities").select("id, pa_name, energy_per_min").order("pa_name").execute()
+    return resp.data or []
+
+
 @router.get("", response_model=ActivityHistoryResponse)
 def get_activity_history(
     date: Optional[str] = Query(None, description="Filter by date YYYY-MM-DD"),

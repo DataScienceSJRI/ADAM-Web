@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications, kpi, users, feedback, weight, preferences, whatsapp_router, status_dashboard, outside_food
+from routers import auth, profile, plan, daily, reaction, recall, activity, recipes, notifications, kpi, users, feedback, weight, preferences, whatsapp_router, status_dashboard, outside_food, low_cal_options
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler()]
 _log_file = os.getenv("BACKEND_LOG_FILE")
@@ -192,6 +192,7 @@ app.include_router(preferences.router,   prefix=V1)
 app.include_router(whatsapp_router.router, prefix=V1)
 app.include_router(status_dashboard.router, prefix=V1)
 app.include_router(outside_food.router,  prefix=V1)
+app.include_router(low_cal_options.router, prefix=V1)
 
 
 @app.get("/health")
