@@ -4,10 +4,28 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
 from core.supabase import get_supabase
 from models.schemas import PreferenceCreateRequest, PreferenceItem, PreferenceUpdateRequest
+from services.profile_builder import build_profile
 
 logger = logging.getLogger("backend.routers.preferences")
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
+
+_CATEGORY_COLUMNS = {
+    "breakfast": "Breakfast",
+    "lunch": "Lunch",
+    "dinner": "Dinner",
+    "snacks": "Snacks",
+    "beverage": "Beverage",
+    "side_dish_breakfast": "Side_dish_breakfast",
+    "side_dish_lunch": "Side_dish_lunch",
+    "side_dish_dinner": "Side_dish_dinner",
+}
+
+
+def _is_truthy(v) -> bool:
+    """SubCategory_Onboarding's flag columns are a mix of bigint (0/1) and
+    text ("0"/"1") across columns -- compare as string to handle both."""
+    return v is not None and str(v).strip() not in ("", "0")
 
 
 def _latest_onboarding_id(sb, user_id: str) -> Optional[str]:
@@ -64,6 +82,32 @@ def get_preferences(
         )
         for r in (resp.data or [])
     ]
+
+
+@router.get("/options")
+def get_preference_options(
+    category: str = Query(..., description=f"One of: {', '.join(_CATEGORY_COLUMNS)}"),
+    user_id: str = Depends(get_current_user),
+):
+    """Sub-category options to pick from when adding a preference (POST
+    /preferences) -- the same catalog web onboarding's meal-preferences-form
+    reads from SubCategory_Onboarding, filtered to one category/tab.
+    Auto-filtered to Veg == 1 if the user's own dietary_type is veg/vegan,
+    same rule the web form applies."""
+    col = _CATEGORY_COLUMNS.get(category.strip().lower())
+    if not col:
+        raise HTTPException(status_code=400, detail=f"category must be one of: {', '.join(_CATEGORY_COLUMNS)}")
+
+    sb = get_supabase()
+    resp = sb.table("SubCategory_Onboarding").select(f"Code, SubCategory, Veg, {col}").execute()
+    rows = [r for r in (resp.data or []) if _is_truthy(r.get(col))]
+
+    profile = build_profile(user_id)
+    dietary_type = ((profile.get("diet_type") if profile else None) or "").strip().lower()
+    if dietary_type in ("veg", "vegan"):
+        rows = [r for r in rows if r.get("Veg") == 1]
+
+    return [{"code": r.get("Code"), "sub_category": r.get("SubCategory")} for r in rows]
 
 
 @router.post("", response_model=PreferenceItem, status_code=201)
