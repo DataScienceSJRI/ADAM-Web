@@ -994,10 +994,23 @@ def run_lp(
         is_dominant_recall_slot = bool(set(ids) & dominant_slot_ids.get(meal_time, set()))
         is_staple_recall_slot = bool(set(ids) & staple_slot_ids.get(meal_time, set()))
         is_subcat_recall_slot = bool(set(ids) & subcat_slot_ids.get(meal_time, set()))
-        is_recall_relaxed_slot = is_dominant_recall_slot or is_staple_recall_slot or is_subcat_recall_slot
+        # Only an exact-recipe match (dominant/staple) earns full relaxation
+        # of the per-recipe cap below. A subcategory-only match covers EVERY
+        # recipe sharing a frequently-eaten category, not just the ones he's
+        # actually logged -- fully relaxing the per-recipe cap for all of
+        # them let one never-logged recipe monopolize the slot every day
+        # (confirmed for real on A001_MAHENDRA: "Bottle Gourd Dal" and
+        # "Bottlegourd Subzi" filled 4-5 Dinner days straight with zero
+        # DietRecall history of their own, purely because Dinner/F2A and
+        # Dinner/D2A were subcat-relaxed as whole categories). The
+        # subcategory bonus itself still rewards the category in the
+        # objective elsewhere, so it can still repeat across days -- just
+        # via different recipes, through the ordinary dynamic bracket below.
+        is_exact_recipe_relaxed_slot = is_dominant_recall_slot or is_staple_recall_slot
+        is_recall_relaxed_slot = is_exact_recipe_relaxed_slot or is_subcat_recall_slot
 
         # --- LAYER A: Dynamic Hard Guardrail ---
-        if is_recall_relaxed_slot:
+        if is_exact_recipe_relaxed_slot:
             # Relaxed: let the quadratic diet-recall bonus (and the ordinary
             # exactly-1-per-day / other-slot competition) decide how often
             # this repeats, instead of an artificial per-recipe ceiling.
@@ -1036,7 +1049,7 @@ def run_lp(
         # to actually repeat -- skipped for a dominant/staple-recall slot,
         # since a penalty here would fight the bonus we're deliberately
         # applying.
-        if len(ids) > 1 and not is_recall_relaxed_slot:
+        if len(ids) > 1 and not is_exact_recipe_relaxed_slot:
             safe_mt = str(meal_time).replace(" ", "_").replace("-", "_")
             safe_dt = str(dish_type).replace(" ", "_").replace("-", "_")
             safe_rc = str(recipe_code).replace(" ", "_").replace("-", "_")
@@ -1051,11 +1064,15 @@ def run_lp(
     main_df = candidates[candidates["Dish_Type"].astype(str).str.strip() == "Main"].copy()
     main_subcats = main_df["Preferred_SubCategory_code"].dropna().nunique()
     global_recipe_cap = 2 if main_subcats <= 5 else 1
-    # Union of the hard-floor dominant ids and both soft-only sets (staple,
-    # subcategory) -- the global cap relaxation below is just a <= ceiling
-    # raise, same as Layer A's, so it's equally safe to extend to all three
-    # (never a floor, can't cause Infeasible).
-    _all_relaxed_sources = [dominant_slot_ids, staple_slot_ids, subcat_slot_ids]
+    # Union of the hard-floor dominant ids and the staple soft-only set --
+    # the global cap relaxation below is just a <= ceiling raise, same as
+    # Layer A's, so it's equally safe to extend to both (never a floor,
+    # can't cause Infeasible). subcat_slot_ids is deliberately excluded here
+    # (same reasoning as Layer A above): it covers every recipe sharing a
+    # category, not just ones actually logged, so fully exempting it from
+    # the global cap let a never-logged recipe inside a subcat-boosted
+    # category repeat without limit across the whole week.
+    _all_relaxed_sources = [dominant_slot_ids, staple_slot_ids]
     all_dominant_recall_ids = (
         set().union(*[s for d in _all_relaxed_sources for s in d.values()])
         if any(_all_relaxed_sources) else set()

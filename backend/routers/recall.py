@@ -435,11 +435,39 @@ def get_participant_recall_logs(
             .data
         ) or []
 
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    def fetch_plan_gl():
+        # Recommendation itself has no GL column -- GL is only computed and
+        # stored on FinalSummary, keyed by (Date, Meal_Time, Recipe_Code).
+        # Fetched separately and merged below by that key rather than
+        # changing what Recommendation stores.
+        return (
+            sb.table("FinalSummary")
+            .select("Date, Meal_Time, Recipe_Code, GL, Meal_GL")
+            .in_("user_id", user_filter)
+            .gte("Date", cutoff)
+            .limit(500)
+            .execute()
+            .data
+        ) or []
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
         logs_future = ex.submit(fetch_logs)
         plan_future = ex.submit(fetch_plan)
+        plan_gl_future = ex.submit(fetch_plan_gl)
         logs = logs_future.result()
         plan_rows = plan_future.result()
+        plan_gl_rows = plan_gl_future.result()
+
+    gl_by_key = {
+        ((r.get("Date") or "")[:10], str(r.get("Meal_Time") or "").strip().lower(), str(r.get("Recipe_Code") or "").strip().upper()):
+        (r.get("GL"), r.get("Meal_GL"))
+        for r in plan_gl_rows
+    }
+    for p in plan_rows:
+        key = ((p.get("Date") or "")[:10], str(p.get("Timings") or "").strip().lower(), str(p.get("Food_Name_desc") or "").strip().upper())
+        gl, meal_gl = gl_by_key.get(key, (None, None))
+        p["GL"] = gl
+        p["Meal_GL"] = meal_gl
 
     dates_set: set = set()
     for r in logs:
