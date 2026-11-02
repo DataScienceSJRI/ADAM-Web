@@ -498,6 +498,17 @@ class PreferenceCreateRequest(BaseModel):
     }}}
 
 
+class PreferenceBulkCreateRequest(BaseModel):
+    meal_time: str
+    sub_categories: List[str]
+    dish_type: Optional[str] = None
+    reaction: Literal["liked", "disliked"] = "liked"
+
+    model_config = {"json_schema_extra": {"example": {
+        "meal_time": "Breakfast", "sub_categories": ["A1A", "A1B", "A1C"], "dish_type": None, "reaction": "liked",
+    }}}
+
+
 class PreferenceUpdateRequest(BaseModel):
     meal_time: Optional[str] = None
     dish_type: Optional[str] = None

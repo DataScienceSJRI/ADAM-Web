@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from core.auth import get_current_user
 from core.supabase import get_supabase
-from models.schemas import PreferenceCreateRequest, PreferenceItem, PreferenceUpdateRequest
+from models.schemas import PreferenceBulkCreateRequest, PreferenceCreateRequest, PreferenceItem, PreferenceUpdateRequest
 from services.profile_builder import build_profile
 
 logger = logging.getLogger("backend.routers.preferences")
@@ -110,25 +110,23 @@ def get_preference_options(
     return [{"code": r.get("Code"), "sub_category": r.get("SubCategory")} for r in rows]
 
 
-@router.post("", response_model=PreferenceItem, status_code=201)
-def create_preference(body: PreferenceCreateRequest, user_id: str = Depends(get_current_user)):
-    """Add a new food preference selection -- the mobile 'edit preferences'
-    tab adding to whatever was picked on web during onboarding. Idempotent:
-    if this exact (meal_time, sub_category, dish_type) is already selected
-    for the user's current onboarding session, updates its reaction in place
-    instead of inserting a duplicate row."""
-    sb = get_supabase()
-    onboarding_id = _latest_onboarding_id(sb, user_id)
-
+def _create_or_update_preference(
+    sb, user_id: str, onboarding_id: Optional[str],
+    meal_time: str, sub_category: str, dish_type: Optional[str], reaction: str,
+) -> dict:
+    """Idempotent add: if this exact (meal_time, sub_category, dish_type) is
+    already selected for the given onboarding session, updates its reaction
+    in place instead of inserting a duplicate row. Shared by the single and
+    bulk create endpoints."""
     existing_q = (
         sb.table("BE_Preference_onboarding")
         .select("id")
         .eq("user_id", user_id)
-        .eq("meal_time", body.meal_time)
-        .eq("sub_category", body.sub_category)
+        .eq("meal_time", meal_time)
+        .eq("sub_category", sub_category)
     )
     existing_q = (
-        existing_q.eq("dish_type", body.dish_type) if body.dish_type is not None
+        existing_q.eq("dish_type", dish_type) if dish_type is not None
         else existing_q.is_("dish_type", "null")
     )
     existing_q = (
@@ -140,7 +138,7 @@ def create_preference(body: PreferenceCreateRequest, user_id: str = Depends(get_
     if existing.data:
         resp = (
             sb.table("BE_Preference_onboarding")
-            .update({"Reaction": body.reaction})
+            .update({"Reaction": reaction})
             .eq("id", existing.data[0]["id"])
             .execute()
         )
@@ -149,16 +147,55 @@ def create_preference(body: PreferenceCreateRequest, user_id: str = Depends(get_
             sb.table("BE_Preference_onboarding")
             .insert({
                 "user_id": user_id,
-                "meal_time": body.meal_time,
-                "sub_category": body.sub_category,
-                "dish_type": body.dish_type,
-                "Reaction": body.reaction,
+                "meal_time": meal_time,
+                "sub_category": sub_category,
+                "dish_type": dish_type,
+                "Reaction": reaction,
                 "onboarding_id": onboarding_id,
             })
             .execute()
         )
+    return resp.data[0]
 
-    return _row_to_item(resp.data[0])
+
+@router.post("", response_model=PreferenceItem, status_code=201)
+def create_preference(body: PreferenceCreateRequest, user_id: str = Depends(get_current_user)):
+    """Add a new food preference selection -- the mobile 'edit preferences'
+    tab adding to whatever was picked on web during onboarding. Idempotent:
+    if this exact (meal_time, sub_category, dish_type) is already selected
+    for the user's current onboarding session, updates its reaction in place
+    instead of inserting a duplicate row."""
+    sb = get_supabase()
+    onboarding_id = _latest_onboarding_id(sb, user_id)
+    row = _create_or_update_preference(
+        sb, user_id=user_id, onboarding_id=onboarding_id,
+        meal_time=body.meal_time, sub_category=body.sub_category,
+        dish_type=body.dish_type, reaction=body.reaction,
+    )
+    return _row_to_item(row)
+
+
+@router.post("/bulk", response_model=list[PreferenceItem], status_code=201)
+def create_preferences_bulk(body: PreferenceBulkCreateRequest, user_id: str = Depends(get_current_user)):
+    """Add several food preference selections in one call -- same per-item
+    idempotent add-or-update as POST /preferences, for a mobile multi-select
+    picker (e.g. selecting several dishes on one meal_time/dish_type tab at
+    once) instead of one request per code. meal_time, dish_type, and reaction
+    are shared across every code in the list."""
+    if not body.sub_categories:
+        raise HTTPException(status_code=400, detail="sub_categories must not be empty")
+
+    sb = get_supabase()
+    onboarding_id = _latest_onboarding_id(sb, user_id)
+
+    return [
+        _row_to_item(_create_or_update_preference(
+            sb, user_id=user_id, onboarding_id=onboarding_id,
+            meal_time=body.meal_time, sub_category=code,
+            dish_type=body.dish_type, reaction=body.reaction,
+        ))
+        for code in dict.fromkeys(body.sub_categories)
+    ]
 
 
 @router.put("/{preference_id}", response_model=PreferenceItem)
