@@ -832,11 +832,62 @@ def _run_plan_background(
             "_user_per_meal_gl_cap_override": 50,
             "_user_per_day_gl_cap_override": 150,
         },
+        "A003_ANISH": {
+            # Confirmed directly by the participant: "needs eggs every day
+            # for breakfast" -- scoped to Breakfast specifically, not a
+            # blanket any-meal-time mandate like A002's.
+            "_egg_every_day_breakfast_hard": True,
+        },
     }
     user_overrides = USER_OVERRIDES.get(user_id)
     if user_overrides:
         profile.update(user_overrides)
         logger.info("user_id=%s -> per-user hard mandate overrides=%s", user_id, user_overrides)
+
+    # Generic egg-every-day mandate: qualifies automatically for ANY user
+    # (not just the manually-configured ones above) when DietRecall shows
+    # egg logged on more than 3 days at a meal_time AND egg is declared as a
+    # liked preference there, in any dish_type category. See
+    # services/adaptive_preferences.compute_egg_mandate_mealtimes -- this
+    # doesn't force what egg is paired with, just that >=1 egg-tagged
+    # candidate is required that meal_time; the actual combination falls
+    # out of the ordinary registry/adaptive-combination candidate
+    # construction, which already reflects this user's real pairings.
+    try:
+        from services.adaptive_preferences import compute_egg_mandate_mealtimes
+        egg_mandate_mealtimes = compute_egg_mandate_mealtimes(user_id)
+    except Exception:
+        logger.warning("user_id=%s -> could not compute egg mandate mealtimes", user_id, exc_info=True)
+        egg_mandate_mealtimes = set()
+    if egg_mandate_mealtimes:
+        profile["_egg_mandate_mealtimes"] = egg_mandate_mealtimes
+        logger.info("user_id=%s -> egg-every-day mandate meal_times=%s", user_id, sorted(egg_mandate_mealtimes))
+
+    # Generalized beyond egg, per explicit request: at a meal_time with
+    # several frequently-eaten-and-declared subcategories, it's not safe to
+    # hard-mandate every one of them every day -- they compete for the same
+    # single slot and stacking that many every-day requirements risks
+    # Infeasible. Tried as a live OR-across-the-set hard constraint under
+    # three different scopings (unscoped dish_type, Main-only every-2-days
+    # window, Main/Main2-separated top-3-most-eaten) -- every variant either
+    # went Infeasible/Not-Solved (A003, A006, A009) or stalled CBC's cut
+    # generation for 25-65+ minutes once the user's real, correctly-filtered
+    # candidate pool was active, regardless of how tightly the qualifying
+    # set was scoped. NOT safe as a live hard constraint with this solver;
+    # left as reporting-only (see
+    # services/adaptive_preferences.compute_general_mandate_subcats_by_mealtime)
+    # -- intentionally NOT wired into profile here. Egg's version above is
+    # fine because it's always a singleton requirement, never several
+    # subcategories competing for one slot.
+    try:
+        from services.adaptive_preferences import compute_general_mandate_subcats_by_mealtime
+        general_mandate_subcats = compute_general_mandate_subcats_by_mealtime(user_id)
+        logger.info(
+            "user_id=%s -> general mandate candidates (reporting-only, NOT applied)=%s",
+            user_id, {mt: {dt: sorted(s) for dt, s in by_dt.items()} for mt, by_dt in general_mandate_subcats.items()},
+        )
+    except Exception:
+        logger.warning("user_id=%s -> could not compute general mandate subcategories", user_id, exc_info=True)
 
     _write_plan_status(body.onboarding_id, "generating")
 

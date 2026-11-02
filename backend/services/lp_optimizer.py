@@ -900,6 +900,13 @@ def run_lp(
     # genuinely conflicts with GL/portion/energy constraints elsewhere.
     DIETRECALL_DOMINANT_MIN_DAYS_HARD = 4
 
+    # Upper ceiling for a dominant/staple-exempted exact recipe, per slot and
+    # (see the global cross-meal_time cap further below) combined across
+    # every meal_time it's exempted at. Was fully unlimited (n_days) before
+    # -- see Layer A's comment where this is consumed for the real-world
+    # case (A008_NAGABHUSHA) that motivated capping it instead.
+    DOMINANT_STAPLE_MAX_REP_PER_SLOT = 5
+
     dominant_bonus_keys = ds.get("dietrecall_dominant_bonus") or {}
     dominant_slot_ids: dict[str, set] = {}
     if dominant_bonus_keys:
@@ -1011,10 +1018,18 @@ def run_lp(
 
         # --- LAYER A: Dynamic Hard Guardrail ---
         if is_exact_recipe_relaxed_slot:
-            # Relaxed: let the quadratic diet-recall bonus (and the ordinary
-            # exactly-1-per-day / other-slot competition) decide how often
-            # this repeats, instead of an artificial per-recipe ceiling.
-            max_recipe_rep = n_days
+            # Relaxed, but not fully unlimited: a dominant/staple recipe can
+            # still repeat far more freely than the ordinary dynamic bracket
+            # below, just capped at DOMINANT_STAPLE_MAX_REP_PER_SLOT instead
+            # of n_days. Confirmed for real on A008_NAGABHUSHA: "Coffee
+            # (sugarless)" independently qualified as staple at BOTH
+            # Breakfast and Snacks, and with no per-slot ceiling at all,
+            # each slot maxed out to n_days on its own (7+7=14 total/week)
+            # since nothing discouraged it once exempted. Capping each slot
+            # bounds that, even though a recipe staple at >1 meal_time can
+            # still sum higher across them combined than a single-meal_time
+            # staple would.
+            max_recipe_rep = min(n_days, DOMINANT_STAPLE_MAX_REP_PER_SLOT)
         else:
             # Look up how many unique recipes are competing for this specific slot
             unique_recipes = slot_recipe_counts.get((meal_time, dish_type), 1)
@@ -1115,7 +1130,14 @@ def run_lp(
             effective_cap = max(global_recipe_cap, per_slot_floor)
             model += lpSum(y[(d, i)] for d in days for i in remaining_ids) <= effective_cap
         if dominant_ids_here:
-            model += lpSum(y[(d, i)] for d in days for i in dominant_ids_here) <= n_days
+            # Same DOMINANT_STAPLE_MAX_REP_PER_SLOT ceiling as Layer A, but
+            # applied to this recipe's TOTAL across every non-Snacks
+            # meal_time it's dominant/staple-exempted at combined (not per
+            # slot) -- confirmed for real on A004_RAJAT: "Chapathi" was
+            # dominant at Lunch AND separately staple at Dinner, and with no
+            # cap here before, the solver used the exact same recipe code
+            # for literally all 7 Lunch+Dinner days combined.
+            model += lpSum(y[(d, i)] for d in days for i in dominant_ids_here) <= min(n_days, DOMINANT_STAPLE_MAX_REP_PER_SLOT)
 
     # When pool is small (≤5 subcategories), ensure any selected subcategory appears at most 14 times
     if main_subcats <= 5 and main_subcats > 1:
@@ -1757,10 +1779,25 @@ def run_lp(
     # raises the requirement to every single day, hard.
     egg_every_day_hard = bool((profile or {}).get("_egg_every_day_hard"))
 
+    # Per-user override: profile["_egg_every_day_breakfast_hard"] (confirmed
+    # directly by A003_ANISH: "needs eggs every day for breakfast") -- same
+    # hard every-day mandate as A002's above, but scoped to Breakfast only
+    # rather than any meal_time, since that's specifically what was asked
+    # for rather than "egg somewhere in the day."
+    egg_every_day_breakfast_hard = bool((profile or {}).get("_egg_every_day_breakfast_hard"))
+
     egg_penalty_terms = []
     if "egg" in selected_types and is_egg.any():
         egg_ids = [int(i) for i in candidates.index if is_egg.loc[i]]
         if egg_ids:
+            if egg_every_day_breakfast_hard:
+                breakfast_egg_ids = [
+                    i for i in egg_ids
+                    if str(candidates.loc[i, "Meal_Time"]).strip().title() == "Breakfast"
+                ]
+                if breakfast_egg_ids:
+                    for d in days:
+                        model += lpSum(y[(d, i)] for i in breakfast_egg_ids) >= 1
             if egg_every_day_hard:
                 for d in days:
                     model += lpSum(y[(d, i)] for i in egg_ids) >= 1
@@ -1770,7 +1807,7 @@ def run_lp(
                     egg_day_ok[d] = LpVariable(f"egg_day_ok_{d}", lowBound=0, upBound=1, cat="Binary")
                     model += egg_day_ok[d] <= lpSum(y[(d, i)] for i in egg_ids)
                 egg_shortfall = LpVariable("egg_days_shortfall", lowBound=0)
-                egg_min_days = 2
+                egg_min_days = 3
                 model += lpSum(egg_day_ok[d] for d in days) + egg_shortfall >= egg_min_days
                 egg_penalty_weight = 1_000_000.0
                 egg_penalty_terms.append(egg_penalty_weight * egg_shortfall)
@@ -1781,6 +1818,78 @@ def run_lp(
     if boiled_egg_daily_hard and boiled_egg_ids:
         for d in days:
             model += lpSum(y[(d, i)] for i in boiled_egg_ids) >= 1
+
+    # Generic egg-every-day mandate (profile["_egg_mandate_mealtimes"], a set
+    # of meal_times) -- see services/adaptive_preferences.
+    # compute_egg_mandate_mealtimes. Qualifies automatically for any user
+    # from their own DietRecall + declared preferences, rather than needing
+    # a hardcoded per-user override like A002/A003 above. Only requires
+    # *some* egg-tagged candidate that meal_time each day; which one, and
+    # what it's paired with, is left to the ordinary candidate construction.
+    egg_mandate_mealtimes = {
+        str(mt).strip().title() for mt in ((profile or {}).get("_egg_mandate_mealtimes") or set())
+    }
+    if egg_mandate_mealtimes and is_egg.any():
+        for mt in egg_mandate_mealtimes:
+            mt_egg_ids = [
+                int(i) for i in candidates.index
+                if is_egg.loc[i] and str(candidates.loc[i, "Meal_Time"]).strip().title() == mt
+            ]
+            if mt_egg_ids:
+                for d in days:
+                    model += lpSum(y[(d, i)] for i in mt_egg_ids) >= 1
+
+    # Generalized "at least one familiar item" mandate
+    # (profile["_general_mandate_subcats_by_mealtime"], a dict of meal_time
+    # -> {"Main": {codes}, "Main2": {codes}}) -- see services.
+    # adaptive_preferences.compute_general_mandate_subcats_by_mealtime.
+    # Deliberately an OR across a qualifying set, not one >=1-every-day
+    # constraint per subcategory: a meal_time commonly has several
+    # qualifying subcategories (e.g. roti AND salad AND curd all frequently
+    # eaten at the same Lunch), and they'd all compete for the same single
+    # slot -- stacking that many independent every-day requirements risks
+    # Infeasible the same way egg's would if applied per-item rather than
+    # per-meal_time.
+    #
+    # Two things confirmed necessary by isolation testing (A006_RAJENDRA,
+    # A009_PRAKASH), neither of which alone was enough:
+    #  1. Scoped to one Dish_Type at a time, not spanning every dish_type
+    #     (A006: 176 candidate rows at a crowded Lunch vs. 45 Main-only --
+    #     made every LP-relaxation/cut-generation pass far more expensive,
+    #     stalling CBC at the root node for 25+ min for zero pruning value).
+    #  2. The qualifying set itself capped to the top few most-established
+    #     items (A009: even Main-only, an unbounded 5-subcategory OR set all
+    #     sharing his one Lunch Main slot was still genuinely Infeasible/
+    #     Not-Solved once his real, correctly-filtered candidate pool was
+    #     active -- narrowing a day's cadence didn't help, since the
+    #     conflict was the slot contention itself, not how often it's
+    #     required). compute_general_mandate_subcats_by_mealtime already
+    #     caps each (meal_time, dish_type) to its top 3 most-eaten
+    #     candidates, ranked independently -- Main and Main2 get their own
+    #     slot and their own requirement instead of merging into one.
+    #
+    # This only guarantees the day's combination includes *something* from
+    # the familiar set at that dish_type, not a specific one and not all.
+    general_mandate_by_mt = (profile or {}).get("_general_mandate_subcats_by_mealtime") or {}
+    if general_mandate_by_mt and "Preferred_SubCategory_code" in candidates.columns:
+        subcat_upper_all = candidates["Preferred_SubCategory_code"].astype(str).str.strip().str.upper()
+        meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
+        dish_type_all = candidates["Dish_Type"].astype(str).str.strip()
+        for mt, subcats_by_dish_type in general_mandate_by_mt.items():
+            mt_title = str(mt).strip().title()
+            for dish_type, subcats in (subcats_by_dish_type or {}).items():
+                subcats_upper = {str(c).strip().upper() for c in subcats}
+                if not subcats_upper:
+                    continue
+                mask = (
+                    (meal_time_title_all == mt_title)
+                    & subcat_upper_all.isin(subcats_upper)
+                    & (dish_type_all == dish_type)
+                )
+                mt_ids = [int(i) for i in candidates.index[mask]]
+                if mt_ids:
+                    for d in days:
+                        model += lpSum(y[(d, i)] for i in mt_ids) >= 1
 
     # Step 4: Safely combine ALL penalties using += to avoid erasing the GL objective
     if variety_penalties:
@@ -1928,8 +2037,18 @@ def run_lp(
     # variation), with no single constraint uniquely responsible. Softening
     # cholesterol/salt adds slack to that margin so the plan still generates
     # reliably. TUL is left hard — it wasn't included in this softening.
-    cholesterol_limit_per_day_mg = 300.0
-    cholesterol_penalty_weight = 5000.0
+    #
+    # Raised from 300mg/5000-weight per explicit request: a single ordinary
+    # 2-egg breakfast portion (~493mg) was being charged ~193mg of overage at
+    # 5000/mg -- roughly 965,000 objective points, versus the few thousand a
+    # diet-recall staple/subcategory bonus can realistically contribute, so
+    # egg could never win even when it was genuinely a frequently-eaten,
+    # explicitly-declared preference (confirmed for real on A001_MAHENDRA).
+    # 500mg/day fully absorbs one normal egg-based dish with zero overage,
+    # while the still-substantial 2500 weight keeps real deterrence for a day
+    # that stacks egg with other high-cholesterol items well past that.
+    cholesterol_limit_per_day_mg = 500.0
+    cholesterol_penalty_weight = 2500.0
     cholesterol_penalty_terms = []
     if 'Cholesterol_mg' in candidates.columns:
         for d in days:

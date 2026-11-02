@@ -98,6 +98,21 @@ def _main1_universe(sb) -> set[str]:
     return {str(r["Main1_Code"]).strip().upper() for r in rows if r.get("Main1_Code")}
 
 
+def _egg_subcategory_codes(sb) -> set[str]:
+    """Subcategory codes whose name identifies them as egg dishes (e.g. G2T
+    'Egg', I1F 'Egg and omlettes', D1D 'Egg based curry') -- used to check
+    whether a user has egg declared as a preference at all, in ANY dish_type
+    category (Main, Side, Beverage, ...), not just Main. Keyword-based
+    because SubCategory carries no diet-tag column of its own; every
+    currently-known egg subcategory name does contain "egg" literally."""
+    rows = fetch_all_rows(lambda: sb.table("SubCategory").select("Code,SubCategory"))
+    return {
+        str(r["Code"]).strip().upper()
+        for r in rows
+        if r.get("Code") and "egg" in str(r.get("SubCategory") or "").lower()
+    }
+
+
 class _UserRecallContext:
     """Shared per-user recall data both compute_adaptive_main_preferences and
     compute_adaptive_main_combinations need, loaded once."""
@@ -111,25 +126,62 @@ class _UserRecallContext:
             sb.table("BE_Preference_onboarding")
             .select("meal_time,dish_type,sub_category,Reaction")
             .eq("user_id", user_id)
-            .eq("dish_type", "Main")
         ))
         self.declared: dict[str, set[str]] = {}
+        # declared_any_category: same as self.declared, but across every
+        # dish_type (Main/Side/Beverage/...), not just Main -- used by the
+        # egg-every-day mandate below, since a user can genuinely have egg
+        # declared as a Side rather than a Main and still mean it as a real,
+        # every-day want.
+        self.declared_any_category: dict[str, set[str]] = {}
+        # declared_main2: same as self.declared, but for dish_type=="Main2"
+        # specifically -- used by the general mandate to rank/cap Main and
+        # Main2 candidates separately rather than lumping them into one
+        # crowded Main-only OR set.
+        self.declared_main2: dict[str, set[str]] = {}
         for r in declared_rows:
             if r.get("Reaction") == "disliked":
                 continue
             meal_time = str(r.get("meal_time") or "").strip().title()
             code = str(r.get("sub_category") or "").strip().upper()
-            if meal_time and code:
+            if not (meal_time and code):
+                continue
+            self.declared_any_category.setdefault(meal_time, set()).add(code)
+            dish_type_here = str(r.get("dish_type") or "").strip()
+            if dish_type_here == "Main":
                 self.declared.setdefault(meal_time, set()).add(code)
+            elif dish_type_here == "Main2":
+                self.declared_main2.setdefault(meal_time, set()).add(code)
 
         recall_rows = fetch_all_rows(lambda: (
             sb.table("DietRecall").select("Date,meal_slot,Food_Name_desc").eq("user_id", user_id)
         ))
+        self.recall_rows = recall_rows
         recipe_codes = {str(r["Food_Name_desc"]).strip() for r in recall_rows if r.get("Food_Name_desc")}
         tag_rows = fetch_all_rows(lambda: (
-            sb.table("RecipeTagging").select("Recipe_Code,Subcategories").in_("Recipe_Code", list(recipe_codes))
+            sb.table("RecipeTagging").select('Recipe_Code,"Recipe Name",Subcategories,"Ovo-vegetarian"').in_("Recipe_Code", list(recipe_codes))
         )) if recipe_codes else []
         recipe_to_subcat = {r["Recipe_Code"]: str(r.get("Subcategories") or "").strip().upper() for r in tag_rows}
+        self.recipe_to_subcat = recipe_to_subcat
+        self.recipe_to_name = {r["Recipe_Code"]: r.get("Recipe Name") for r in tag_rows}
+        egg_recipe_codes = {r["Recipe_Code"] for r in tag_rows if str(r.get("Ovo-vegetarian")) == "1"}
+
+        # egg_days_by_mealtime: distinct logged days, per meal_time, where an
+        # Ovo-vegetarian recipe was logged -- UNRESTRICTED (every occurrence
+        # counts, not just ones where egg was the day's sole item), same
+        # reasoning as eaten_any below: egg is structurally almost always
+        # eaten alongside something else (egg + chapathi, egg + sambar),
+        # never alone, so a solo-only count would always read ~0 regardless
+        # of how often he really eats it.
+        self.egg_days_by_mealtime: dict[str, set[date]] = {}
+        for r in recall_rows:
+            if str(r.get("Food_Name_desc") or "").strip() not in egg_recipe_codes:
+                continue
+            d = _normalize_date(r.get("Date"))
+            meal_time = str(r.get("meal_slot") or "").strip().title()
+            if not d or not meal_time:
+                continue
+            self.egg_days_by_mealtime.setdefault(meal_time, set()).add(date.fromisoformat(d))
 
         # all_codes_by_day: every subcategory logged on each (meal_time,
         # date), unfiltered -- used to find subcategories that stand alone,
@@ -170,8 +222,11 @@ class _UserRecallContext:
             majority_solo = {c for c, n in totals.items() if solos.get(c, 0) > n / 2}
             self.effective_main_codes[meal_time] = self.main1_codes | majority_solo
 
-        # eaten: distinct-day counts per (meal_time, subcategory), for both
-        # the demotion eaten-count check and promotion.
+        # eaten: distinct-day counts per (meal_time, subcategory), restricted
+        # to effective_main_codes (registry Main1s + majority-solo codes) --
+        # used for PROMOTION only, where the whole point is confirming a
+        # subcategory is genuinely functioning as a standalone anchor dish
+        # before suggesting it as a new, undeclared Main.
         self.eaten: dict[str, dict[str, list[date]]] = {}
         for meal_time, by_day in self.all_codes_by_day.items():
             main_codes_here = self.effective_main_codes.get(meal_time, self.main1_codes)
@@ -180,6 +235,23 @@ class _UserRecallContext:
                     if code not in main_codes_here:
                         continue
                     self.eaten.setdefault(meal_time, {}).setdefault(code, []).append(d_parsed)
+
+        # eaten_any: same distinct-day counts, but UNRESTRICTED -- every
+        # logged occurrence counts regardless of whether it was the day's
+        # sole item. Used for DEMOTION: the question there is "does he
+        # actually eat what he already told us he likes," not "does this
+        # function as a standalone anchor dish." A real Main choice that's
+        # structurally always eaten alongside something else (e.g. a boiled
+        # egg next to chapathi/sambar -- confirmed for real on A001_MAHENDRA:
+        # egg logged on 17 of 49 Breakfast days, zero of them solo) would
+        # otherwise never clear effective_main_codes and get silently
+        # demoted as "eaten only 0x", permanently dropping a preference he
+        # explicitly declared and genuinely eats often.
+        self.eaten_any: dict[str, dict[str, list[date]]] = {}
+        for meal_time, by_day in self.all_codes_by_day.items():
+            for d_parsed, codes_that_day in by_day.items():
+                for code in codes_that_day:
+                    self.eaten_any.setdefault(meal_time, {}).setdefault(code, []).append(d_parsed)
 
 
 def compute_adaptive_main_preferences(user_id: str) -> list[dict]:
@@ -208,7 +280,7 @@ def compute_adaptive_main_preferences(user_id: str) -> list[dict]:
         total_occasions = len(ctx.recall_days.get(meal_time, set()))
         if total_occasions < ADAPTIVE_MIN_RECALLS_TO_JUDGE:
             continue
-        eaten_counts = {code: len(set(dates)) for code, dates in ctx.eaten.get(meal_time, {}).items()}
+        eaten_counts = {code: len(set(dates)) for code, dates in ctx.eaten_any.get(meal_time, {}).items()}
 
         to_demote = [c for c in codes if eaten_counts.get(c, 0) < ADAPTIVE_DEMOTE_MIN_EATEN_COUNT]
         remaining_after = len(codes) - len(to_demote)
@@ -259,6 +331,153 @@ def compute_adaptive_main_preferences(user_id: str) -> list[dict]:
         sum(1 for r in results if r["action"] == "promote"),
     )
     return results
+
+
+EGG_MANDATE_MIN_DAYS = 4  # "more than 3 days" per explicit request
+
+
+def compute_egg_mandate_mealtimes(user_id: str) -> set[str]:
+    """Meal_times where egg should be mandated every day, generalizing the
+    one-off per-user overrides (A002/A003) into a rule anyone can qualify
+    for automatically: at that meal_time, (a) an egg (Ovo-vegetarian) dish
+    was logged on MORE THAN EGG_MANDATE_MIN_DAYS-1 distinct DietRecall days
+    (unrestricted count -- see _UserRecallContext.egg_days_by_mealtime,
+    since egg is almost never logged alone), AND (b) egg is declared as a
+    liked preference in ANY dish_type category there (Main, Side,
+    Beverage, ... -- not just Main, since a real want can be declared under
+    any of them).
+
+    Deliberately doesn't pick *which* recipe or combination to serve --
+    lp_optimizer.py's hard mandate just requires >=1 egg-tagged candidate
+    that day, and the actual choice (what it's paired with) falls out of
+    the ordinary registry/adaptive-combination-driven candidate
+    construction, which already reflects this user's real DietRecall
+    pairings via compute_adaptive_main_combinations -- so the selected dish
+    naturally follows his own logged combination rather than egg served
+    alone."""
+    sb = get_supabase()
+    ctx = _UserRecallContext(sb, user_id)
+    egg_subcats = _egg_subcategory_codes(sb)
+
+    qualifying: set[str] = set()
+    for meal_time, days in ctx.egg_days_by_mealtime.items():
+        if len(days) < EGG_MANDATE_MIN_DAYS:
+            continue
+        declared_here = ctx.declared_any_category.get(meal_time, set())
+        if declared_here & egg_subcats:
+            qualifying.add(meal_time)
+
+    if qualifying:
+        logger.info(
+            "user_id=%s -> egg-every-day mandate qualifies for meal_times=%s",
+            user_id, sorted(qualifying),
+        )
+    return qualifying
+
+
+def compute_general_mandate_candidates(user_id: str, min_days: int = 6) -> list[dict]:
+    """Generalizes compute_egg_mandate_mealtimes beyond egg specifically, to
+    ANY subcategory: at a given meal_time, a subcategory qualifies for an
+    every-day mandate when (a) something in it was logged on MORE THAN
+    (min_days - 1) distinct DietRecall days there (unrestricted count, same
+    reasoning as egg's -- a real companion item is often never logged
+    "alone"), AND (b) it's declared as a liked preference in ANY dish_type
+    category at that meal_time.
+
+    Pure reporting/analysis function -- does NOT wire anything into the
+    solver. Returns one dict per qualifying (meal_time, subcategory), with
+    the actual recipe codes/names from this user's own DietRecall that would
+    satisfy it, so a human can review what it means before anyone decides
+    whether to turn it into a real mandate the way egg's was.
+    """
+    sb = get_supabase()
+    ctx = _UserRecallContext(sb, user_id)
+
+    sc_rows = fetch_all_rows(lambda: sb.table("SubCategory").select("Code,SubCategory"))
+    code_to_name = {str(r["Code"]).strip().upper(): r.get("SubCategory") for r in sc_rows if r.get("Code")}
+
+    # distinct-day counts per (meal_time, subcategory), unrestricted --
+    # built straight from ctx.all_codes_by_day rather than ctx.eaten_any,
+    # since eaten_any is itself restricted to Main (dish_type=="Main"
+    # declared preferences); here any declared category should count.
+    counts: dict[tuple[str, str], set] = {}
+    for meal_time, by_day in ctx.all_codes_by_day.items():
+        for d_parsed, codes_that_day in by_day.items():
+            for code in codes_that_day:
+                counts.setdefault((meal_time, code), set()).add(d_parsed)
+
+    # sample recipes actually logged for each (meal_time, subcategory), for
+    # the report -- not used to decide qualification.
+    samples: dict[tuple[str, str], set] = {}
+    for r in ctx.recall_rows:
+        meal_time = str(r.get("meal_slot") or "").strip().title()
+        rc = str(r.get("Food_Name_desc") or "").strip()
+        code = ctx.recipe_to_subcat.get(rc)
+        if not (meal_time and code):
+            continue
+        name = ctx.recipe_to_name.get(rc) or rc
+        samples.setdefault((meal_time, code), set()).add(f"{name} ({rc})")
+
+    results: list[dict] = []
+    for (meal_time, code), dates in counts.items():
+        if len(dates) < min_days:
+            continue
+        # Tagged per dish_type (Main / Main2) rather than "declared in ANY
+        # category" -- a subcategory can qualify for both independently if
+        # it's genuinely declared as both, each ranked on its own.
+        for dish_type, declared_map in (("Main", ctx.declared), ("Main2", ctx.declared_main2)):
+            declared_here = declared_map.get(meal_time, set())
+            if code not in declared_here:
+                continue
+            results.append({
+                "user_id": user_id,
+                "meal_time": meal_time,
+                "dish_type": dish_type,
+                "sub_category_code": code,
+                "sub_category_name": code_to_name.get(code, code),
+                "distinct_days": len(dates),
+                "sample_recipes": sorted(samples.get((meal_time, code), set())),
+            })
+
+    results.sort(key=lambda r: (r["meal_time"], r["dish_type"], -r["distinct_days"]))
+    return results
+
+
+def compute_general_mandate_subcats_by_mealtime(
+    user_id: str, min_days: int = 6, top_n: int = 3
+) -> dict[str, dict[str, set[str]]]:
+    """Groups compute_general_mandate_candidates by (meal_time, dish_type)
+    into the TOP_N most-eaten qualifying subcategory codes, for the OR-style
+    mandate in lp_optimizer.py: "every day, at least ONE candidate from this
+    set must be selected at this meal_time/dish_type" -- not "every one of
+    these every day".
+
+    Ranked and capped to top_n (default 3) PER DISH_TYPE (Main and Main2
+    scored/capped independently) rather than using every qualifying
+    subcategory unbounded: confirmed via isolation testing (A009_PRAKASH)
+    that an unbounded, Main-only-combined OR set (5 competing subcategories
+    all sharing one Lunch Main slot) causes genuine Infeasible/Not-Solved
+    once the user's real, correctly-filtered candidate pool is active --
+    capping to the few most-established items, and giving Main and Main2
+    their own independent slot/requirement instead of merging them, keeps
+    the guarantee meaningful while bounding how many hard requirements can
+    stack on any single slot.
+
+    Returns: {meal_time: {"Main": {codes}, "Main2": {codes}}}, dish_types
+    with zero qualifying candidates omitted.
+    """
+    candidates = compute_general_mandate_candidates(user_id, min_days=min_days)
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for r in candidates:
+        grouped.setdefault((r["meal_time"], r["dish_type"]), []).append(r)
+
+    by_mealtime: dict[str, dict[str, set[str]]] = {}
+    for (meal_time, dish_type), rows in grouped.items():
+        rows_sorted = sorted(rows, key=lambda r: -r["distinct_days"])
+        top_codes = {r["sub_category_code"] for r in rows_sorted[:top_n]}
+        if top_codes:
+            by_mealtime.setdefault(meal_time, {})[dish_type] = top_codes
+    return by_mealtime
 
 
 def compute_adaptive_main_combinations(user_id: str) -> list[dict]:
