@@ -217,6 +217,8 @@ class UserProfileResponse(BaseModel):
     activity_level: Optional[str] = None
     diet_restrictions: Optional[str] = None
     dietary_type: Optional[str] = None
+    non_veg_days: Optional[List[str]] = None
+    non_veg_types: Optional[List[str]] = None
     millets_preferred: Optional[bool] = None
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
@@ -234,6 +236,8 @@ class UserProfileUpdateRequest(BaseModel):
     activity_level: Optional[str] = None
     diet_restrictions: Optional[str] = None
     dietary_type: Optional[str] = None
+    non_veg_days: Optional[List[str]] = None
+    non_veg_types: Optional[List[str]] = None
     millets_preferred: Optional[bool] = None
     breakfast_time: Optional[str] = None
     lunch_time: Optional[str] = None
@@ -249,7 +253,9 @@ class UserProfileUpdateRequest(BaseModel):
         "hba1c": 6.5,
         "activity_level": "Sedentary",
         "diet_restrictions": "Gluten Free",
-        "dietary_type": "Vegetarian",
+        "dietary_type": "Non Veg",
+        "non_veg_days": ["Sat", "Sun"],
+        "non_veg_types": ["Chicken", "Fish"],
         "millets_preferred": True,
         "breakfast_time": "08:30:00",
         "lunch_time": "13:00:00",

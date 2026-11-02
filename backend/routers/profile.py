@@ -32,6 +32,8 @@ def get_profile(user_id: str = Depends(get_current_user)):
         activity_level=b.get("Activity_levels"),
         diet_restrictions=d.get("diet_restrictions"),
         dietary_type=d.get("dietary_type"),
+        non_veg_days=d.get("non_veg_days"),
+        non_veg_types=d.get("non_veg_types"),
         millets_preferred=health_details.get("millets_preferred"),
         breakfast_time=_extract_time(d.get("breakfast_time")),
         lunch_time=_extract_time(d.get("lunch_time")),
@@ -87,6 +89,8 @@ def update_profile(body: UserProfileUpdateRequest, user_id: str = Depends(get_cu
     detail_fields = {
         "diet_restrictions": body.diet_restrictions,
         "dietary_type": body.dietary_type,
+        "non_veg_days": body.non_veg_days,
+        "non_veg_types": body.non_veg_types,
         "breakfast_time": _to_timestamptz(body.breakfast_time),
         "lunch_time": _to_timestamptz(body.lunch_time),
         "dinner_time": _to_timestamptz(body.dinner_time),
