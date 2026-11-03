@@ -132,7 +132,13 @@ def swap_to_outside_food(
             )
         except Exception:
             logger.exception("Could not notify user_id=%s of outside-food weekly limit", user_id)
-        return OutsideFoodSwapResponse(possible=False, reason="weekly_limit_reached", week_count=week_count_so_far, week_limit=WEEKLY_LIMIT)
+        return OutsideFoodSwapResponse(
+            possible=False,
+            reason="weekly_limit_reached",
+            message=f"You've reached your limit of {WEEKLY_LIMIT} outside-food meals for this week. Stick to your plan for the rest of the week for the best results.",
+            week_count=week_count_so_far,
+            week_limit=WEEKLY_LIMIT,
+        )
 
     recipe_resp = (
         sb.table("Recipe")

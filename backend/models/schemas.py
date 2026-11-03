@@ -181,7 +181,8 @@ class OutsideFoodSwapRequest(BaseModel):
 
 class OutsideFoodSwapResponse(BaseModel):
     possible: bool
-    reason: Optional[str] = None  # e.g. "weekly_limit_reached" when possible=False
+    reason: Optional[str] = None  # stable code, e.g. "weekly_limit_reached" -- for client logic, not display
+    message: Optional[str] = None  # human-readable text for the same case, safe to show to the user
     week_count: int
     week_limit: int = 5
     gl: Optional[float] = None
