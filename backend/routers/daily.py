@@ -131,6 +131,25 @@ def get_daily_plan(
         if timing and meal_gl is not None and timing not in meal_gl_by_timing:
             meal_gl_by_timing[timing] = meal_gl
 
+    # Recipe codes in this day's plan that are outside-food swaps (same
+    # catalog swap_to_outside_food checks against), so the client can tag
+    # those meal cards differently without a separate lookup.
+    plan_codes = {
+        (row.get("Food_Name_desc") or "").strip()
+        for row in (result.data or [])
+        if row.get("Food_Name_desc")
+    }
+    outside_codes: set = set()
+    if plan_codes:
+        outside_rows = (
+            sb.table("cuisine_dishes")
+            .select("recipe_code")
+            .in_("recipe_code", list(plan_codes))
+            .execute()
+            .data or []
+        )
+        outside_codes = {str(r["recipe_code"]).strip() for r in outside_rows if r.get("recipe_code")}
+
     # Attach per-item GL, optimal recipe weight, and accumulate per-timing kcal
     meals: List[DailyMealItem] = []
     kcal_by_timing: dict = {}
@@ -141,6 +160,7 @@ def get_daily_plan(
         row["GL"] = gl_by_item.get((timing, code))
         row["Recipe_weight_optimal_g"] = weight_by_item.get((timing, code))
         row["Food_Qty"] = _round_food_qty(row.get("Food_Qty"))
+        row["is_outside_food"] = code in outside_codes
 
         kcal = row.get("Energy_kcal")
         if timing:

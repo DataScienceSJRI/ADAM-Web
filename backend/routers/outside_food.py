@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 
 from core.auth import get_current_user
 from core.roles import require_coordinator
@@ -32,12 +33,14 @@ def get_cuisine_types(_user_id: str = Depends(get_current_user)):
 @router.post("/swap", response_model=OutsideFoodSwapResponse)
 def swap(body: OutsideFoodSwapRequest, user_id: str = Depends(get_current_user)):
     """Swap a plan slot to an outside-food dish. Hard-capped at 5 per the
-    participant's own current plan week -- returns possible=False with
-    reason="weekly_limit_reached" past that, or reason="not_current_week" if
-    `date` falls outside the participant's current plan week (resolved
-    server-side; the client never needs to send which week it is), without
-    touching the plan either way."""
-    return swap_to_outside_food(
+    participant's own current plan week -- past that, responds 429 with
+    possible=False and reason="weekly_limit_reached" (instead of a 200), so
+    clients that only check status code still see it as a hard rejection.
+    reason="not_current_week" if `date` falls outside the participant's
+    current plan week (resolved server-side; the client never needs to send
+    which week it is), without touching the plan either way -- that case
+    stays a 200."""
+    result = swap_to_outside_food(
         user_id=user_id,
         meal_date=body.date,
         meal_slot=body.meal_slot,
@@ -45,6 +48,9 @@ def swap(body: OutsideFoodSwapRequest, user_id: str = Depends(get_current_user))
         quantity=body.quantity,
         original_recipe_codes=body.original_recipe_codes,
     )
+    if not result.possible and result.reason == "weekly_limit_reached":
+        return JSONResponse(status_code=429, content=result.model_dump())
+    return result
 
 
 @router.get("/flagged")

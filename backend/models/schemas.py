@@ -277,6 +277,7 @@ class DailyMealItem(BaseModel):
     Energy_kcal: Optional[float] = None
     GL: Optional[float] = None
     Recipe_weight_optimal_g: Optional[float] = None
+    is_outside_food: bool = False
 
     model_config = {"extra": "allow"}
 
