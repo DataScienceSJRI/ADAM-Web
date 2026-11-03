@@ -116,8 +116,11 @@ CUP_BUCKET_VALUE = {
     "2 cups": 2.0,
     "More than 2 cups": 2.5,
 }
-DAL_BUCKET_VALUE = {"1/4 cup": 0.25, "1/2 cup": 0.5, "1 cup": 1.0, "1 1/2 cups": 1.5, "2+ cups": 2.0}
-VEG_BUCKET_VALUE = {"1/2 cup": 0.5, "1 cup": 1.0, "1 1/2 cups": 1.5, "2+ cups": 2.0}
+# "2 cups or more" is the live onboarding form's actual top-bucket label
+# (frontend/src/components/portion-size-form.tsx's DAL_CUPS/VEG_CUPS) -- kept
+# "2+ cups" too in case any existing stored answer used that phrasing.
+DAL_BUCKET_VALUE = {"1/4 cup": 0.25, "1/2 cup": 0.5, "1 cup": 1.0, "1 1/2 cups": 1.5, "2+ cups": 2.0, "2 cups or more": 2.0}
+VEG_BUCKET_VALUE = {"1/2 cup": 0.5, "1 cup": 1.0, "1 1/2 cups": 1.5, "2+ cups": 2.0, "2 cups or more": 2.0}
 
 # Reference/target portion for each category: the model's own default
 # reference portion (modal RecipeTagging Portion/Portion description value
