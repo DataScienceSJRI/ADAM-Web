@@ -319,7 +319,14 @@ def swap_to_outside_food(
     except Exception:
         logger.exception("Could not notify user_id=%s of outside-food log", user_id)
 
-    return OutsideFoodSwapResponse(possible=True, week_count=new_week_count, week_limit=WEEKLY_LIMIT, gl=gl, energy_kcal=energy_kcal)
+    return OutsideFoodSwapResponse(
+        possible=True,
+        message=f"{new_week_count}/{WEEKLY_LIMIT} outside-food swaps used this week.",
+        week_count=new_week_count,
+        week_limit=WEEKLY_LIMIT,
+        gl=gl,
+        energy_kcal=energy_kcal,
+    )
 
 
 def list_flagged_participants(coordinator_id: str, role: str) -> list[dict]:
