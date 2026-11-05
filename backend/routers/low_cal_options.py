@@ -10,7 +10,7 @@ logger = logging.getLogger("backend.routers.low_cal_options")
 
 router = APIRouter(prefix="/low-cal-options", tags=["low-cal-options"])
 
-_LIST_FIELDS = 'Recipe_Code, Recipe_Name, Recipe_Category, Servings, Ctime, "Energy Kcals", Recommended_Servings'
+_LIST_FIELDS = 'Recipe_Code, Recipe_Name, Recipe_Category, Servings, Ctime, "Energy Kcals", Recommended_Servings, description'
 
 
 def _clean(row: dict) -> dict:
@@ -21,7 +21,7 @@ def _clean(row: dict) -> dict:
 @router.get("")
 def list_low_cal_options(user_id: str = Depends(get_current_user)):
     """Summary list for the low-cal-options section: name, category, servings,
-    cook time, energy, recommended servings. Call GET /low-cal-options/{recipe_code}
+    cook time, energy, recommended servings, description. Call GET /low-cal-options/{recipe_code}
     for every other column (full nutrient detail) on a selected recipe."""
     sb = get_supabase()
     resp = sb.table("low_cal_options").select(_LIST_FIELDS).order("Recipe_Name").execute()
