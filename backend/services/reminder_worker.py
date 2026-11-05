@@ -5,6 +5,7 @@ import time
 from services.reminders import send_meal_reminders
 from services.whatsapp_feedback import send_pending_meal_feedback
 from services.plan_retry_sweep import sweep_failed_plans
+from scripts.send_festive_reminder import send_festive_reminder
 
 logger = logging.getLogger("backend.services.reminder_worker")
 
@@ -14,6 +15,10 @@ _FEEDBACK_POLL_SECONDS = int(os.getenv("MEAL_FEEDBACK_POLL_SECONDS", "60"))
 # Matches plan_retry_sweep._RETRY_COOLDOWN -- checking more often than the
 # cooldown itself allows would just waste a Supabase scan for nothing new.
 _PLAN_RETRY_SWEEP_SECONDS = int(os.getenv("PLAN_RETRY_SWEEP_SECONDS", str(60 * 60)))
+# Hourly is plenty for a once-a-day event -- send_festive_reminder() itself
+# no-ops on any non-configured date and skips a repeat send within 20h, so
+# this tick is cheap/safe even on non-matching days.
+_FESTIVE_REMINDER_CHECK_SECONDS = int(os.getenv("FESTIVE_REMINDER_CHECK_SECONDS", str(60 * 60)))
 
 
 def main() -> None:
@@ -31,6 +36,12 @@ def main() -> None:
     _FEEDBACK_DEBOUNCE_MINUTES quiet period has elapsed, and a 15-minute tick
     would make every meal wait up to 15 extra minutes on top of the debounce
     window itself for no reason.
+
+    Also ticks scripts.send_festive_reminder.send_festive_reminder() hourly --
+    a one-off festive-campaign send gated to 3 specific future calendar
+    dates, no-op on every other day. Hooked in here (rather than left as a
+    standalone script run by hand) because this is the only always-on
+    process in the codebase that can reliably reach a date 2+ months out.
     """
     logging.basicConfig(
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
@@ -43,6 +54,7 @@ def main() -> None:
     )
     next_reminder_check = 0.0
     next_retry_sweep = 0.0
+    next_festive_check = 0.0
     while True:
         now = time.monotonic()
         if now >= next_reminder_check:
@@ -62,6 +74,15 @@ def main() -> None:
             except Exception:
                 logger.exception("Plan auto-retry sweep tick failed")
             next_retry_sweep = now + _PLAN_RETRY_SWEEP_SECONDS
+
+        if now >= next_festive_check:
+            try:
+                result = send_festive_reminder()
+                if result.get("sent"):
+                    logger.info("Festive reminder sent: %s", result)
+            except Exception:
+                logger.exception("Festive reminder tick failed")
+            next_festive_check = now + _FESTIVE_REMINDER_CHECK_SECONDS
 
         try:
             sent = send_pending_meal_feedback()
