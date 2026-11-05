@@ -1826,16 +1826,38 @@ def run_lp(
     # a hardcoded per-user override like A002/A003 above. Only requires
     # *some* egg-tagged candidate that meal_time each day; which one, and
     # what it's paired with, is left to the ordinary candidate construction.
+    #
+    # profile["_egg_mandate_soft_min_days"] (int, routers/plan.py's retry
+    # cascade sets this only as a last-resort fallback) degrades this from a
+    # hard every-day requirement to a penalized-shortfall requirement of
+    # >=N days instead -- confirmed necessary for real on A011_ARUN: the hard
+    # every-day version, stacked with his non-veg-quota mandate and taper,
+    # was genuinely Infeasible through the full taper-relaxation cascade (no
+    # taper key conflicts with this mandate, so relaxing taper alone can
+    # never fix it). Same slack/penalty shape as the egg_min_days=3 fallback
+    # above, just scoped to this mandate's own meal_time(s) instead of "any
+    # meal_time, any egg dish."
     egg_mandate_mealtimes = {
         str(mt).strip().title() for mt in ((profile or {}).get("_egg_mandate_mealtimes") or set())
     }
+    egg_mandate_soft_min_days = (profile or {}).get("_egg_mandate_soft_min_days")
     if egg_mandate_mealtimes and is_egg.any():
         for mt in egg_mandate_mealtimes:
             mt_egg_ids = [
                 int(i) for i in candidates.index
                 if is_egg.loc[i] and str(candidates.loc[i, "Meal_Time"]).strip().title() == mt
             ]
-            if mt_egg_ids:
+            if not mt_egg_ids:
+                continue
+            if egg_mandate_soft_min_days:
+                mt_egg_day_ok = {}
+                for d in days:
+                    mt_egg_day_ok[d] = LpVariable(f"egg_mandate_day_ok_{mt}_{d}", lowBound=0, upBound=1, cat="Binary")
+                    model += mt_egg_day_ok[d] <= lpSum(y[(d, i)] for i in mt_egg_ids)
+                mt_egg_shortfall = LpVariable(f"egg_mandate_shortfall_{mt}", lowBound=0)
+                model += lpSum(mt_egg_day_ok[d] for d in days) + mt_egg_shortfall >= int(egg_mandate_soft_min_days)
+                egg_penalty_terms.append(1_000_000.0 * mt_egg_shortfall)
+            else:
                 for d in days:
                     model += lpSum(y[(d, i)] for i in mt_egg_ids) >= 1
 
