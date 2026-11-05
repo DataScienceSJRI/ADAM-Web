@@ -96,6 +96,24 @@ def run_lp(
     candidates["Preference_Row_ID"] = candidates["Preference_Row_ID"].astype(str).str.strip()
     candidates["Meal_Time"] = candidates["Meal_Time"].astype(str).str.strip()
 
+    # Hard-exclude any meal_time with zero declared onboarding preference
+    # (profile["_declared_meal_times"], see services/adaptive_preferences.
+    # compute_declared_meal_times) -- even if DietRecall/liked-recipe
+    # injection put candidates there (e.g. a logged-but-undeclared meal_time),
+    # the plan shouldn't serve a meal_time the user never asked it to cover.
+    # Empty set (e.g. onboarding incomplete) means no restriction. Dropped
+    # before required_slots is computed below so an excluded meal_time is
+    # never treated as mandatory.
+    declared_meal_times = {
+        str(mt).strip().title() for mt in ((profile or {}).get("_declared_meal_times") or set())
+    }
+    if declared_meal_times:
+        candidates = candidates[
+            candidates["Meal_Time"].str.strip().str.title().isin(declared_meal_times)
+        ].reset_index(drop=True)
+        if candidates.empty:
+            return pd.DataFrame(), {"status": "no_candidates"}
+
     candidates["Main_Category_code"] = (
         candidates.get("MainCategoryCode", candidates.get("Code_cooccurence", ""))
         .astype(str)

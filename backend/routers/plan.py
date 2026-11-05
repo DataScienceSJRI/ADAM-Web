@@ -844,6 +844,24 @@ def _run_plan_background(
         profile.update(user_overrides)
         logger.info("user_id=%s -> per-user hard mandate overrides=%s", user_id, user_overrides)
 
+    # Meal_times with ZERO declared onboarding preference are excluded from
+    # the plan entirely, even if DietRecall shows the user eats there --
+    # onboarding declares which meal_times the plan should cover at all;
+    # DietRecall is ground truth for what he eats at the ones it does cover,
+    # a separate question. See services/adaptive_preferences.
+    # compute_declared_meal_times. Empty result (e.g. onboarding incomplete)
+    # means "no restriction" so a user with no onboarding data isn't left
+    # with zero meal_times.
+    try:
+        from services.adaptive_preferences import compute_declared_meal_times
+        declared_meal_times = compute_declared_meal_times(user_id)
+    except Exception:
+        logger.warning("user_id=%s -> could not compute declared meal_times", user_id, exc_info=True)
+        declared_meal_times = set()
+    if declared_meal_times:
+        profile["_declared_meal_times"] = declared_meal_times
+        logger.info("user_id=%s -> declared meal_times=%s", user_id, sorted(declared_meal_times))
+
     # Generic egg-every-day mandate: qualifies automatically for ANY user
     # (not just the manually-configured ones above) when DietRecall shows
     # egg logged on more than 3 days at a meal_time AND egg is declared as a
