@@ -333,6 +333,40 @@ def compute_adaptive_main_preferences(user_id: str) -> list[dict]:
     return results
 
 
+def compute_declared_meal_times(user_id: str) -> set[str]:
+    """Meal_times this user declared ANY onboarding preference for (excluding
+    "disliked" reactions), from BE_Preference_onboarding -- used to hard-exclude
+    a meal_time from plan generation entirely when it has zero declared
+    preferences, even if DietRecall shows the user actually eats at that
+    meal_time. Per explicit request/confirmed on A008_NAGABHUSHA: his
+    onboarding has zero rows for Lunch (Breakfast/Dinner/Snacks all have
+    several), yet DietRecall-logged Lunch recipes were still getting
+    force-included as "liked" candidates (services/data_loader.py) and
+    filling a Lunch slot the user never actually asked the plan to cover.
+    DietRecall is ground truth for WHAT he eats; onboarding declares WHICH
+    meal_times the plan should serve at all -- the two aren't the same
+    question, and for a meal_time missing from the latter, the plan should
+    skip it regardless of what the former shows.
+
+    Returns an empty set if the user has zero declared preferences at ANY
+    meal_time (e.g. onboarding incomplete) -- callers treat that as "no
+    restriction" so a user with no onboarding data yet isn't left with no
+    meal_times at all.
+    """
+    sb = get_supabase()
+    rows = fetch_all_rows(lambda: (
+        sb.table("BE_Preference_onboarding").select("meal_time,Reaction").eq("user_id", user_id)
+    ))
+    meal_times: set[str] = set()
+    for r in rows:
+        if r.get("Reaction") == "disliked":
+            continue
+        mt = str(r.get("meal_time") or "").strip().title()
+        if mt:
+            meal_times.add(mt)
+    return meal_times
+
+
 EGG_MANDATE_MIN_DAYS = 4  # "more than 3 days" per explicit request
 
 

@@ -702,8 +702,33 @@ def load_data_from_supabase(user_id: str, profile: Optional[dict] = None, onboar
 
         # Millet-based recipes are always treated as liked for every user
         # (not tied to any actual reaction), so _inject_liked_recipes gives
-        # them the same candidate-pool/objective-bonus treatment.
-        millet_recipes = _fetch_cached("Millet_Recipes")
+        # them the same candidate-pool/objective-bonus treatment -- UNLESS
+        # the user explicitly said at onboarding they don't want millets
+        # (health_details.millets_preferred == False). That flag used to be
+        # stored (routers/profile.py) but never actually consulted anywhere
+        # in plan generation, so the force-liked treatment below (and the
+        # millet-inclusion mandate in lp_optimizer.py, driven entirely by
+        # ds["millet_recipe_codes"]) silently overrode it for every user who
+        # set it. Confirmed for real on A008_NAGABHUSHA: millets_preferred
+        # == False, yet undeclared millet-based Roti (C1B, never in his
+        # declared Breakfast preferences) kept being force-served via this
+        # exact path. Defaults to preferred (True) when unset/unknown, same
+        # as the original unconditional behavior.
+        millets_preferred = True
+        try:
+            millet_pref_filters: dict = {"user_id": user_id}
+            if onboarding_id:
+                millet_pref_filters["onboarding_id"] = onboarding_id
+            millet_pref_rows = _fetch("BE_Preference_onboarding_details", millet_pref_filters)
+            if not millet_pref_rows.empty and "health_details" in millet_pref_rows.columns:
+                for details in millet_pref_rows["health_details"].dropna():
+                    if isinstance(details, dict) and details.get("millets_preferred") is False:
+                        millets_preferred = False
+                        break
+        except Exception:
+            logger.exception("Could not read millets_preferred for user_id=%s -- defaulting to preferred", user_id)
+
+        millet_recipes = _fetch_cached("Millet_Recipes") if millets_preferred else pd.DataFrame()
         millet_codes: set = set()
         if not millet_recipes.empty and "Recipe_Code" in millet_recipes.columns:
             millet_codes = set(

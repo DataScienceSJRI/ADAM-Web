@@ -844,6 +844,24 @@ def _run_plan_background(
         profile.update(user_overrides)
         logger.info("user_id=%s -> per-user hard mandate overrides=%s", user_id, user_overrides)
 
+    # Meal_times with ZERO declared onboarding preference are excluded from
+    # the plan entirely, even if DietRecall shows the user eats there --
+    # onboarding declares which meal_times the plan should cover at all;
+    # DietRecall is ground truth for what he eats at the ones it does cover,
+    # a separate question. See services/adaptive_preferences.
+    # compute_declared_meal_times. Empty result (e.g. onboarding incomplete)
+    # means "no restriction" so a user with no onboarding data isn't left
+    # with zero meal_times.
+    try:
+        from services.adaptive_preferences import compute_declared_meal_times
+        declared_meal_times = compute_declared_meal_times(user_id)
+    except Exception:
+        logger.warning("user_id=%s -> could not compute declared meal_times", user_id, exc_info=True)
+        declared_meal_times = set()
+    if declared_meal_times:
+        profile["_declared_meal_times"] = declared_meal_times
+        logger.info("user_id=%s -> declared meal_times=%s", user_id, sorted(declared_meal_times))
+
     # Generic egg-every-day mandate: qualifies automatically for ANY user
     # (not just the manually-configured ones above) when DietRecall shows
     # egg logged on more than 3 days at a meal_time AND egg is declared as a
@@ -1006,6 +1024,32 @@ def _run_plan_background(
                 if _is_usable(output_paths):
                     break
 
+        # Egg-mandate relaxation: last resort before giving up entirely.
+        # profile["_egg_mandate_mealtimes"] (see compute_egg_mandate_mealtimes)
+        # is a hard every-day requirement with no taper key of its own to
+        # pop, so the taper-relaxation loop above can never fix a case where
+        # THIS mandate is the actual conflict. Confirmed for real on
+        # A011_ARUN: genuinely Infeasible through the full primary solve +
+        # all 3 taper stages, with the egg mandate the one unrelaxed hard
+        # constraint left standing (he also carries a non-veg-quota hard
+        # mandate, and the two together don't fit his candidate pool some
+        # weeks). Degrading to "at least 3 days instead of all 7" (same
+        # shape as the generic egg_min_days=3 fallback in lp_optimizer.py)
+        # keeps a real, still-meaningful egg commitment rather than either a
+        # silent full drop or a failed plan.
+        if not _is_usable(output_paths) and profile.get("_egg_mandate_mealtimes"):
+            logger.warning(
+                "user_id=%s week_no=%d still unusable after taper relaxation "
+                "(status=%s) — degrading egg mandate from every-day to >=3 days — retrying",
+                user_id, body.week_no, summary.get("status"),
+            )
+            _write_plan_status(body.onboarding_id, "optimizing (egg mandate relaxation)")
+            profile["_egg_mandate_soft_min_days"] = 3
+            profile["_solver_gap_rel_override"] = max(float(profile.get("_solver_gap_rel_override", 0.3)), 0.4)
+            output_paths = _solve_once()
+            summary = output_paths.get("weekly_optimization_summary") or {}
+            taper_stage_used = len(TAPER_STAGES) + 1
+
         # Final backup: one more retry with a widened gap only, no keys
         # popped. This is a backup only — it never runs when the solve
         # above already succeeded, and it fires whether or not there was
@@ -1019,7 +1063,7 @@ def _run_plan_background(
         # search variance. Costs at most one extra ~600s solve attempt, and
         # only for a case that was already about to be reported as failed.
         if not _is_usable(output_paths):
-            gap_stage = len(TAPER_STAGES) + 1
+            gap_stage = len(TAPER_STAGES) + 2
             logger.warning(
                 "user_id=%s week_no=%d still unusable after taper relaxation "
                 "(status=%s) — final backup retry with widened gap only",
