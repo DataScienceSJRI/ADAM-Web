@@ -198,6 +198,7 @@ def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_curren
         image_url_pre=body.image_url_pre,
         image_url_post=body.image_url_post,
         note=body.note,
+        date=body.date,
     )
     return RecallImageResponse(status="ok", recall_id=recall_id, review_id=review_id)
 

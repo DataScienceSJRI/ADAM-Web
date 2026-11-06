@@ -136,8 +136,9 @@ class DietRecallImageRequest(BaseModel):
     image_url_pre: Optional[str] = None
     image_url_post: Optional[str] = None
     note: Optional[str] = None
+    date: Optional[str] = None  # YYYY-MM-DD; defaults to today server-side if omitted
 
-    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None, "note": "Had less rice than usual"}}}
+    model_config = {"json_schema_extra": {"example": {"plan_id": "abc-123", "meal_slot": "breakfast", "image_url_pre": "https://<project>.supabase.co/storage/v1/object/public/meal-images/user/breakfast/pre_123.jpg", "image_url_post": None, "note": "Had less rice than usual", "date": "2026-05-22"}}}
 
 
 class RecipeWithQty(BaseModel):

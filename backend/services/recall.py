@@ -574,6 +574,7 @@ def log_recall_image(
     image_url_pre: Optional[str],
     image_url_post: Optional[str],
     note: Optional[str] = None,
+    date: Optional[str] = None,
 ) -> tuple[str, str]:
     """Upload pre/post meal photo URLs. Writes the same placeholder row (same
     ID) to both DietRecall — with Food_Name="Pending" so it shows up in
@@ -582,12 +583,13 @@ def log_recall_image(
     list without scanning DietRecall for Food_Name="Pending" rows.
     approve_review_diet_recall updates the DietRecall row in place with the
     real food data and drops the buffer row; reject_review_diet_recall
-    deletes both."""
+    deletes both. `date` defaults to today when omitted (same as before this
+    param existed); passing it lets the client log against a specific day."""
     sb = get_supabase()
     now = datetime.now(timezone.utc)
-    today = str(date_type.today())
+    today = date or str(date_type.today())
 
-    # If this is a post-only upload, find today's pre-only row for the same
+    # If this is a post-only upload, find that day's pre-only row for the same
     # user + meal slot and patch it rather than creating a second row.
     if image_url_post and not image_url_pre:
         existing_recalls = (
