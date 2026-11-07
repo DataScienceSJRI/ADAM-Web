@@ -310,6 +310,7 @@ class ADAMPersonalizationModel:
 			"Ovo-vegetarian",
 			"Portion",
 			"Description",
+			"Beverages",
 		]
 		keep_tag_cols = [col for col in keep_tag_cols if col in tag.columns]
 		tag = tag[keep_tag_cols].copy()
@@ -2260,7 +2261,7 @@ class ADAMPersonalizationModel:
 		# Include extended nutrient columns so they are preserved in top_choices and flow through to outputs
 		extended_nutrients = [
 			"Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg", "PotassiumK_mg", "Cholesterol_mg",
-			"Relevance_Order",
+			"Relevance_Order", "Beverages",
 		]
 		for c in extended_nutrients:
 			if c not in required_cols:
