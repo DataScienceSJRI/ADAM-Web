@@ -84,7 +84,7 @@ def run_lp(
         "IronFe_FE_mg", "MagnesiumMg_MG_mg", "VA_RAE_mcg", "TotalFolatesB9_FOLSUM_mcg", "VB12_mcg",
         "ThiamineB1_THIA_mg", "RiboflavinB2_RIBF_mg", "NiacinB3_NIA_mg", "TotalB6A_VITB6A_mg", "TotalAscorbicAcid_VITC_mg",
         "Carbohydrate_g", "Sodium_mg", "VITE_mg", "PhosphorusP_mg","PotassiumK_mg","Cholesterol_mg",
-        "Relevance_Order",
+        "Relevance_Order", "Beverages",
     ]
 
     keep_cols = [col for col in required_cols if col in candidates.columns]
@@ -1879,6 +1879,110 @@ def run_lp(
                 for d in days:
                     model += lpSum(y[(d, i)] for i in mt_egg_ids) >= 1
 
+    # Beverage de-duplication (RecipeTagging.Beverages == 1).
+    #
+    # 1) Hard, per (day, meal_time): at most ONE beverage-tagged candidate,
+    #    regardless of which Dish_Type role it came through. Main2, Main3,
+    #    and Optional are each capped independently elsewhere (at most 1
+    #    selected from each), but nothing previously stopped two of those
+    #    independently landing on a beverage in the SAME slot. Confirmed for
+    #    real: A001_MAHENDRA got both Black Coffee and Milk Coffee the same
+    #    Breakfast; A004_RAJAT got both Coffee (Sugarless) and Black Tea the
+    #    same Snacks. A pure ceiling, never a floor, so this can't cause
+    #    Infeasible.
+    #
+    # 2) Soft, per day: discourage (not forbid) the SAME beverage subcategory
+    #    (e.g. the coffee/tea family) being selected at more than one
+    #    meal_time that day -- e.g. coffee at Breakfast and again at Snacks.
+    #    Soft rather than hard since some users may have only one realistic
+    #    beverage option at a given meal_time, and a hard cross-meal-time cap
+    #    would risk an avoidable Infeasible for them.
+    beverage_penalty_terms = []
+    if "Beverages" in candidates.columns:
+        is_beverage = pd.to_numeric(candidates["Beverages"], errors="coerce") == 1
+        if is_beverage.any():
+            meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
+            for mt in meal_time_title_all.unique():
+                bev_ids = [int(i) for i in candidates.index[(meal_time_title_all == mt) & is_beverage]]
+                if len(bev_ids) > 1:
+                    for d in days:
+                        model += lpSum(y[(d, i)] for i in bev_ids) <= 1
+
+            bev_candidates = candidates[is_beverage]
+            if "Preferred_SubCategory_code" in bev_candidates.columns:
+                beverage_penalty_weight = 500.0
+                for subcat, group_df in bev_candidates.groupby("Preferred_SubCategory_code"):
+                    ids = [int(i) for i in group_df.index.tolist()]
+                    if len(ids) < 2 or meal_time_title_all.loc[group_df.index].nunique() < 2:
+                        continue  # only offered at one meal_time -- can't cross-repeat
+                    safe_sc = str(subcat).strip().replace(" ", "_").replace("-", "_")
+                    for d in days:
+                        v = LpVariable(f"beverage_crossmeal_excess_{safe_sc}_{d}", lowBound=0)
+                        model += lpSum(y[(d, i)] for i in ids) <= 1 + v
+                        beverage_penalty_terms.append(v)
+    if beverage_penalty_terms:
+        model.objective += lpSum(beverage_penalty_weight * v for v in beverage_penalty_terms)
+
+    # Staple-presence nudge: Breakfast/Lunch/Dinner (not Snacks) should
+    # include at least one staple/carb item (dosa/idli/upma/poha, roti/
+    # paratha/puri, or a rice/khichdi dish -- MainCategoryCode A1/C1/E1/E2/
+    # E3/L1) SOMEWHERE in that day's selections, not necessarily as the
+    # Dish_Type=="Main" item itself. Soft, not hard, and only applied when
+    # the user actually has >=1 staple candidate available for that
+    # meal_time in the first place -- if their declared preferences are
+    # genuinely staple-free there (e.g. soup/salad-only breakfast), there
+    # are no staple candidates to require, so this has nothing to act on and
+    # never forces anything in.
+    #
+    # Confirmed necessary for real on A007_ANKITA: a non-staple subcategory
+    # (Salad, G2A -- itself one of her declared Lunch Main options) winning
+    # the formal "Main" slot drags in its own registered companion (Soup,
+    # G2C) via the combination table, and the day's Optional slot (which
+    # would normally carry a roti) is never mandatory -- so a perfectly
+    # legal solve can land on a lunch with zero actual carbs. This doesn't
+    # stop a non-staple from being Main (that's a legitimate choice when the
+    # user wants it) -- it just makes "no staple anywhere in the meal" a
+    # discouraged outcome instead of something that can happen by accident.
+    staple_main_category_codes = {"A1", "C1", "E1", "E2", "E3", "L1"}
+    subcategories_df = ds.get("subcategories")
+    if (
+        subcategories_df is not None
+        and not subcategories_df.empty
+        and "Code" in subcategories_df.columns
+        and "MainCategoryCode" in subcategories_df.columns
+        and "Preferred_SubCategory_code" in candidates.columns
+    ):
+        staple_subcat_codes = set(
+            subcategories_df.loc[
+                subcategories_df["MainCategoryCode"].astype(str).str.strip().isin(staple_main_category_codes),
+                "Code",
+            ].astype(str).str.strip().str.upper()
+        )
+        if staple_subcat_codes:
+            # Confirmed for real on A008_NAGABHUSHA: 500 was too weak and
+            # still let a non-staple subcategory win 4 of 14 Breakfast/Dinner
+            # slots in one week -- the GL savings from a lighter combo
+            # outweighed it. Raised to be in the same range as the
+            # cholesterol soft cap (2500), since a staple-free main meal is
+            # a more material completeness issue than the beverage-variety
+            # nudge above (500 there is fine, lower stakes).
+            staple_penalty_weight = 5000.0
+            staple_penalty_terms = []
+            meal_time_title_all = candidates["Meal_Time"].astype(str).str.strip().str.title()
+            subcat_upper_all = candidates["Preferred_SubCategory_code"].astype(str).str.strip().str.upper()
+            for mt in ("Breakfast", "Lunch", "Dinner"):
+                staple_ids = [
+                    int(i) for i in candidates.index[(meal_time_title_all == mt) & subcat_upper_all.isin(staple_subcat_codes)]
+                ]
+                if not staple_ids:
+                    continue  # no staple declared/available for this meal_time -- nothing to require
+                for d in days:
+                    v = LpVariable(f"staple_shortfall_{mt}_{d}", lowBound=0)
+                    model += lpSum(y[(d, i)] for i in staple_ids) + v >= 1
+                    staple_penalty_terms.append(v)
+            if staple_penalty_terms:
+                model.objective += lpSum(staple_penalty_weight * v for v in staple_penalty_terms)
+
     # Generalized "at least one familiar item" mandate
     # (profile["_general_mandate_subcats_by_mealtime"], a dict of meal_time
     # -> {"Main": {codes}, "Main2": {codes}}) -- see services.
@@ -2140,15 +2244,34 @@ def run_lp(
         y[(d, int(i))].value() is not None for d in days for i in candidates.index
     )
 
+    # Every serving-bound branch above enforces x >= lb*y with lb >= 0.5
+    # whenever an item is selected (y=1), so a selected item's serving
+    # should never legitimately solve below that. A "Not Solved" incumbent
+    # can still carry a near-zero x for a selected y due to CBC's own
+    # integrality/constraint tolerance on a timed-out solve, though --
+    # confirmed for real on A005_ASHWIN: Butter was selected (y=1) but its
+    # serving solved to ~0, writing a nonsensical "0 tsp / 0 kcal" line to
+    # the final menu. Dropped here rather than left for a human to notice,
+    # well below the 0.5 structural floor so this only ever catches a
+    # genuine solver anomaly, never a real small serving.
+    _MIN_USABLE_SERVING = 0.05
+
     selected_rows: List[Dict[str, object]] = []
     if has_incumbent:
         for d in days:
             for i in candidates.index:
                 if float(y[(d, int(i))].value() or 0) > 0.5:
+                    serving = float(x[(d, int(i))].value() or 0)
+                    if serving < _MIN_USABLE_SERVING:
+                        logger.warning(
+                            "Dropping zero/near-zero-serving selection: day=%d candidate=%s serving=%.4f",
+                            d, candidates.loc[i, "Recipe_Code"], serving,
+                        )
+                        continue
                     row = candidates.loc[i].to_dict()
                     row.pop("__candidate_id__", None)
                     row["Day"] = d
-                    row["Serving"] = float(x[(d, int(i))].value() or 0)
+                    row["Serving"] = serving
                     selected_rows.append(row)
 
     _write_debug_csv(candidates, "candidates_with_metrics.csv")
