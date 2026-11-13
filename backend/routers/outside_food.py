@@ -32,20 +32,26 @@ def get_cuisine_types(_user_id: str = Depends(get_current_user)):
 
 @router.post("/swap", response_model=OutsideFoodSwapResponse)
 def swap(body: OutsideFoodSwapRequest, user_id: str = Depends(get_current_user)):
-    """Swap a plan slot to an outside-food dish. Hard-capped at 5 per the
-    participant's own current plan week -- past that, responds 429 with
-    possible=False and reason="weekly_limit_reached" (instead of a 200), so
-    clients that only check status code still see it as a hard rejection.
-    reason="not_current_week" if `date` falls outside the participant's
-    current plan week (resolved server-side; the client never needs to send
-    which week it is), without touching the plan either way -- that case
-    stays a 200."""
+    """Swap a plan slot to an outside-food meal -- one or more dishes (e.g.
+    naan + paneer curry) all count as a SINGLE change against the weekly
+    limit, since they're eaten as one meal. Pass every dish for the meal via
+    recipe_codes/quantities; recipe_code/quantity remain for a single-dish
+    swap. Hard-capped at 5 per the participant's own current plan week --
+    past that, responds 429 with possible=False and
+    reason="weekly_limit_reached" (instead of a 200), so clients that only
+    check status code still see it as a hard rejection. reason=
+    "not_current_week" if `date` falls outside the participant's current
+    plan week (resolved server-side; the client never needs to send which
+    week it is), without touching the plan either way -- that case stays a
+    200."""
+    recipe_codes = body.recipe_codes or ([body.recipe_code] if body.recipe_code else [])
+    quantities = body.quantities or ([body.quantity] if body.quantity is not None else [])
     result = swap_to_outside_food(
         user_id=user_id,
         meal_date=body.date,
         meal_slot=body.meal_slot,
-        recipe_code=body.recipe_code,
-        quantity=body.quantity,
+        recipe_codes=recipe_codes,
+        quantities=quantities,
         original_recipe_codes=body.original_recipe_codes,
     )
     if not result.possible and result.reason == "weekly_limit_reached":

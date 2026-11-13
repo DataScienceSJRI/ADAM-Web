@@ -1,8 +1,9 @@
 import logging
+import uuid
 from datetime import date
 
 from core.supabase import get_supabase
-from models.schemas import MealSlot, OutsideFoodDish, OutsideFoodSwapResponse, SLOT_TO_TIMINGS
+from models.schemas import MealSlot, OutsideFoodDish, OutsideFoodSwapResponse, RecipeWithQty, SLOT_TO_TIMINGS
 from services.profile_builder import build_profile
 from services.recommendation_writer import get_plan_status
 from services.replacement import (
@@ -28,14 +29,20 @@ def _current_plan_week(user_id: str) -> dict | None:
 
 
 def _week_outside_count(sb, user_id: str, week_start_date: str) -> int:
-    resp = (
+    """Count MEALS swapped this week, not individual dishes -- a meal with
+    several dishes (e.g. naan + paneer curry) shares one swap_group_id and
+    counts once. Legacy rows written before swap_group_id existed have no
+    group id, so each counts on its own (matches the one-dish-per-call
+    behaviour they were actually logged under)."""
+    rows = (
         sb.table("OutsideFoodLog")
-        .select("id", count="exact")
+        .select("id, swap_group_id")
         .eq("user_id", user_id)
         .eq("week_start_date", week_start_date)
         .execute()
-    )
-    return resp.count or 0
+        .data
+    ) or []
+    return len({r.get("swap_group_id") or f"row:{r['id']}" for r in rows})
 
 
 def list_cuisine_types() -> list[str]:
@@ -90,20 +97,32 @@ def swap_to_outside_food(
     user_id: str,
     meal_date: str,
     meal_slot: MealSlot,
-    recipe_code: str,
-    quantity: float,
+    recipe_codes: list[str],
+    quantities: list[float],
     original_recipe_codes: list[str] | None = None,
 ) -> OutsideFoodSwapResponse:
+    """
+    Swap a plan slot to an outside-food meal. recipe_codes/quantities list
+    EVERY dish eaten as part of this one meal (e.g. naan + paneer curry) --
+    they're written and GL/energy-summed individually, but all count as a
+    SINGLE change against the participant's weekly limit, since the person
+    only ate one meal out.
+    """
     sb = get_supabase()
+    if not recipe_codes or len(recipe_codes) != len(quantities):
+        return OutsideFoodSwapResponse(possible=False, reason="not_an_outside_food", week_count=0)
 
-    allowed = sb.table("cuisine_dishes").select("recipe_code, recipe_name").eq("recipe_code", recipe_code).execute().data
-    if not allowed:
+    allowed_rows = (
+        sb.table("cuisine_dishes").select("recipe_code, recipe_name").in_("recipe_code", recipe_codes).execute().data
+    ) or []
+    allowed_codes = {str(r["recipe_code"]) for r in allowed_rows if r.get("recipe_code")}
+    if not allowed_codes.issuperset(recipe_codes):
         return OutsideFoodSwapResponse(possible=False, reason="not_an_outside_food", week_count=0)
 
     profile = build_profile(user_id)
     diet_type = (profile.get("diet_type") if profile else None) or ""
     diet_allowed = _fetch_diet_allowed_codes(sb, diet_type)
-    if diet_allowed is not None and recipe_code.strip().upper() not in diet_allowed:
+    if diet_allowed is not None and not diet_allowed.issuperset(rc.strip().upper() for rc in recipe_codes):
         return OutsideFoodSwapResponse(possible=False, reason="not_diet_compatible", week_count=0)
 
     plan_week = _current_plan_week(user_id)
@@ -143,36 +162,57 @@ def swap_to_outside_food(
     recipe_resp = (
         sb.table("Recipe")
         .select("Recipe_Code, Recipe_Name, Recipe_Category, Carbohydrate_g, TotalDietaryFibre_FIBTG_g, Energy_ENERC_KJ")
-        .eq("Recipe_Code", recipe_code)
+        .in_("Recipe_Code", recipe_codes)
         .execute()
     )
-    recipe_rows = recipe_resp.data or []
-    if not recipe_rows:
+    recipe_row_map = {str(r["Recipe_Code"]): r for r in (recipe_resp.data or [])}
+    if not recipe_row_map.keys() >= set(recipe_codes):
         return OutsideFoodSwapResponse(possible=False, reason="recipe_not_found", week_count=week_count_so_far)
-    recipe_row = recipe_rows[0]
 
     tag_resp = (
         sb.table("RecipeTagging")
         .select("Recipe_Code, Description, \"Portion weight (g)\"")
-        .eq("Recipe_Code", recipe_code)
+        .in_("Recipe_Code", recipe_codes)
         .execute()
     )
-    tag_row = (tag_resp.data or [{}])[0]
-    unit = str(tag_row.get("Description") or "serving").strip() or "serving"
-    portion_weight = tag_row.get("Portion weight (g)")
+    unit_map = {
+        str(r["Recipe_Code"]): str(r.get("Description") or "serving").strip() or "serving"
+        for r in (tag_resp.data or [])
+    }
+    portion_weight_map = {str(r["Recipe_Code"]): r.get("Portion weight (g)") for r in (tag_resp.data or [])}
 
-    portion_map = _fetch_portion_map(sb, [recipe_code])
-    portion = portion_map.get(recipe_code)
-    proportion = (quantity / portion) if portion and portion > 0 else quantity
+    portion_map = _fetch_portion_map(sb, recipe_codes)
+    gl_map = _compute_gl_map(sb, list(recipe_row_map.values()))
 
-    gl_map = _compute_gl_map(sb, [recipe_row])
-    gl = round(gl_map.get(recipe_code, 0.0) * proportion, 2)
+    # Per-dish GL/energy/grams -- the meal's total (used for the weekly-cap
+    # notification and FinalSummary's Meal_GL) is the sum across all dishes.
+    dishes: list[dict] = []
+    for rc, qty in zip(recipe_codes, quantities):
+        recipe_row = recipe_row_map[rc]
+        portion = portion_map.get(rc)
+        proportion = (qty / portion) if portion and portion > 0 else qty
 
-    base_kj = float(recipe_row.get("Energy_ENERC_KJ") or 0)
-    base_kcal = (base_kj / 4.184) if base_kj > 0 else 0.0
-    energy_kcal = round(base_kcal * proportion, 1)
+        gl = round(gl_map.get(rc, 0.0) * proportion, 2)
 
-    grams = round(float(portion_weight) * proportion, 2) if portion_weight is not None else None
+        base_kj = float(recipe_row.get("Energy_ENERC_KJ") or 0)
+        base_kcal = (base_kj / 4.184) if base_kj > 0 else 0.0
+        energy_kcal = round(base_kcal * proportion, 1)
+
+        portion_weight = portion_weight_map.get(rc)
+        grams = round(float(portion_weight) * proportion, 2) if portion_weight is not None else None
+
+        dishes.append({
+            "recipe_code": rc,
+            "recipe_name": recipe_row.get("Recipe_Name"),
+            "quantity": qty,
+            "unit": unit_map.get(rc, "serving"),
+            "gl": gl,
+            "energy_kcal": energy_kcal,
+            "grams": grams,
+        })
+
+    total_gl = round(sum(d["gl"] for d in dishes), 2)
+    total_energy_kcal = round(sum(d["energy_kcal"] for d in dishes), 1)
 
     # Update Recommendation the same way a normal on-demand swap does.
     timings = SLOT_TO_TIMINGS[meal_slot]
@@ -205,19 +245,22 @@ def swap_to_outside_food(
         if pkeys_to_delete:
             sb.table("Recommendation").delete().in_("Pkey", pkeys_to_delete).execute()
 
-        sb.table("Recommendation").insert({
-            "user_id": user_id,
-            "plan_id": existing_plan_id,
-            "onboarding_id": existing_onboarding_id,
-            "WeekNo": existing_week_no,
-            "Date": meal_date,
-            "Timings": timings,
-            "Food_Name": recipe_row.get("Recipe_Name"),
-            "Food_Name_desc": recipe_code,
-            "Food_Qty": quantity,
-            "R_desc": unit,
-            "Energy_kcal": energy_kcal,
-        }).execute()
+        sb.table("Recommendation").insert([
+            {
+                "user_id": user_id,
+                "plan_id": existing_plan_id,
+                "onboarding_id": existing_onboarding_id,
+                "WeekNo": existing_week_no,
+                "Date": meal_date,
+                "Timings": timings,
+                "Food_Name": d["recipe_name"],
+                "Food_Name_desc": d["recipe_code"],
+                "Food_Qty": d["quantity"],
+                "R_desc": d["unit"],
+                "Energy_kcal": d["energy_kcal"],
+            }
+            for d in dishes
+        ]).execute()
     except Exception:
         logger.exception("Could not update Recommendation for outside-food swap, user_id=%s", user_id)
 
@@ -230,18 +273,24 @@ def swap_to_outside_food(
                     "Recipe_Code", list(replaced_set)
                 ).execute()
 
-            sb.table("FinalSummary").insert({
-                "plan_id": existing_plan_id,
-                "user_id": user_id,
-                "Date": meal_date,
-                "Meal_Time": timings,
-                "Recipe_Code": recipe_code,
-                "Recipe_Name": recipe_row.get("Recipe_Name"),
-                "Optimal_proportion": proportion,
-                "Recipe_weight_optimal_g": grams,
-                "Energy_ENERC_Kcal": energy_kcal,
-                "GL": gl,
-            }).execute()
+            sb.table("FinalSummary").insert([
+                {
+                    "plan_id": existing_plan_id,
+                    "user_id": user_id,
+                    "Date": meal_date,
+                    "Meal_Time": timings,
+                    "Recipe_Code": d["recipe_code"],
+                    "Recipe_Name": d["recipe_name"],
+                    "Optimal_proportion": (
+                        d["quantity"] / portion_map[d["recipe_code"]]
+                        if portion_map.get(d["recipe_code"]) else d["quantity"]
+                    ),
+                    "Recipe_weight_optimal_g": d["grams"],
+                    "Energy_ENERC_Kcal": d["energy_kcal"],
+                    "GL": d["gl"],
+                }
+                for d in dishes
+            ]).execute()
 
             # GL of just the recipes actually being replaced (not necessarily
             # the whole slot -- original_recipe_codes may be a partial swap
@@ -266,31 +315,39 @@ def swap_to_outside_food(
                     prop = (qty / portion) if portion and portion > 0 else qty
                     replaced_gl += replaced_gl_map.get(rc, 0.0) * prop
 
-            new_meal_gl = round((original_slot_total_gl - replaced_gl) + gl, 2)
+            new_meal_gl = round((original_slot_total_gl - replaced_gl) + total_gl, 2)
             sb.table("FinalSummary").update({"Meal_GL": new_meal_gl}).eq(
                 "user_id", user_id
             ).eq("plan_id", existing_plan_id).eq("Date", meal_date).eq("Meal_Time", timings).execute()
     except Exception:
         logger.exception("Could not update FinalSummary for outside-food swap, user_id=%s", user_id)
 
+    # One swap_group_id shared by every dish in this meal -- _week_outside_count
+    # counts distinct group ids, so a multi-dish meal (naan + paneer curry)
+    # still only costs ONE of the weekly swaps, not one per dish.
     new_week_count = week_count_so_far + 1
+    swap_group_id = str(uuid.uuid4())
     try:
-        sb.table("OutsideFoodLog").insert({
-            "user_id": user_id,
-            "recipe_code": recipe_code,
-            "recipe_name": recipe_row.get("Recipe_Name"),
-            "meal_date": meal_date,
-            "meal_slot": meal_slot.value,
-            "plan_id": existing_plan_id,
-            "week_no": existing_week_no,
-            "week_start_date": week_start_date,
-            "quantity": quantity,
-            "unit": unit,
-            "grams": grams,
-            "gl": gl,
-            "energy_kcal": energy_kcal,
-            "week_count": new_week_count,
-        }).execute()
+        sb.table("OutsideFoodLog").insert([
+            {
+                "user_id": user_id,
+                "recipe_code": d["recipe_code"],
+                "recipe_name": d["recipe_name"],
+                "meal_date": meal_date,
+                "meal_slot": meal_slot.value,
+                "plan_id": existing_plan_id,
+                "week_no": existing_week_no,
+                "week_start_date": week_start_date,
+                "quantity": d["quantity"],
+                "unit": d["unit"],
+                "grams": d["grams"],
+                "gl": d["gl"],
+                "energy_kcal": d["energy_kcal"],
+                "week_count": new_week_count,
+                "swap_group_id": swap_group_id,
+            }
+            for d in dishes
+        ]).execute()
     except Exception:
         logger.exception("Could not write OutsideFoodLog audit row for user_id=%s", user_id)
 
@@ -301,18 +358,19 @@ def swap_to_outside_food(
             plan_id=existing_plan_id,
             meal_slot=meal_slot,
             date=meal_date,
-            recipe_codes=[recipe_code],
-            actual_quantities=[str(quantity)],
+            recipe_codes=[d["recipe_code"] for d in dishes],
+            actual_quantities=[str(d["quantity"]) for d in dishes],
         )
     except Exception:
         logger.exception("Could not write DietRecall entry for outside-food swap, user_id=%s", user_id)
 
     try:
         from services.notify import notify
+        dish_names = ", ".join(d["recipe_name"] or d["recipe_code"] for d in dishes)
         notify(
             user_id=user_id,
             title="Outside food logged",
-            body=f"{recipe_row.get('Recipe_Name') or recipe_code} logged for {meal_slot.value}. "
+            body=f"{dish_names} logged for {meal_slot.value}. "
                  f"{new_week_count}/{WEEKLY_LIMIT} outside-food swaps used this week.",
             data={"type": "outside_food_logged", "week_count": new_week_count, "week_limit": WEEKLY_LIMIT},
         )
@@ -324,8 +382,18 @@ def swap_to_outside_food(
         message=f"{new_week_count}/{WEEKLY_LIMIT} outside-food swaps used this week.",
         week_count=new_week_count,
         week_limit=WEEKLY_LIMIT,
-        gl=gl,
-        energy_kcal=energy_kcal,
+        gl=total_gl,
+        energy_kcal=total_energy_kcal,
+        combination=[
+            RecipeWithQty(
+                recipe_code=d["recipe_code"],
+                recipe_name=d["recipe_name"],
+                quantity=d["quantity"],
+                unit=d["unit"],
+                gl=d["gl"],
+            )
+            for d in dishes
+        ],
     )
 
 

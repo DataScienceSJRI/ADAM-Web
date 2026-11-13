@@ -173,11 +173,16 @@ class OutsideFoodDish(BaseModel):
 class OutsideFoodSwapRequest(BaseModel):
     date: str
     meal_slot: MealSlot
-    recipe_code: str
-    quantity: float
+    recipe_code: Optional[str] = None  # back-compat: single-dish swap
+    quantity: Optional[float] = None  # back-compat: single-dish swap
+    # Whole-meal swap: every dish eaten as part of this one outside-food meal (e.g.
+    # naan + paneer curry). All of them together count as ONE change against the
+    # weekly limit -- use this instead of recipe_code/quantity for multi-dish meals.
+    recipe_codes: Optional[List[str]] = None
+    quantities: Optional[List[float]] = None
     original_recipe_codes: Optional[List[str]] = None  # recipes being replaced; if omitted, replaces the whole slot
 
-    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "lunch", "recipe_code": "A001745", "quantity": 1.0}}}
+    model_config = {"json_schema_extra": {"example": {"date": "2026-05-22", "meal_slot": "lunch", "recipe_codes": ["A001745", "A001746"], "quantities": [1.0, 1.0]}}}
 
 
 class OutsideFoodSwapResponse(BaseModel):
@@ -186,8 +191,9 @@ class OutsideFoodSwapResponse(BaseModel):
     message: Optional[str] = None  # human-readable text for the same case, safe to show to the user
     week_count: int
     week_limit: int = 5
-    gl: Optional[float] = None
-    energy_kcal: Optional[float] = None
+    gl: Optional[float] = None  # total GL across every dish in this meal
+    energy_kcal: Optional[float] = None  # total energy across every dish in this meal
+    combination: Optional[List[RecipeWithQty]] = None  # per-dish breakdown
 
 
 class RegisterTokenRequest(BaseModel):
