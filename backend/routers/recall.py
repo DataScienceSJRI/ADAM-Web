@@ -1,5 +1,5 @@
 import logging
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +33,16 @@ router = APIRouter(prefix="/recall", tags=["recall"])
 
 _MEAL_SLOT_ORDER = {"breakfast": 0, "lunch": 1, "dinner": 2, "snacks": 3}
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _reject_future_date(date_str: Optional[str]) -> None:
+    """Diet recall logs what was actually eaten, so a date after IST-today
+    isn't a valid log entry yet -- reject it rather than silently accepting
+    a meal nobody has eaten."""
+    if date_str and date_str > datetime.now(_IST).date().isoformat():
+        raise HTTPException(status_code=400, detail="Cannot log a meal for a future date.")
+
 
 def _sort_recall_rows(rows: list) -> list:
     """Newest Date first; within a date, Breakfast -> Lunch -> Dinner -> Snacks.
@@ -51,6 +61,7 @@ def recall_log(body: DietRecallLogRequest, user_id: str = Depends(get_current_us
     optionally actual_quantities) for whatever was recalled — including the
     planned recipe codes themselves, if that's what they ate; omit
     recipe_codes entirely to log the slot as skipped."""
+    _reject_future_date(body.date)
     # recipe_codes (plural) takes priority; fall back to legacy recipe_code
     codes = body.recipe_codes or ([body.recipe_code] if body.recipe_code else None)
     # actual_quantities (plural) takes priority; fall back to legacy actual_quantity
@@ -191,6 +202,7 @@ def delete_recall(recall_id: str, user_id: str = Depends(get_current_user)):
 @router.post("/image", response_model=RecallImageResponse)
 def recall_image(body: DietRecallImageRequest, user_id: str = Depends(get_current_user)):
     """Upload pre/post meal photo URLs; creates a MealImageReview row (pending)."""
+    _reject_future_date(body.date)
     recall_id, review_id = log_recall_image(
         user_id=user_id,
         plan_id=body.plan_id,
