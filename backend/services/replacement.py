@@ -2,7 +2,7 @@ import itertools
 import logging
 from typing import List, Optional
 
-from core.supabase import get_supabase
+from core.supabase import fetch_all_rows, get_supabase
 from models.schemas import MealSlot, OnDemandReplacementResponse, RecipeWithQty, ReplacementsResponse, SLOT_TO_TIMINGS
 from services.data_loader import _fetch_main_code, get_recipes_excluded_by_nonveg_types
 from services.profile_builder import build_profile
@@ -56,12 +56,14 @@ def _fetch_diet_allowed_codes(sb, diet_type: Optional[str]) -> Optional[set[str]
     if col is None or col == "Non vegetarian":
         return None
 
-    rows = (
-        sb.table("RecipeTagging")
-        .select("Recipe_Code, Vegetarian, \"Ovo-vegetarian\"")
-        .execute()
-        .data
-    ) or []
+    # RecipeTagging has ~5000 rows -- Supabase/PostgREST silently caps a plain
+    # .execute() at 1000, which was dropping ~80% of recipes from this set and
+    # wrongly treating genuinely-vegetarian/ovo-vegetarian dishes outside that
+    # slice as not allowed (symptom: only a couple of outside-food dishes ever
+    # showing up per cuisine). fetch_all_rows pages past that cap.
+    rows = fetch_all_rows(lambda: (
+        sb.table("RecipeTagging").select("Recipe_Code, Vegetarian, \"Ovo-vegetarian\"")
+    ))
 
     def _as_float(v):
         try:
