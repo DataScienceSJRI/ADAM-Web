@@ -351,26 +351,14 @@ def swap_to_outside_food(
     except Exception:
         logger.exception("Could not write OutsideFoodLog audit row for user_id=%s", user_id)
 
-    try:
-        from services.recall import log_recall
-        log_recall(
-            user_id=user_id,
-            plan_id=existing_plan_id,
-            meal_slot=meal_slot,
-            date=meal_date,
-            recipe_codes=[d["recipe_code"] for d in dishes],
-            actual_quantities=[str(d["quantity"]) for d in dishes],
-        )
-    except Exception:
-        logger.exception("Could not write DietRecall entry for outside-food swap, user_id=%s", user_id)
 
     try:
         from services.notify import notify
         dish_names = ", ".join(d["recipe_name"] or d["recipe_code"] for d in dishes)
         notify(
             user_id=user_id,
-            title="Outside food logged",
-            body=f"{dish_names} logged for {meal_slot.value}. "
+            title="Outside food added to plan",
+            body=f"{dish_names} added for {meal_slot.value}. Log it with a photo or manually to confirm. "
                  f"{new_week_count}/{WEEKLY_LIMIT} outside-food swaps used this week.",
             data={"type": "outside_food_logged", "week_count": new_week_count, "week_limit": WEEKLY_LIMIT},
         )

@@ -183,6 +183,15 @@ def _fetch_preferred_subcategory_codes(sb, user_id: str) -> Optional[set[str]]:
     return {str(r["Recipe_Code"]).strip().upper() for r in recipe_rows if r.get("Recipe_Code")}
 
 
+def _fetch_outside_food_codes(sb, recipe_codes: list[str]) -> set[str]:
+    if not recipe_codes:
+        return set()
+    rows = (
+        sb.table("cuisine_dishes").select("recipe_code").in_("recipe_code", list(recipe_codes)).execute().data
+    ) or []
+    return {str(r["recipe_code"]) for r in rows if r.get("recipe_code")}
+
+
 def _fetch_eligible_codes(sb, user_id: str) -> set[str]:
     """
     Combines all eligibility gates candidates must pass to surface as a swap
@@ -792,6 +801,7 @@ def get_preapproved_replacements(
             resolved_quantities.append(1.0)
 
     eligible_codes = _fetch_eligible_codes(sb, user_id)
+    outside_food_codes = _fetch_outside_food_codes(sb, recipe_codes)
 
     per_recipe_same_category: list[list[RecipeWithQty]] = []
     per_recipe_new_mapping: list[list[RecipeWithQty]] = []
@@ -799,6 +809,17 @@ def get_preapproved_replacements(
     any_valid = False
 
     for rc, qty in zip(recipe_codes, resolved_quantities):
+        if rc in outside_food_codes:
+            # Already an outside-food dish -- zero alternatives, no swap offered.
+            original_gl, _subcat = _resolve_original_gl(sb, rc, qty)
+            if original_gl is None:
+                continue
+            any_valid = True
+            total_original_gl += original_gl
+            per_recipe_same_category.append([])
+            per_recipe_new_mapping.append([])
+            continue
+
         original_gl, subcat, same_cat_alts = _rank_alternatives_for_recipe(sb, rc, qty, eligible_codes)
         if original_gl is None:
             continue
@@ -899,6 +920,14 @@ def request_on_demand_replacement(
     replaced_set = set(original_recipe_codes) if original_recipe_codes else {
         str(r.get("Food_Name_desc") or "") for r in all_slot_rows if r.get("Food_Name_desc")
     }
+
+    outside_food_codes = _fetch_outside_food_codes(sb, list(replaced_set))
+    if outside_food_codes:
+        logger.info(
+            "on_demand: possible=False — %s are outside-food dishes, not swappable",
+            outside_food_codes,
+        )
+        return OnDemandReplacementResponse(possible=False)
 
     # Compute target GL from the original recipes being replaced (at their current plan quantities)
     original_codes_in_plan = [
