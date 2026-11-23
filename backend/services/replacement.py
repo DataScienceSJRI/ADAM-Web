@@ -183,13 +183,28 @@ def _fetch_preferred_subcategory_codes(sb, user_id: str) -> Optional[set[str]]:
     return {str(r["Recipe_Code"]).strip().upper() for r in recipe_rows if r.get("Recipe_Code")}
 
 
-def _fetch_outside_food_codes(sb, recipe_codes: list[str]) -> set[str]:
+def _fetch_outside_food_flags(
+    sb, user_id: str, date: str, meal_slot: MealSlot, recipe_codes: list[str]
+) -> set[str]:
+    """
+    Recipe codes among the given recipe_codes that are actually stamped
+    is_outside_food=true in Recommendation for this (user_id, date, meal_slot).
+    """
     if not recipe_codes:
         return set()
+    timings = SLOT_TO_TIMINGS[meal_slot]
     rows = (
-        sb.table("cuisine_dishes").select("recipe_code").in_("recipe_code", list(recipe_codes)).execute().data
+        sb.table("Recommendation")
+        .select("Food_Name_desc, is_outside_food")
+        .eq("user_id", user_id)
+        .eq("Date", date)
+        .eq("Timings", timings)
+        .eq("is_outside_food", True)
+        .in_("Food_Name_desc", recipe_codes)
+        .execute()
+        .data
     ) or []
-    return {str(r["recipe_code"]) for r in rows if r.get("recipe_code")}
+    return {str(r["Food_Name_desc"]) for r in rows if r.get("Food_Name_desc")}
 
 
 def _fetch_eligible_codes(sb, user_id: str) -> set[str]:
@@ -324,7 +339,7 @@ def _fetch_slot_gl(sb, user_id: str, date: str, meal_slot: MealSlot) -> tuple[fl
 
     query = (
         sb.table("Recommendation")
-        .select("Pkey, Food_Name_desc, Food_Qty, plan_id, WeekNo, onboarding_id")
+        .select("Pkey, Food_Name_desc, Food_Qty, plan_id, WeekNo, onboarding_id, is_outside_food")
         .eq("user_id", user_id)
         .eq("Date", date)
         .eq("Timings", timings)
@@ -801,7 +816,7 @@ def get_preapproved_replacements(
             resolved_quantities.append(1.0)
 
     eligible_codes = _fetch_eligible_codes(sb, user_id)
-    outside_food_codes = _fetch_outside_food_codes(sb, recipe_codes)
+    outside_food_codes = _fetch_outside_food_flags(sb, user_id, date, meal_slot, recipe_codes)
 
     per_recipe_same_category: list[list[RecipeWithQty]] = []
     per_recipe_new_mapping: list[list[RecipeWithQty]] = []
@@ -921,7 +936,15 @@ def request_on_demand_replacement(
         str(r.get("Food_Name_desc") or "") for r in all_slot_rows if r.get("Food_Name_desc")
     }
 
-    outside_food_codes = _fetch_outside_food_codes(sb, list(replaced_set))
+    # Rows actually stamped is_outside_food=true (written by an outside-food
+    # swap) among those being replaced -- checking the row's own stamp, not
+    # whether its code also happens to appear in cuisine_dishes, since a code
+    # can legitimately be both a normal LP-planned dish and a listed
+    # outside-food option.
+    outside_food_codes = {
+        str(r.get("Food_Name_desc") or "") for r in all_slot_rows
+        if r.get("is_outside_food") and str(r.get("Food_Name_desc") or "") in replaced_set
+    }
     if outside_food_codes:
         logger.info(
             "on_demand: possible=False — %s are outside-food dishes, not swappable",

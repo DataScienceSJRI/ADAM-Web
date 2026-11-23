@@ -258,6 +258,7 @@ def swap_to_outside_food(
                 "Food_Qty": d["quantity"],
                 "R_desc": d["unit"],
                 "Energy_kcal": d["energy_kcal"],
+                "is_outside_food": True,
             }
             for d in dishes
         ]).execute()
