@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 import math
 
+from services.dish_roles import is_anchor
+
 
 @dataclass
 class PersonalizationConfig:
@@ -1774,6 +1776,17 @@ class ADAMPersonalizationModel:
 			# be logged in the same sitting as a one-off code.
 			return subcat in main1_to_main2_rev or subcat in main1_to_main3_rev or subcat in main1_to_optional_rev
 
+		def _role_for_host(subcat: str, host: str, fallback):
+			# The companion role a subcategory plays for ONE specific host
+			# Main, straight from the (registry + learned) combination map.
+			if subcat in main1_to_main2_rev.get(host, ()):
+				return "Main 2"
+			if subcat in main1_to_main3_rev.get(host, ()):
+				return "Main 3"
+			if subcat in main1_to_optional_rev.get(host, ()):
+				return "Optional"
+			return fallback or "Optional"
+
 		dietrecall_standalone_valid_main1: dict = {}
 		# (Meal_Time, Preferred_SubCategory_code) pairs that already have a
 		# selectable "Main" candidate -- either from the user's own
@@ -1782,6 +1795,12 @@ class ADAMPersonalizationModel:
 		# only constrain a companion subcategory that actually has one of
 		# these; otherwise it silently has nothing to anchor to.
 		existing_main_slots: set = set()
+		# (Meal_Time, Main subcategory) -> Preference_Row_IDs of the
+		# combinations anchored by that Main, so a diet-recall companion can
+		# be attached INTO its real host combination (and so be bound by the
+		# LP's per-combination pairing constraints) instead of floating in a
+		# Main-less row of its own.
+		main_slot_pref_ids: dict = {}
 		if not top_choices.empty and {"Meal_Time", "Dish_Type", "Preferred_SubCategory_code"}.issubset(top_choices.columns):
 			main_rows = top_choices[top_choices["Dish_Type"].astype(str).str.strip() == "Main"]
 			existing_main_slots = set(
@@ -1790,6 +1809,15 @@ class ADAMPersonalizationModel:
 					main_rows["Preferred_SubCategory_code"].astype(str).str.strip().str.upper(),
 				)
 			)
+			if "Preference_Row_ID" in main_rows.columns:
+				for mt_v, sc_v, pid_v in zip(
+					main_rows["Meal_Time"].astype(str).str.strip(),
+					main_rows["Preferred_SubCategory_code"].astype(str).str.strip().str.upper(),
+					main_rows["Preference_Row_ID"],
+				):
+					ids = main_slot_pref_ids.setdefault((mt_v, sc_v), [])
+					if pid_v not in ids:
+						ids.append(pid_v)
 		injected_main_slots: set = set()
 
 		existing_slots: set = set()
@@ -1852,6 +1880,14 @@ class ADAMPersonalizationModel:
 						if tag_row is not None and col is not None and col in tag_row.index and str(tag_row.get(col)).strip() != "1":
 							continue
 					if (code_u, meal_time_s, dish_type_s, pref_row_id) in existing_slots:
+						# Already a candidate in this combination -- that
+						# meal_time IS covered. Skipping the add without
+						# marking it covered made the standalone fallback
+						# below re-inject the same recipe as a lone extra
+						# (confirmed for real on A006_RAJENDRA: Chapathi,
+						# already his Lunch Main, came back as a standalone
+						# "Optional" next to Onion slices / Onion rava bhakri).
+						covered_mts.add(meal_time_s)
 						continue
 					new_row = base_row.copy()
 					new_row["Preferred_SubCategory_code"] = subcat
@@ -1886,80 +1922,89 @@ class ADAMPersonalizationModel:
 						next_pref_row_id += 1
 						continue
 
+					# Staple/carb base (services/dish_roles.py): it may only
+					# ever be the Main of a meal -- never a companion tacked onto
+					# some OTHER staple (confirmed for real on A006_RAJENDRA:
+					# Chapathi served as an "Optional" beside Onion rava bhakri).
+					# Give it its own Main candidate at this meal_time instead.
+					if is_anchor(subcat):
+						if (meal_time, subcat) in existing_main_slots or (meal_time, subcat) in injected_main_slots:
+							continue
+						new_row = base_row.copy()
+						new_row["Preferred_SubCategory_code"] = subcat
+						new_row["Dish_Type"] = "Main"
+						new_row["Meal_Time"] = meal_time
+						new_row["Preference_Row_ID"] = next_pref_row_id
+						new_rows.append(new_row)
+						injected_main_slots.add((meal_time, subcat))
+						main_slot_pref_ids.setdefault((meal_time, subcat), []).append(next_pref_row_id)
+						next_pref_row_id += 1
+						continue
+
 					default_role, default_main1s = _default_role_and_main1s(subcat)
 					real_companion_subcats = standalone_companions.get((meal_time, code_u), set())
-					# Only trust a real logged companion as a pairing
-					# anchor if it's a genuinely registered Main1 category
-					# (Main1_Main2_Mapping has a row keyed by it) -- not
-					# just any subcategory that happened to be in the same
-					# sitting. Per explicit request: we know from the
-					# registry that this is a legitimate staple only once
-					# it's registered as a Main1.
+					# Only trust a real logged companion as a pairing anchor if
+					# it's a genuinely registered Main1 category -- and, per
+					# services/dish_roles.py, only a staple/carb base can host a
+					# companion at all (a salad or sundal that happened to be
+					# logged in the same sitting is itself a companion, not a Main).
 					registered_companions = {c for c in real_companion_subcats if _is_registered_main1(c)}
-					valid_main1s = set(default_main1s) | registered_companions
+					valid_main1s = {c for c in (set(default_main1s) | registered_companions) if is_anchor(c)}
 
 					if not valid_main1s:
-						# Neither the registry nor the real diet-recall
-						# companions give this code anything legitimate to
-						# pair with -- it would only ever be selectable
-						# alone. Per explicit instruction: don't inject it
-						# standalone in that case, even though it's a real
-						# diet-recall food ("if rice is not there as an
-						# option, the other foods should not come
-						# either"). Confirmed for real on A001_MAHENDRA:
-						# "Chicken fry" (D2E) is registered Main3 for
-						# Main1 in {A1A, C1A, C1B, E2G} -- a genuine match,
-						# so it's still injected via default_role above.
+						# Nothing legitimate to pair with -- don't inject it alone
+						# ("if rice is not there as an option, the other foods
+						# should not come either").
 						continue
 
-					dish_type = default_role or "Optional"
-
-					# The mandate below can only constrain a companion
-					# subcategory that has a selectable "Main" candidate
-					# for this exact meal_time. Confirmed missing for real
-					# on A008_NAGABHUSHA: "Tomato rasam" (F2C) was really
-					# logged with rice (E2A) at Lunch, but he only ever
-					# declared E2A as a Dinner preference -- no Lunch/Main
-					# E2A candidate existed anywhere, so the same-day
-					# mandate had nothing to anchor to and silently did
-					# nothing. Inject the companion itself as a fresh Main
-					# candidate, from the same personalization-scored pool
-					# everything else is drawn from, when nothing already
-					# covers it.
-					has_anchor = any((meal_time, c) in existing_main_slots or (meal_time, c) in injected_main_slots for c in valid_main1s)
-					if not has_anchor:
-						for companion_subcat in valid_main1s:
-							companion_recipes = scored[scored["Recipe_Category"].astype(str).str.strip().str.upper() == companion_subcat]
-							if companion_recipes.empty:
+					# Attach the companion INTO each real host combination
+					# (same Preference_Row_ID as that Main), in the role the
+					# registry gives it for that specific Main. It is then bound by
+					# the LP's ordinary per-combination pairing constraints: it can
+					# only be served together with its own Main, never as a
+					# free-floating extra in a Main-less row.
+					host_ids = [
+						(host, pid)
+						for host in sorted(valid_main1s)
+						for pid in main_slot_pref_ids.get((meal_time, host), [])
+					]
+					if not host_ids:
+						# No Main of a valid host subcategory exists at this
+						# meal_time yet (confirmed for real on A008_NAGABHUSHA:
+						# "Tomato rasam" logged with rice at Lunch, but E2A was only
+						# ever declared for Dinner) -- inject one host Main from the
+						# same personalization-scored pool, then attach to it.
+						for host_subcat in sorted(valid_main1s):
+							host_recipes = scored[scored["Recipe_Category"].astype(str).str.strip().str.upper() == host_subcat]
+							if host_recipes.empty:
 								continue
-							companion_row = companion_recipes.iloc[0].copy()
-							companion_row["Preferred_SubCategory_code"] = companion_subcat
-							companion_row["Dish_Type"] = "Main"
-							companion_row["Meal_Time"] = meal_time
-							companion_row["Preference_Row_ID"] = next_pref_row_id
-							new_rows.append(companion_row)
-							injected_main_slots.add((meal_time, companion_subcat))
+							host_row = host_recipes.iloc[0].copy()
+							host_row["Preferred_SubCategory_code"] = host_subcat
+							host_row["Dish_Type"] = "Main"
+							host_row["Meal_Time"] = meal_time
+							host_row["Preference_Row_ID"] = next_pref_row_id
+							new_rows.append(host_row)
+							injected_main_slots.add((meal_time, host_subcat))
+							main_slot_pref_ids.setdefault((meal_time, host_subcat), []).append(next_pref_row_id)
+							host_ids.append((host_subcat, next_pref_row_id))
 							next_pref_row_id += 1
-							has_anchor = True
-							break  # one real anchor is enough for the mandate to bite
-					if not has_anchor:
-						# None of the registered companions have any
-						# matching recipe left in the scored pool (e.g.
-						# filtered out by diet type) -- same "nothing
-						# legitimate to pair with" case as above.
+							break
+					if not host_ids:
 						continue
 
-					if (code_u, meal_time, dish_type, next_pref_row_id) in existing_slots:
-						continue
-					new_row = base_row.copy()
-					new_row["Preferred_SubCategory_code"] = subcat
-					new_row["Dish_Type"] = dish_type
-					new_row["Meal_Time"] = meal_time
-					new_row["Preference_Row_ID"] = next_pref_row_id
-					new_rows.append(new_row)
+					for host_subcat, host_pid in host_ids:
+						role = _role_for_host(subcat, host_subcat, default_role)
+						if (code_u, meal_time, role, host_pid) in existing_slots:
+							continue
+						new_row = base_row.copy()
+						new_row["Preferred_SubCategory_code"] = subcat
+						new_row["Dish_Type"] = role
+						new_row["Meal_Time"] = meal_time
+						new_row["Preference_Row_ID"] = host_pid
+						new_rows.append(new_row)
+						existing_slots.add((code_u, meal_time, role, host_pid))
 
 					dietrecall_standalone_valid_main1[(meal_time, code_u)] = valid_main1s
-					next_pref_row_id += 1
 				continue  # fully handled above for a diet-recall-sourced code
 
 			if tag_row is None:

@@ -50,6 +50,7 @@ import logging
 from datetime import date, timedelta
 
 from core.supabase import get_supabase, fetch_all_rows
+from services.dish_roles import is_anchor
 
 logger = logging.getLogger("backend.services.adaptive_preferences")
 
@@ -231,8 +232,18 @@ class _UserRecallContext:
         for meal_time, by_day in self.all_codes_by_day.items():
             main_codes_here = self.effective_main_codes.get(meal_time, self.main1_codes)
             for d_parsed, codes_that_day in by_day.items():
+                # A day with a staple/carb base (services/dish_roles.py) only
+                # counts the staple as that day's Main -- salad/sundal/chaat
+                # eaten alongside rice is a side, not evidence of a new Main.
+                # Confirmed for real on A008_NAGABHUSHA: Salad (G2A, "eaten
+                # on 17 distinct days", nearly all with rice) got promoted to
+                # a Dinner Main and produced "Sweet corn + sambar + buttermilk"
+                # dinners with no carb at all.
+                has_anchor_today = any(is_anchor(c) for c in codes_that_day)
                 for code in codes_that_day:
                     if code not in main_codes_here:
+                        continue
+                    if has_anchor_today and not is_anchor(code):
                         continue
                     self.eaten.setdefault(meal_time, {}).setdefault(code, []).append(d_parsed)
 
@@ -532,6 +543,17 @@ def compute_adaptive_main_combinations(user_id: str) -> list[dict]:
         main_codes_here = ctx.effective_main_codes.get(meal_time, ctx.main1_codes)
         for codes_that_day in by_day.values():
             mains_today = codes_that_day & main_codes_here
+            # On a day that has a staple/carb base (services/dish_roles.py),
+            # only the staple is the Main -- a salad/sundal/sweetcorn eaten
+            # alongside chapathi is a companion, not a co-equal Main.
+            # Confirmed for real on A006_RAJENDRA: his everyday "Chapathi +
+            # salad + sabzi + dal" lunch was teaching Salad (G2A) the same
+            # companions as Chapathi (G2A->D2A x24, G2A->F2A x16,
+            # G2A->D1B x3), so a carb-less "Sweet corn + curry" lunch looked
+            # like a learned pattern.
+            anchor_mains_today = {c for c in mains_today if is_anchor(c)}
+            if anchor_mains_today:
+                mains_today = anchor_mains_today
             companions_today = codes_that_day - mains_today
             for main_code in mains_today:
                 for companion_code in companions_today:

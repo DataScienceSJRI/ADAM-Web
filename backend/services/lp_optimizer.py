@@ -114,6 +114,23 @@ def run_lp(
         if candidates.empty:
             return pd.DataFrame(), {"status": "no_candidates"}
 
+    # Dish-role classification (services/dish_roles.py): staples/carb bases
+    # are Main-only, everything else is a companion (Main 2/Main 3/
+    # Optional) whenever a staple Main is available for that meal_time.
+    # Applied here, the single choke point every candidate passes through,
+    # so no upstream injection path (declared preferences, adaptive
+    # promotions, diet-recall standalone injection) can slip a staple in as
+    # an "extra" or let a salad/sweetcorn win the Main slot.
+    from services.dish_roles import enforce_dish_roles
+    candidates, _role_stats = enforce_dish_roles(
+        candidates, recall_pairs=(ds or {}).get("dietrecall_logged_pairs")
+    )
+    candidates = candidates.reset_index(drop=True)
+    if any(v for k, v in _role_stats.items() if isinstance(v, int)):
+        logger.info("Dish-role enforcement: %s", _role_stats)
+    if candidates.empty:
+        return pd.DataFrame(), {"status": "no_candidates"}
+
     candidates["Main_Category_code"] = (
         candidates.get("MainCategoryCode", candidates.get("Code_cooccurence", ""))
         .astype(str)
@@ -637,7 +654,7 @@ def run_lp(
                 mains = group[group["Dish_Type"].astype(str).str.strip() == "Main"].index.tolist()
                 mains2 = group[group["Dish_Type"].astype(str).str.strip() == "Main 2"].index.tolist()
                 mains3 = group[group["Dish_Type"].astype(str).str.strip() == "Main 3"].index.tolist()
-                sides = group[group["Dish_Type"].astype(str).str.strip().str.lower() == "Optional"].index.tolist()
+                sides = group[group["Dish_Type"].astype(str).str.strip().str.lower() == "optional"].index.tolist()
 
                 if mains and mains2:
                     model += lpSum(y[(d, i)] for i in mains) == lpSum(y[(d, j)] for j in mains2)
