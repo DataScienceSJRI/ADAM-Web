@@ -5,7 +5,7 @@ import {
   X, RefreshCw, Check, Loader2, AlertTriangle,
   ExternalLink, ChevronLeft, ChevronRight, Search, Plus, Trash2,
 } from "lucide-react";
-import { formatIST } from "@/lib/utils";
+import { formatIST, resizedImageUrl } from "@/lib/utils";
 import { invalidateReviews } from "@/lib/use-reviews";
 
 const PROCESSING = "__processing__";
@@ -859,9 +859,9 @@ export function ImageReviewModal({
                 <div key={label}>
                   <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-widest mb-1.5">{label}</p>
                   {url ? (
-                    <a href={url} target="_blank" rel="noopener noreferrer" className="group relative block">
+                    <a href={resizedImageUrl(url, 1600, 80) ?? url} target="_blank" rel="noopener noreferrer" className="group relative block">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img src={url} alt={label}
+                      <img src={resizedImageUrl(url, 400) ?? url} alt={label}
                         className="w-full rounded-xl border object-cover group-hover:opacity-90 transition-opacity"
                         style={{ maxHeight: 200 }} />
                       <span className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 bg-black/60 rounded-md p-1 transition-opacity">

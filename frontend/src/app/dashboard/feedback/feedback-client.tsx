@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { AlertTriangle, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 import { ImageReviewModal, type MealImageReview } from "@/components/image-review-modal";
-import { formatIST } from "@/lib/utils";
+import { formatIST, resizedImageUrl } from "@/lib/utils";
 import {
   useReviews,
   useReviewsSummary,
@@ -741,7 +741,7 @@ export function FeedbackClient({
                                       <span className="text-[9px] text-muted-foreground uppercase tracking-wide">Pre</span>
                                       {g.pre?.pre_image_id ? (
                                         // eslint-disable-next-line @next/next/no-img-element
-                                        <img src={g.pre.pre_image_id} alt="pre" className="w-10 h-10 object-cover rounded-md border" />
+                                        <img src={resizedImageUrl(g.pre.pre_image_id, 96) ?? undefined} alt="pre" className="w-10 h-10 object-cover rounded-md border" />
                                       ) : (
                                         <div className="w-10 h-10 rounded-md border border-dashed flex items-center justify-center" title="No pre-meal image">
                                           <AlertTriangle className="h-3.5 w-3.5 text-primary" />
@@ -752,7 +752,7 @@ export function FeedbackClient({
                                       <span className="text-[9px] text-muted-foreground uppercase tracking-wide">Post</span>
                                       {g.post?.post_image_id ? (
                                         // eslint-disable-next-line @next/next/no-img-element
-                                        <img src={g.post.post_image_id} alt="post" className="w-10 h-10 object-cover rounded-md border" />
+                                        <img src={resizedImageUrl(g.post.post_image_id, 96) ?? undefined} alt="post" className="w-10 h-10 object-cover rounded-md border" />
                                       ) : (
                                         <div className="w-10 h-10 rounded-md border border-dashed flex items-center justify-center" title="No post-meal image">
                                           <AlertTriangle className="h-3.5 w-3.5 text-primary" />
