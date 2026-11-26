@@ -4,7 +4,7 @@ import math
 import pandas as pd
 from datetime import date, timedelta
 from typing import Optional
-from core.supabase import get_supabase
+from core.supabase import get_supabase, fetch_all_rows
 
 logger = logging.getLogger("backend.recommendation_writer")
 
@@ -141,15 +141,22 @@ def write_recommendations(
 
 
 def get_plan_status(user_id: str) -> dict:
-    """Returns whether a plan exists and a list of all plans with their metadata."""
+    """Returns whether a plan exists and a list of all plans with their metadata.
+
+    Paginated via fetch_all_rows -- a plain .execute() silently truncates at
+    Supabase's 1000-row response cap, and any participant's full
+    Recommendation history (every week ever written, nothing is pruned)
+    crosses that after ~14-15 weeks at ~70 rows/week. Confirmed for real on
+    A001_MAHENDRA (1097 rows) and A003_ANISH (1037 rows): their newest
+    plan_id fell entirely outside the untruncated page, so this function was
+    reporting a stale, already-superseded week as "current" -- A004_RAJAT
+    (1014 rows) was about to hit the same wall."""
     supabase = get_supabase()
-    resp = (
+    data = fetch_all_rows(lambda: (
         supabase.table("Recommendation")
         .select("plan_id, onboarding_id, WeekNo, Date")
         .eq("user_id", user_id)
-        .execute()
-    )
-    data = resp.data or []
+    ))
 
     plans: dict[str, dict] = {}
     for r in data:
